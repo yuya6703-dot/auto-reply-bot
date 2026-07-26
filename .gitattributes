@@ -1,0 +1,13 @@
+# 既定はGitの内部でLFに正規化する（Pythonソース・YAMLなど）
+* text=auto
+
+# Windowsのバッチ/PowerShellは取り出す際に必ずCRLFにする。
+# 起動.bat はShift-JIS(CP932)で保存されているが、
+# Shift-JISの2バイト目に0x0A/0x0Dが現れることはないため、改行変換で壊れることはない。
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 生成物・バイナリは変換しない
+*.exe binary
+*.db binary
+*.zip binary

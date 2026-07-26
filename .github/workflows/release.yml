@@ -1,0 +1,80 @@
+name: Build and Release
+
+# "v1.0.0" のようなタグをpushすると自動実行される
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# GitHub Releaseを作成するために書き込み権限が必要
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    # このリポジトリはソース一式が files/ 配下にあるため、
+    # コマンド実行の基準ディレクトリをそこに合わせる。
+    # （actions/checkout や release作成のパス指定はリポジトリルート基準のままなので注意）
+    defaults:
+      run:
+        working-directory: files
+
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Pythonをセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 依存パッケージをインストール
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # ⚠️ 重要: 手元のビルドと同じspecファイルを使う。
+      # 以前はここでオプションを直接書いており、exe名が "auto_reply_app" になっていた。
+      # アプリの自動更新は「今動いているexeと同じ名前のexe」をzip内から探すため、
+      # 配布中の 自動送信ボット.exe と名前がずれると更新が必ず失敗する。
+      # specファイルを使えばCIと手元のビルド結果が食い違わない。
+      - name: exeをビルド（specファイル・onedir）
+        shell: pwsh
+        run: pyinstaller --noconfirm "自動送信ボット.spec"
+
+      - name: タグ名からバージョンを取得
+        id: get_version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          echo "VERSION=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: ビルド成果物を確認
+        shell: pwsh
+        run: |
+          Get-ChildItem "dist/自動送信ボット"
+          if (-not (Test-Path "dist/自動送信ボット/自動送信ボット.exe")) {
+            Write-Error "ビルド結果に 自動送信ボット.exe がありません。specファイルのname設定を確認してください。"
+            exit 1
+          }
+
+      # zipのファイル名はURLエンコードを避けるためASCIIのままにする。
+      # アプリ側はリリース中の「.zipで終わる添付ファイル」を探すだけなので、zip名は何でもよい。
+      - name: フォルダ一式をzip化
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/自動送信ボット/*" -DestinationPath "dist/auto_reply_app.zip"
+
+      # このステップはリポジトリルート基準で動くため、files/ を含むパスを指定する
+      - name: GitHub Releaseを作成してzipを添付
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
+          name: ${{ steps.get_version.outputs.VERSION }}
+          generate_release_notes: true
+          files: files/dist/auto_reply_app.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

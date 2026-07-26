@@ -1,0 +1,26 @@
+# PyInstallerのビルド成果物（数百MBになるためリポジトリに入れない）
+**/build/
+**/dist/
+
+# Pythonのキャッシュ
+**/__pycache__/
+*.py[cod]
+
+# ユーザーデータ・実行時に生成されるファイル
+# app_data.db には監視座標や登録済みの返信文といった利用者の情報が入るため追跡しない
+**/app_data.db
+**/app_data.db-wal
+**/app_data.db-shm
+**/error_log.txt
+**/.deps_installed
+
+# 実行ファイル・配布用アーカイブ
+*.exe
+files.zip
+
+# 環境依存
+.claude/
+.venv/
+venv/
+.vscode/
+.idea/
