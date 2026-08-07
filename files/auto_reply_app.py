@@ -58,7 +58,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.3.1"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.3.2"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -2537,7 +2537,7 @@ class AutoReplyWorker:
         self.log("🔍 [テスト] 監視範囲内から読み取れる文字を調べています...")
         try:
             xml_dump = d.dump_hierarchy(compressed=True)
-            chat_texts, _, _ = self._extract_chat_texts(xml_dump, y_min, y_max)
+            chat_texts, _, _, _ = self._extract_chat_texts(xml_dump, y_min, y_max)
 
             dumped_texts = []
             for t, _ in chat_texts:
@@ -2654,9 +2654,16 @@ class AutoReplyWorker:
                 continue
 
             left, top, right, bottom = map(int, bounds_match.groups())
-            d.click((left + right) / 2, (top + bottom) / 2)
+            cx, cy = (left + right) / 2, (top + bottom) / 2
+            blocker = self._blocking_overlay_at(nodes, cx, cy)
+            if blocker:
+                self.log(f"🛑 ダイアログのOK({int(cx)},{int(cy)})に別アプリの「{blocker}」が"
+                         "重なっています。タップを中止しました。")
+                return False
+            d.click(cx, cy)
             self._last_auto_ok_time = now
             self.log(f"✅ 「{matched_keyword}」のダイアログを検出し、OKを押して閉じました。")
+            self._check_after_action(d, f"ダイアログのOK(「{matched_keyword}」)")
             return True
 
         return False
@@ -2717,9 +2724,40 @@ class AutoReplyWorker:
             self._foreground_away = True
             self.log(f"⚠️ 監視対象のアプリが前面から外れました（今は {current}）。"
                      "この間は検知も送信も行われません。")
+            # 自動起動をONにしている場合は「対象アプリを開いてよい」と了解済みなので、
+            # そのまま戻す。OFFなら知らせるだけにとどめる。
+            if self.db is not None and self.db.get_setting("mumu_auto_launch", "0") == "1":
+                self._restore_target_app_if_left(d)
+                if self._current_package(d) == target:
+                    self._foreground_away = False
+            else:
+                self.log("💡 設定タブの「📱 エミュレータ(MuMu)」で自動起動をONにしておくと、"
+                         "外れたときに自動で戻します。")
         elif current == target and was_away:
             self._foreground_away = False
             self.log("✅ 監視対象のアプリが前面に戻りました。監視を再開します。")
+
+    def _current_package(self, d):
+        """今前面に出ているアプリのパッケージ名（取得できなければ空文字）"""
+        try:
+            return (d.app_current() or {}).get("package", "") or ""
+        except Exception:
+            return ""
+
+    def _check_after_action(self, d, description):
+        """
+        画面を操作した直後に、対象アプリから離れていないか確認して記録する。
+
+        「いつの間にか別のアプリが開いている／ホームに戻っている」という症状は、
+        どの操作が引き金かが分からないと直しようがない。
+        操作ごとに確認して、原因になった操作を名指しで残す。
+        """
+        target = self._monitor_target_package()
+        if not target:
+            return
+        current = self._current_package(d)
+        if current and current != target:
+            self.log(f"🔀 【{description}】の直後に別のアプリになりました: {current}（対象は {target}）")
 
     def _restore_target_app_if_left(self, d):
         """
@@ -2805,15 +2843,44 @@ class AutoReplyWorker:
         # 呼び出し側はこれをタップ対象の候補にするため、
         # 「全部除外されたら全ノードに戻す」緩和をここに持ち込むと、
         # ランチャーだけの画面で「設定」アイコン等を押してしまう。
-        return chat_texts, out_of_bounds_texts, app_nodes
+        # 4つ目は絞り込む前の全ノード。ランチャー等が重なっていないかを
+        # 座標で確かめるために必要（_blocking_overlay_at 参照）。
+        return chat_texts, out_of_bounds_texts, app_nodes, nodes
 
     # 入力欄とみなす最低幅（画面幅に対する割合）。
     # ⚠️ これが無いと、アイコン（幅100px前後）と入力欄（画面の大半を占める）を区別できず、
     # 「設定」「ギャラリー」などのアイコンをタップして別のアプリを開いてしまう。
     MIN_INPUT_WIDTH_RATIO = 0.3
 
-    def _find_and_tap_input(self, d, nodes, half_y):
+    def _blocking_overlay_at(self, all_nodes, x, y):
+        """
+        指定した座標に、ランチャーやステータスバーの押せる部品が重なっていないか調べる。
+        重なっていればそのラベルを返す（タップしてはいけない座標）。
+
+        ⚠️ ウィンドウの重なり順(dumpsys window)やapp_current()は当てにならないことがある。
+        実測では、GRAVITYが最前面と報告されていても実際に描画・タッチされていたのは
+        ホーム画面で、入力欄と同じ座標にランチャーの「設定」アイコンがあったため、
+        タップするたびに設定アプリが開いていた。
+        そこで「その座標に別アプリの押せる部品があるなら触らない」という
+        座標レベルの歯止めを設ける。
+        """
+        for node in all_nodes:
+            if not self._is_background_noise_node(node):
+                continue
+            if not self.re_clickable.search(node):
+                continue
+            b_match = self.re_bounds.search(node)
+            if not b_match:
+                continue
+            left, top, right, bottom = map(int, b_match.groups())
+            if left <= x <= right and top <= y <= bottom:
+                return self._node_label(node) or "(名前なし)"
+        return ""
+
+    def _find_and_tap_input(self, d, nodes, half_y, all_nodes=None):
         target_x, target_y = None, None
+        # 重なり判定には、絞り込む前の全ノードが要る（ランチャー等も見るため）
+        all_nodes = all_nodes if all_nodes is not None else nodes
 
         # ⚠️ 監視対象アプリ以外の部品は絶対に触らない。
         # 画面ダンプにはMuMuのランチャーやステータスバーも含まれており、
@@ -2867,7 +2934,15 @@ class AutoReplyWorker:
                         break
 
         if target_x and target_y:
+            blocker = self._blocking_overlay_at(all_nodes, target_x, target_y)
+            if blocker:
+                self.log(f"🛑 入力欄({int(target_x)},{int(target_y)})に別アプリの「{blocker}」が重なっています。"
+                         "押すと関係のないアプリが開くため、タップを中止しました。")
+                self.log("💡 対象アプリが実際に画面に表示されているか確認してください"
+                         "（前面と報告されていても、ホーム画面が表示されたままのことがあります）。")
+                return False
             d.click(target_x, target_y)
+            self._check_after_action(d, f"入力欄をタップ({int(target_x)},{int(target_y)})")
             return True
 
         self.log("⚠️ 入力欄が見つかりませんでした。誤って別のものをタップしないよう、何もしません。")
@@ -3012,8 +3087,15 @@ class AutoReplyWorker:
             return False
 
         label, (left, top, right, bottom) = hit
-        d.click((left + right) / 2, (top + bottom) / 2)
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        blocker = self._blocking_overlay_at(self.re_node.findall(xml), cx, cy)
+        if blocker:
+            self.log(f"🛑 送信ボタン({int(cx)},{int(cy)})に別アプリの「{blocker}」が重なっています。"
+                     "タップを中止しました。")
+            return False
+        d.click(cx, cy)
         self.log(f"👆 送信ボタン(「{label[:10]}」)をタップしました。")
+        self._check_after_action(d, f"送信ボタン「{label[:10]}」をタップ")
         return True
 
     def _send_reply(self, d, reply_message):
@@ -3040,6 +3122,7 @@ class AutoReplyWorker:
             # 空判定にすると送信できていても失敗扱いになってしまう。
             d.press("enter")
             time.sleep(0.6)
+            self._check_after_action(d, "エンターキー")
             if reply_message[:15] not in self._current_input_text(d):
                 is_sent = True
                 self.log("↩️ 送信ボタンが見つからないため、エンターキーで送信しました。")
@@ -3082,6 +3165,7 @@ class AutoReplyWorker:
         d.press("back")
         time.sleep(0.3)
         self.log("🔽 キーボードを閉じて待機状態に戻りました。")
+        self._check_after_action(d, "BACKキー")
 
     def _scroll_down(self, d, y_min, y_max, silent=False):
         # エミュレータ自動スクロールがオフの場合は一切スクロールしない（定期分・送信直後分の両方）
@@ -3111,6 +3195,8 @@ class AutoReplyWorker:
                     self.log(f"⚠️ 画面のスクロールに失敗しました（監視は継続します）: {str(e)[:80]}")
                 return
             time.sleep(0.5)
+            if not silent:
+                self._check_after_action(d, "スクロール")
 
     def _get_cooldown_settings(self):
         """クールダウン機能のオンオフと秒数をDBから取得する"""
@@ -3147,7 +3233,8 @@ class AutoReplyWorker:
         self._config_cache_time = now
         return self._config_cache
 
-    def _execute_reply(self, d, nodes, half_y, y_min_internal, y_max_internal, reply_message, failure_count, FAILURE_WARN_THRESHOLD):
+    def _execute_reply(self, d, nodes, half_y, y_min_internal, y_max_internal, reply_message,
+                       failure_count, FAILURE_WARN_THRESHOLD, all_nodes=None):
         """
         入力欄タップ〜送信〜スクロールまでを実行し、(更新後のfailure_count, 送信できたか) を返す。
 
@@ -3155,7 +3242,7 @@ class AutoReplyWorker:
         成功した行はもう返信済みとして扱い、失敗した行だけ再挑戦させる。
         """
         sent_ok = False
-        if self._find_and_tap_input(d, nodes, half_y):
+        if self._find_and_tap_input(d, nodes, half_y, all_nodes=all_nodes):
             time.sleep(1.0)
             sent_ok = self._send_reply(d, reply_message)
 
@@ -3261,7 +3348,8 @@ class AutoReplyWorker:
                 keywords_map, cooldown_enabled, cooldown_seconds = self._get_runtime_config()
 
                 xml_dump = d.dump_hierarchy(compressed=True)
-                chat_texts, out_of_bounds_texts, nodes = self._extract_chat_texts(xml_dump, y_min_internal, y_max_internal)
+                chat_texts, out_of_bounds_texts, nodes, all_nodes = self._extract_chat_texts(
+                    xml_dump, y_min_internal, y_max_internal)
 
                 # ダイアログはチャットを覆い隠すので、検知より先に片付ける。
                 # 押したら画面が変わるため、次の周回で取り直す。
@@ -3302,7 +3390,7 @@ class AutoReplyWorker:
                         failure_count, sent_ok = self._execute_reply(
                             d, nodes, half_y,
                             y_min_internal, y_max_internal, reply_message,
-                            failure_count, FAILURE_WARN_THRESHOLD
+                            failure_count, FAILURE_WARN_THRESHOLD, all_nodes=all_nodes
                         )
                         if sent_ok:
                             self._remember_replied(replied_logs, latest_log)
@@ -3362,7 +3450,8 @@ class AutoReplyWorker:
                         else:
                             failure_count, sent_ok = self._execute_reply(
                                 d, nodes, half_y, y_min_internal, y_max_internal,
-                                reply_message, failure_count, FAILURE_WARN_THRESHOLD
+                                reply_message, failure_count, FAILURE_WARN_THRESHOLD,
+                                all_nodes=all_nodes
                             )
                             if sent_ok:
                                 self._remember_replied(replied_logs, latest_log)
