@@ -31,6 +31,9 @@ import difflib
 import socket
 import secrets
 import http.server
+# 画面ダンプを「木」として読むために使う。正規表現ではノードが平らに潰れて
+# 親子関係が失われるため、「目印とボタンが同じダイアログの中にあるか」を判定できない。
+import xml.etree.ElementTree as ET
 
 try:
     import winsound  # Windows標準ライブラリ。アラーム音の再生に使用（Windows以外では利用不可）
@@ -58,7 +61,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.3.2"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.3.3"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -200,6 +203,26 @@ DEFAULT_AUTO_OK_KEYWORDS = "当選者,選ばれました"
 
 # 押す対象にするボタンの文言。完全一致で探す。
 AUTO_OK_BUTTON_LABELS = ("OK", "ok", "Ok", "はい", "確認", "確認する", "閉じる", "とじる")
+
+# bounds属性の中身 "[左,上][右,下]" を読むための式（属性値そのものに当てる）
+RE_BOUNDS_VALUE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+# ⚠️ MuMuは画面を4枚（mumuscreen000〜003）同時に動かしており、
+# アプリごとに別のディスプレイへ表示されることがある。実測(2026-08-08):
+#   ディスプレイ0 = ホーム画面(app.lawnchair) ※入力フォーカスを持つ
+#   ディスプレイ2 = GRAVITYの音声ルーム
+#   ディスプレイ3 = 設定アプリ
+# 画面ダンプ(dump_hierarchy)は全ディスプレイをまとめて返すので読み取りはできるが、
+# uiautomator2の click/press/swipe は既定のディスプレイ0にしか届かない。
+# そのため対象アプリを操作したつもりでホーム画面を触ってしまい、
+# 「設定アプリが開く」「ホーム画面に切り替わる」が起きていた。
+# 各ノードの display-id を見て対象アプリのディスプレイを特定し、
+# 入力は `input -d <番号>` でそのディスプレイへ送ること。
+RE_DISPLAY_ID = re.compile(r'display-id="(\d+)"')
+
+# Androidのキーコード（input keyevent に渡す番号）
+ANDROID_KEYCODE_BACK = 4
+ANDROID_KEYCODE_ENTER = 66
 
 # 同じダイアログを連打しないための最短間隔（秒）
 AUTO_OK_MIN_INTERVAL_SECONDS = 2.0
@@ -2286,6 +2309,11 @@ class AutoReplyWorker:
         self._last_foreground_check = 0
         # クリップボード貼り付けが使える端末か。一度失敗したらFalseにして以降は試さない
         self._clipboard_paste_available = True
+        # 対象アプリが表示されているディスプレイ番号（MuMuは画面を複数持つ）。
+        # ⚠️ このワーカーは起動から終了まで使い回されるので、監視を始めるたびに
+        # 消しておくこと。前回の番号が残っていると、対象アプリがまだ表示されて
+        # いない間、別の画面のつもりで読み書きしてしまう。
+        self._target_display = None
 
         self.re_node = re.compile(r'<node\s+([^>]+)>')
         self.re_text = re.compile(r'text="([^"]+)"')
@@ -2537,6 +2565,10 @@ class AutoReplyWorker:
         self.log("🔍 [テスト] 監視範囲内から読み取れる文字を調べています...")
         try:
             xml_dump = d.dump_hierarchy(compressed=True)
+            # 監視ループより先に、対象アプリがどの画面に出ているかを確定させる。
+            # ここで決めておかないと、この最初の一覧に別画面の
+            # ランチャーのアイコン名が混ざって「何を見ているか」が分からなくなる。
+            self._update_target_display(xml_dump)
             chat_texts, _, _, _ = self._extract_chat_texts(xml_dump, y_min, y_max)
 
             dumped_texts = []
@@ -2613,15 +2645,119 @@ class AutoReplyWorker:
         raw = self.db.get_setting("auto_ok_keywords", DEFAULT_AUTO_OK_KEYWORDS) if self.db else ""
         return [k.strip() for k in (raw or DEFAULT_AUTO_OK_KEYWORDS).split(",") if k.strip()]
 
-    def _auto_dismiss_dialog(self, d, nodes):
+    # ダイアログとみなす入れ物の、画面に対する最大の面積比。
+    # 本物のダイアログは画面の一部にとどまる。目印とボタンをくくる入れ物が
+    # 画面まるごとなら、それは「同じダイアログの中」ではなく単に同じ画面にあるだけ。
+    AUTO_OK_MAX_DIALOG_AREA_RATIO = 0.6
+
+    def _element_label(self, el):
+        """ElementTreeの要素の表示文字（text と content-desc）"""
+        return ((el.get("text") or "") + (el.get("content-desc") or "")).strip()
+
+    def _element_bounds(self, el):
+        """bounds属性 "[l,t][r,b]" を (l, t, r, b) にする。読めなければNone"""
+        m = RE_BOUNDS_VALUE.match(el.get("bounds") or "")
+        return tuple(map(int, m.groups())) if m else None
+
+    def _find_dialog_ok_button(self, xml_dump, keywords):
+        """
+        目印とOKボタンが「同じダイアログの中」にある場合だけ、押す座標を返す。
+        戻り値: (目印, ボタンのラベル, (x, y)) / 該当なしならNone
+
+        ⚠️ 目印が画面のどこかにあるだけで押してはいけない。
+        監視しているのはチャット画面であり、抽選機などが「当選者は…」という
+        文章を本文として流す。本文と、画面のどこかにあるボタンを結び付けて押すと、
+        ダイアログでも何でもないものを押してしまう。
+        目印とボタンが同じ入れ物（ダイアログ）に入っていることまで確かめる。
+
+        判定には木構造が要る。正規表現でノードを平らに集めると親子関係が失われ、
+        「同じダイアログか」は原理的に判定できない。
+        """
+        # 目印がダンプのどこにも無いなら、木に組み立てるまでもない。
+        # この関数は監視ループ（毎秒3回ほど）から呼ばれるので、
+        # 何も起きていない平常時にXMLを解析し直さないようにする。
+        # XMLはエスケープされているため、生の形と両方で見る。
+        if not any(k in xml_dump or html.escape(k) in xml_dump for k in keywords):
+            return None
+
+        try:
+            root = ET.fromstring(xml_dump)
+        except Exception:
+            return None      # 画面ダンプが読めないときは押さない（安全側）
+
+        # 画面の大きさは、ダンプの最上位ノード（＝各ウィンドウ）の一番大きいものから求める。
+        # d.window_size()に頼ると、取得に失敗した時に大きさの判定ごと消えてしまい、
+        # 「画面まるごと＝ダイアログではない」の歯止めが効かなくなる。
+        screen_area = 0
+        for window in root:
+            box = self._element_bounds(window)
+            if box:
+                left, top, right, bottom = box
+                screen_area = max(screen_area, max(0, right - left) * max(0, bottom - top))
+        if not screen_area:
+            return None      # 大きさが分からなければ判定できない（安全側）
+
+        parents = {child: parent for parent in root.iter() for child in parent}
+
+        def ancestors(el):
+            """自分自身から根までを、近い順に並べて返す"""
+            chain = [el]
+            while el in parents:
+                el = parents[el]
+                chain.append(el)
+            return chain
+
+        target = self._monitor_target_package()
+        display = getattr(self, "_target_display", None)
+        markers, buttons = [], []
+        for el in root.iter("node"):
+            if target and el.get("package") != target:
+                continue      # 対象アプリ以外（ランチャー等）は最初から相手にしない
+            if display is not None and el.get("display-id") not in (display, None):
+                continue      # 別のディスプレイに出ている同名アプリは触らない
+            label = self._element_label(el)
+            if not label:
+                continue
+            matched = next((k for k in keywords if k in label), None)
+            if matched:
+                markers.append((matched, el))
+            if el.get("clickable") == "true" and label in AUTO_OK_BUTTON_LABELS:
+                buttons.append((label, el))
+
+        if not markers or not buttons:
+            return None
+
+        for matched_keyword, marker_el in markers:
+            marker_chain = set(ancestors(marker_el))
+            for label, button_el in buttons:
+                # 目印とボタンを最初にくくる入れ物 ＝ 最も近い共通の親
+                container = next((a for a in ancestors(button_el) if a in marker_chain), None)
+                if container is None:
+                    continue
+                box = self._element_bounds(container)
+                if not box:
+                    continue
+                left, top, right, bottom = box
+                area = max(0, right - left) * max(0, bottom - top)
+                if area > screen_area * self.AUTO_OK_MAX_DIALOG_AREA_RATIO:
+                    continue      # 入れ物が画面まるごと ＝ ダイアログではない
+                b_box = self._element_bounds(button_el)
+                if not b_box:
+                    continue
+                bl, bt, br, bb = b_box
+                return matched_keyword, label, ((bl + br) / 2, (bt + bb) / 2)
+
+        return None
+
+    def _auto_dismiss_dialog(self, d, all_nodes, xml_dump):
         """
         目印を含むダイアログが出ていたら、OKボタンを押して閉じる。
         戻り値: 押したらTrue（呼び出し側は画面を取り直すこと）
 
         ⚠️ 「OK」ボタンを見つけたら押す、という作りにしてはいけない。
         購入確認・規約同意・権限許可など、押してはいけないダイアログにもOKはあり、
-        誤爆すると取り返しがつかない。必ず目印（既定では「当選者」「選ばれました」）が
-        同じ画面にあることを確かめてから押す。
+        誤爆すると取り返しがつかない。目印（既定では「当選者」「選ばれました」）が
+        そのボタンと同じダイアログの中にあることまで確かめてから押す。
         """
         if not self.db or self.db.get_setting("auto_ok_enabled", "0") != "1":
             return False
@@ -2635,38 +2771,26 @@ class AutoReplyWorker:
         if not keywords:
             return False
 
-        app_nodes = [n for n in nodes if not self._is_background_noise_node(n)]
-        labels = [self._node_label(n) for n in app_nodes]
+        found = self._find_dialog_ok_button(xml_dump, keywords)
+        if not found:
+            return False
+        matched_keyword, label, (cx, cy) = found
 
-        matched_keyword = next(
-            (k for k in keywords if any(k in label for label in labels)), None
-        )
-        if not matched_keyword:
-            return False      # 目印が無いので、このダイアログには触らない
-
-        for node in app_nodes:
-            if not self.re_clickable.search(node):
-                continue
-            bounds_match = self.re_bounds.search(node)
-            if not bounds_match:
-                continue
-            if self._node_label(node) not in AUTO_OK_BUTTON_LABELS:
-                continue
-
-            left, top, right, bottom = map(int, bounds_match.groups())
-            cx, cy = (left + right) / 2, (top + bottom) / 2
-            blocker = self._blocking_overlay_at(nodes, cx, cy)
-            if blocker:
-                self.log(f"🛑 ダイアログのOK({int(cx)},{int(cy)})に別アプリの「{blocker}」が"
-                         "重なっています。タップを中止しました。")
-                return False
-            d.click(cx, cy)
-            self._last_auto_ok_time = now
-            self.log(f"✅ 「{matched_keyword}」のダイアログを検出し、OKを押して閉じました。")
-            self._check_after_action(d, f"ダイアログのOK(「{matched_keyword}」)")
-            return True
-
-        return False
+        # ⚠️ 渡すのは絞り込む前の all_nodes。
+        # 対象アプリだけに絞ったノードを渡すと、_blocking_overlay_at が見るのは
+        # 「対象アプリ以外の押せる部品」なので該当が1件も無く、判定が素通りになる。
+        blocker = self._blocking_overlay_at(all_nodes, cx, cy)
+        if blocker:
+            self.log(f"🛑 ダイアログの「{label}」({int(cx)},{int(cy)})に別アプリの「{blocker}」が"
+                     "重なっています。タップを中止しました。")
+            return False
+        if not self._tap(d, cx, cy):
+            return False      # 押せていないので「閉じた」と扱わない
+        self._last_auto_ok_time = now
+        self.log(f"✅ 「{matched_keyword}」のダイアログを検出し、"
+                 f"「{label}」({int(cx)},{int(cy)})を押して閉じました。")
+        self._check_after_action(d, f"ダイアログの「{label}」(目印「{matched_keyword}」)")
+        return True
 
     def _is_background_noise_node(self, node):
         """
@@ -2712,30 +2836,26 @@ class AutoReplyWorker:
             return
         self._last_foreground_check = now
 
-        try:
-            current = (d.app_current() or {}).get("package", "")
-        except Exception:
-            return
-        if not current:
-            return
+        # 複数画面があるため、前面判定ではなく「どこかの画面に出ているか」で見る
+        shown, other = self._target_still_shown(d)
 
         was_away = getattr(self, "_foreground_away", False)
-        if current != target and not was_away:
+        if not shown and not was_away:
             self._foreground_away = True
-            self.log(f"⚠️ 監視対象のアプリが前面から外れました（今は {current}）。"
+            self.log(f"⚠️ 監視対象のアプリが表示から消えました（今は {other or '不明'}）。"
                      "この間は検知も送信も行われません。")
             # 自動起動をONにしている場合は「対象アプリを開いてよい」と了解済みなので、
             # そのまま戻す。OFFなら知らせるだけにとどめる。
             if self.db is not None and self.db.get_setting("mumu_auto_launch", "0") == "1":
                 self._restore_target_app_if_left(d)
-                if self._current_package(d) == target:
+                if self._target_still_shown(d)[0]:
                     self._foreground_away = False
             else:
                 self.log("💡 設定タブの「📱 エミュレータ(MuMu)」で自動起動をONにしておくと、"
-                         "外れたときに自動で戻します。")
-        elif current == target and was_away:
+                         "消えたときに自動で戻します。")
+        elif shown and was_away:
             self._foreground_away = False
-            self.log("✅ 監視対象のアプリが前面に戻りました。監視を再開します。")
+            self.log("✅ 監視対象のアプリが表示に戻りました。監視を再開します。")
 
     def _current_package(self, d):
         """今前面に出ているアプリのパッケージ名（取得できなければ空文字）"""
@@ -2744,9 +2864,39 @@ class AutoReplyWorker:
         except Exception:
             return ""
 
+    def _target_still_shown(self, d):
+        """
+        対象アプリが今もどこかのディスプレイに出ているかを調べる。
+        戻り値: (出ているか, 参考として見えた別アプリ名)
+
+        ⚠️ app_current() だけで判断してはいけない。
+        あれは「入力フォーカスを持つ画面のアプリ」を返すため、MuMuのように
+        画面が複数あると、対象アプリが自分の画面に正しく出ていても
+        「別のアプリになった」と誤判定する。実測では、GRAVITYがディスプレイ2に
+        正常に出ているのにホーム画面(ディスプレイ0)の名前が返り、
+        そのたびにアプリを開き直していた。
+        ディスプレイごとの最前面を見て、どこかに居れば正常とみなす。
+        """
+        target = self._monitor_target_package()
+        if not target:
+            return True, ""
+        try:
+            out = d.shell("dumpsys activity activities | grep topResumedActivity").output
+        except Exception:
+            return True, ""      # 確認できないときは騒がない（安全側）
+        # ⚠️ 出力が「画面ごとの最前面」の形をしているか必ず確かめる。
+        # grepが使えない等でエラー文字列が返ると「対象が消えた」と誤判定し、
+        # 自動起動がONだとアプリを開き直して音声ルームから抜けてしまう。
+        # 判断できない時は「居る」として扱う（余計なことをしない）。
+        packages = re.findall(r"u0 ([\w.]+)/", out or "")
+        if not packages:
+            return True, ""
+        others = [p for p in packages if p != target]
+        return (target in packages), (others[-1] if others else "")
+
     def _check_after_action(self, d, description):
         """
-        画面を操作した直後に、対象アプリから離れていないか確認して記録する。
+        画面を操作した直後に、対象アプリが表示から消えていないか確認して記録する。
 
         「いつの間にか別のアプリが開いている／ホームに戻っている」という症状は、
         どの操作が引き金かが分からないと直しようがない。
@@ -2755,9 +2905,10 @@ class AutoReplyWorker:
         target = self._monitor_target_package()
         if not target:
             return
-        current = self._current_package(d)
-        if current and current != target:
-            self.log(f"🔀 【{description}】の直後に別のアプリになりました: {current}（対象は {target}）")
+        shown, other = self._target_still_shown(d)
+        if not shown:
+            self.log(f"🔀 【{description}】の直後に対象アプリが表示から消えました"
+                     f"（今見えているのは {other or '不明'} / 対象は {target}）")
 
     def _restore_target_app_if_left(self, d):
         """
@@ -2767,35 +2918,157 @@ class AutoReplyWorker:
         target = self._monitor_target_package()
         if not target:
             return
-        try:
-            current = (d.app_current() or {}).get("package", "")
-        except Exception:
-            return
-        if not current or current == target:
+        # ⚠️ app_current() だけで判断しないこと。複数画面では対象アプリが
+        # 自分の画面に正しく出ていても別アプリ名が返り、そのたびに
+        # app_start() で音声ルームを開き直してしまう（実測で多発した）。
+        shown, other = self._target_still_shown(d)
+        if shown:
             return
 
-        self.log(f"⚠️ 送信後に対象アプリが前面から外れました（今は {current}）。開き直します。")
+        self.log(f"⚠️ 送信後に対象アプリが表示から消えました（今は {other or '不明'}）。開き直します。")
         try:
             d.app_start(target)
             time.sleep(1.5)
-            back = (d.app_current() or {}).get("package", "")
-            if back == target:
+            back_shown, back_other = self._target_still_shown(d)
+            if back_shown:
                 self.log("✅ 対象アプリに戻りました。")
             else:
-                self.log(f"⚠️ 対象アプリに戻せませんでした（今は {back}）。")
+                self.log(f"⚠️ 対象アプリに戻せませんでした（今は {back_other or '不明'}）。")
         except Exception as e:
             self.log(f"⚠️ 対象アプリを開き直せませんでした: {str(e).splitlines()[0][:100]}")
 
+    # ------------------------------------------------------------------
+    # ディスプレイの扱い
+    # MuMuは複数の画面を同時に動かすため、「どの画面を操作するか」を
+    # 明示しないと、対象アプリではなくホーム画面を触ってしまう。
+    # ------------------------------------------------------------------
+
+    def _update_target_display(self, xml_dump):
+        """
+        画面ダンプから、対象アプリが表示されているディスプレイ番号を割り出して覚える。
+        見つからなければ前回の値を保つ（アプリが一瞬消えても操作先を見失わないため）。
+
+        ⚠️ 「最初に見つかった1件」で決めてはいけない。
+        アプリが2つの画面にまたがって残っていることがあり、
+        中身がほとんど無い残留ウィンドウの方を選ぶと、そちらへ入力を送ってしまう。
+        部品の数が一番多い画面＝実際に描画されている画面を選ぶ。
+        """
+        target = self._monitor_target_package()
+        if not target:
+            return None
+
+        counts = {}
+        for node in self.re_node.findall(xml_dump):
+            p_match = self.re_package.search(node)
+            if not (p_match and p_match.group(1) == target):
+                continue
+            d_match = RE_DISPLAY_ID.search(node)
+            if d_match:
+                counts[d_match.group(1)] = counts.get(d_match.group(1), 0) + 1
+
+        if not counts:
+            return self._target_display
+
+        found = max(counts, key=counts.get)
+        if found != self._target_display:
+            previous = self._target_display
+            self._target_display = found
+            others = {k: v for k, v in counts.items() if k != found}
+            extra = f"（他の画面にも残っています: {others}）" if others else ""
+            if previous is None:
+                self.log(f"🖥️ 対象アプリはディスプレイ {found} に表示されています"
+                         f"（部品{counts[found]}個）。操作はこの画面へ送ります。{extra}")
+            else:
+                self.log(f"🖥️ 対象アプリの表示先がディスプレイ {previous} → {found} "
+                         f"に変わりました。{extra}")
+        return found
+
+    def _same_display_nodes(self, xml_dump):
+        """対象アプリと同じディスプレイのノードだけを返す（番号不明なら全件）"""
+        display = getattr(self, "_target_display", None)
+        nodes = self.re_node.findall(xml_dump)
+        if display is None:
+            return nodes
+        # display-idが無いノード（古いAndroid）は単一画面とみなして残す
+        return [n for n in nodes if self._node_display(n) in (display, None)]
+
+    def _node_display(self, node):
+        m = RE_DISPLAY_ID.search(node)
+        return m.group(1) if m else None
+
+    def _input_command(self, *args):
+        """`input -d <番号> ...` の形にする。番号が分からなければ既定の画面へ送る"""
+        display = getattr(self, "_target_display", None)
+        prefix = f"input -d {display} " if display is not None else "input "
+        return prefix + " ".join(str(a) for a in args)
+
+    # inputコマンドが失敗したことを示す文字列。
+    # ⚠️ 終了コードは当てにならない。実測では存在しないディスプレイ番号を
+    # 指定しても `input -d 99 tap 1 1` は終了コード0を返し、何も起きないまま
+    # 成功したように見える。出力の中身で判断するしかない。
+    INPUT_ERROR_HINTS = ("error", "exception", "not found", "usage:", "denied", "failed")
+
+    def _run_input(self, d, *args):
+        """`input` を対象アプリのディスプレイへ送り、失敗らしき出力があれば知らせる"""
+        command = self._input_command(*args)
+        try:
+            result = d.shell(command)
+        except Exception as e:
+            self.log(f"⚠️ 画面操作を送れませんでした（{args[0]}）: "
+                     f"{str(e).splitlines()[0][:100]}")
+            return False
+        output = (getattr(result, "output", result) or "")
+        if isinstance(output, str) and any(h in output.lower() for h in self.INPUT_ERROR_HINTS):
+            self.log(f"⚠️ 画面操作が失敗した可能性があります: {command} → {output.strip()[:120]}")
+            return False
+        return True
+
+    def _tap(self, d, x, y):
+        """対象アプリのディスプレイをタップする"""
+        return self._run_input(d, "tap", int(x), int(y))
+
+    def _swipe(self, d, x1, y1, x2, y2, duration_ms=200):
+        """対象アプリのディスプレイをなぞる"""
+        return self._run_input(d, "swipe", int(x1), int(y1), int(x2), int(y2), int(duration_ms))
+
+    def _keyevent(self, d, keycode):
+        """対象アプリのディスプレイへキーを送る"""
+        return self._run_input(d, "keyevent", int(keycode))
+
+    # 対象アプリ名を読み直す間隔（秒）。設定変更には十分速く追従しつつ、
+    # 画面1枚あたり100回以上のDB読み出しを避けるための短時間キャッシュ。
+    TARGET_PACKAGE_CACHE_SECONDS = 1.0
+
     def _monitor_target_package(self):
-        """監視対象アプリのパッケージ名（設定 > 開始時に前面だったアプリ）"""
+        """
+        監視対象アプリのパッケージ名（設定 > 開始時に前面だったアプリ）
+
+        ⚠️ ここを毎回DBから読んではいけない。
+        _is_background_noise_node が画面のノード1つごとにこれを呼ぶため、
+        素直に実装すると画面1枚の読み取りで100回以上SQLiteへ接続することになる。
+        実測では _extract_chat_texts 1回が477msかかり（うち4.75秒/10回がDB接続）、
+        毎秒3回動く監視ループがCPUを占有していた。
+        設定変更には1秒以内に追従できればよいので、短時間だけ覚えておく。
+        """
+        now = time.time()
+        cache = getattr(self, "_target_package_cache", None)
+        if cache and (now - cache[1]) < self.TARGET_PACKAGE_CACHE_SECONDS:
+            return cache[0]
+
+        value = ""
         if self.db is not None:
-            configured = (self.db.get_setting("mumu_target_package", "") or "").strip()
-            if configured:
-                return configured
-        return getattr(self, "_foreground_package", "") or ""
+            value = (self.db.get_setting("mumu_target_package", "") or "").strip()
+        if not value:
+            value = getattr(self, "_foreground_package", "") or ""
+        self._target_package_cache = (value, now)
+        return value
 
     def _extract_chat_texts(self, xml_dump, y_min, y_max):
-        nodes = self.re_node.findall(xml_dump)
+        # ⚠️ まず「対象アプリと同じディスプレイ」だけに絞る。
+        # MuMuは複数画面を同時に動かし、ダンプには全部が入ってくる。
+        # どれも同じ大きさなので座標が偶然重なり、絞らないと
+        # 別画面のランチャーの部品を対象アプリの部品と取り違える。
+        nodes = self._same_display_nodes(xml_dump)
         chat_texts = []
         out_of_bounds_texts = []
 
@@ -2854,15 +3127,16 @@ class AutoReplyWorker:
 
     def _blocking_overlay_at(self, all_nodes, x, y):
         """
-        指定した座標に、ランチャーやステータスバーの押せる部品が重なっていないか調べる。
+        指定した座標に、対象アプリ以外の押せる部品が重なっていないか調べる。
         重なっていればそのラベルを返す（タップしてはいけない座標）。
 
-        ⚠️ ウィンドウの重なり順(dumpsys window)やapp_current()は当てにならないことがある。
-        実測では、GRAVITYが最前面と報告されていても実際に描画・タッチされていたのは
-        ホーム画面で、入力欄と同じ座標にランチャーの「設定」アイコンがあったため、
-        タップするたびに設定アプリが開いていた。
-        そこで「その座標に別アプリの押せる部品があるなら触らない」という
-        座標レベルの歯止めを設ける。
+        ⚠️ 呼び出し側は、対象アプリと同じディスプレイのノードだけを渡すこと。
+        MuMuは画面を4枚（mumuscreen000〜003）同時に動かしており、
+        画面ダンプには全ディスプレイのウィンドウが1つの木にまとめて入る。
+        どれも720x1280なので座標が偶然重なり、別ディスプレイのランチャーの
+        設定アイコン[146,1158][253,1260]がGRAVITYの入力欄(中心173,1209)と
+        必ず重なって見える。ディスプレイで絞らずにここへ渡すと、
+        正常時でも永久にタップできなくなる。
         """
         for node in all_nodes:
             if not self._is_background_noise_node(node):
@@ -2941,7 +3215,9 @@ class AutoReplyWorker:
                 self.log("💡 対象アプリが実際に画面に表示されているか確認してください"
                          "（前面と報告されていても、ホーム画面が表示されたままのことがあります）。")
                 return False
-            d.click(target_x, target_y)
+            if not self._tap(d, target_x, target_y):
+                # 送れなかったのに成功と答えると、この後の入力が宙に浮く
+                return False
             self._check_after_action(d, f"入力欄をタップ({int(target_x)},{int(target_y)})")
             return True
 
@@ -2966,7 +3242,7 @@ class AutoReplyWorker:
             xml = d.dump_hierarchy(compressed=True)
         except Exception:
             return ""
-        for node in self.re_node.findall(xml):
+        for node in self._same_display_nodes(xml):
             if self._is_ime_node(node):
                 continue
             c_match = self.re_class.search(node)
@@ -2996,7 +3272,7 @@ class AutoReplyWorker:
         try:
             d.set_clipboard(reply_message, label="auto_reply")
             time.sleep(0.3)
-            d.press(ANDROID_KEYCODE_PASTE)
+            self._keyevent(d, ANDROID_KEYCODE_PASTE)
             time.sleep(0.6)
             # 長文は折り返しや省略が起きうるので、先頭部分が入っていれば成功とみなす
             if reply_message[:15] in self._current_input_text(d):
@@ -3043,7 +3319,7 @@ class AutoReplyWorker:
             return False
 
         exact_hit, partial_hit = None, None
-        for node in self.re_node.findall(xml):
+        for node in self._same_display_nodes(xml):
             # 入力欄の探索と同じく、監視対象アプリ以外の部品には触らない
             if self._is_background_noise_node(node):
                 continue
@@ -3072,7 +3348,7 @@ class AutoReplyWorker:
             # 見つからない理由を追えるよう、画面に何があったかを残す。
             # 「送信ボタンが無い」のか「別の名前だった」のかを切り分けるため。
             candidates = []
-            for node in self.re_node.findall(xml):
+            for node in self._same_display_nodes(xml):
                 if self._is_background_noise_node(node):
                     continue
                 if not self.re_clickable.search(node):
@@ -3088,12 +3364,13 @@ class AutoReplyWorker:
 
         label, (left, top, right, bottom) = hit
         cx, cy = (left + right) / 2, (top + bottom) / 2
-        blocker = self._blocking_overlay_at(self.re_node.findall(xml), cx, cy)
+        blocker = self._blocking_overlay_at(self._same_display_nodes(xml), cx, cy)
         if blocker:
             self.log(f"🛑 送信ボタン({int(cx)},{int(cy)})に別アプリの「{blocker}」が重なっています。"
                      "タップを中止しました。")
             return False
-        d.click(cx, cy)
+        if not self._tap(d, cx, cy):
+            return False
         self.log(f"👆 送信ボタン(「{label[:10]}」)をタップしました。")
         self._check_after_action(d, f"送信ボタン「{label[:10]}」をタップ")
         return True
@@ -3120,7 +3397,7 @@ class AutoReplyWorker:
             # 成否は「入力欄が空か」ではなく「入れた文字が消えたか」で判断する。
             # このアプリは空のとき案内文「メッセージを送信」が入力欄の文字として出るため、
             # 空判定にすると送信できていても失敗扱いになってしまう。
-            d.press("enter")
+            self._keyevent(d, ANDROID_KEYCODE_ENTER)
             time.sleep(0.6)
             self._check_after_action(d, "エンターキー")
             if reply_message[:15] not in self._current_input_text(d):
@@ -3162,7 +3439,7 @@ class AutoReplyWorker:
         if not self._is_keyboard_shown(d):
             self.log("🔽 キーボードは閉じています（BACKは押しません）。")
             return
-        d.press("back")
+        self._keyevent(d, ANDROID_KEYCODE_BACK)
         time.sleep(0.3)
         self.log("🔽 キーボードを閉じて待機状態に戻りました。")
         self._check_after_action(d, "BACKキー")
@@ -3183,7 +3460,7 @@ class AutoReplyWorker:
             if not silent:
                 self.log("⏬ 画面をスクロールして最新を表示します...")
             try:
-                d.swipe(center_x, start_y, center_x, end_y, duration=0.2)
+                self._swipe(d, center_x, start_y, center_x, end_y, duration_ms=200)
             except Exception as e:
                 # スクロールは補助的な操作なので、失敗しても監視自体は続行する。
                 # 特にエミュレータで別アプリのウインドウが前面に出ていると
@@ -3195,8 +3472,10 @@ class AutoReplyWorker:
                     self.log(f"⚠️ 画面のスクロールに失敗しました（監視は継続します）: {str(e)[:80]}")
                 return
             time.sleep(0.5)
-            if not silent:
-                self._check_after_action(d, "スクロール")
+            # 別アプリへ切り替わったかの確認は、silentでも必ず行う。
+            # 3秒ごとのこのスクロールが一番回数の多い操作であり、ここを黙らせると
+            # 「いつの間にか設定アプリ/ホーム画面」の犯人を名指しできなくなる。
+            self._check_after_action(d, "スクロール")
 
     def _get_cooldown_settings(self):
         """クールダウン機能のオンオフと秒数をDBから取得する"""
@@ -3282,6 +3561,10 @@ class AutoReplyWorker:
             self.is_running = False
 
     def _run_monitor(self, screen_x1, screen_y1, screen_x2, screen_y2):
+        # 前回の監視で覚えたディスプレイ番号は持ち越さない。
+        # 対象アプリを変えた場合や、まだ起動しきっていない場合に、
+        # 古い画面を相手にしてしまうため。
+        self._target_display = None
         try:
             d = self._connect_to_emulator()
         except Exception as e:
@@ -3348,12 +3631,16 @@ class AutoReplyWorker:
                 keywords_map, cooldown_enabled, cooldown_seconds = self._get_runtime_config()
 
                 xml_dump = d.dump_hierarchy(compressed=True)
+                # 対象アプリがどのディスプレイに出ているかを毎回確かめる。
+                # MuMuは複数画面を同時に動かすため、ここを間違えると
+                # 読み取りはできるのに操作だけ別の画面へ届く。
+                self._update_target_display(xml_dump)
                 chat_texts, out_of_bounds_texts, nodes, all_nodes = self._extract_chat_texts(
                     xml_dump, y_min_internal, y_max_internal)
 
                 # ダイアログはチャットを覆い隠すので、検知より先に片付ける。
                 # 押したら画面が変わるため、次の周回で取り直す。
-                if self._auto_dismiss_dialog(d, nodes):
+                if self._auto_dismiss_dialog(d, all_nodes, xml_dump):
                     time.sleep(0.6)
                     continue
 
