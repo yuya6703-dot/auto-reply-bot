@@ -58,7 +58,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.3.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.3.1"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -2379,7 +2379,7 @@ class AutoReplyWorker:
             return None
         address = self.mumu.get_adb_address(info)
         if address:
-            self.log(f"📱 MuMuの接続先を取得しました: {address}")
+            self.log(f"📱 MuMuが示すadbの接続先: {address}")
         return address
 
     def _connect_to_emulator(self):
@@ -2413,10 +2413,19 @@ class AutoReplyWorker:
                 "（設定タブの「エミュレータ(MuMu)」で自動起動を有効にできます）"
             )
 
-        # MuMuから得た接続先が一覧にあるなら、それを優先して使う
-        target_serial = device_list[0].serial
-        if mumu_address and any(dev.serial == mumu_address for dev in device_list):
+        # MuMuから得た接続先が一覧にあるならそれを使う。
+        # ⚠️ MuMuが返すのはLAN側のアドレス(例 192.168.1.7:16416)で、
+        # adbが実際に持っているのは 127.0.0.1:7555 のような別のものであることがある。
+        # 「取得した接続先」と「実際に繋いだ先」が食い違うと原因追跡がしづらいので、
+        # 使えなかった場合はその旨をはっきり残す。
+        serials = [dev.serial for dev in device_list]
+        if mumu_address and mumu_address in serials:
             target_serial = mumu_address
+        else:
+            target_serial = serials[0]
+            if mumu_address:
+                self.log(f"ℹ️ {mumu_address} はadbに登録されていないため、{target_serial} を使います。"
+                         f"（adbが把握している端末: {', '.join(serials)}）")
         d = u2.connect(target_serial)
 
         try:
@@ -2712,6 +2721,33 @@ class AutoReplyWorker:
             self._foreground_away = False
             self.log("✅ 監視対象のアプリが前面に戻りました。監視を再開します。")
 
+    def _restore_target_app_if_left(self, d):
+        """
+        返信のあとで対象アプリが前面から外れていたら、開き直して戻す。
+        （BACKの押しすぎなどで背面に落ちた場合の保険）
+        """
+        target = self._monitor_target_package()
+        if not target:
+            return
+        try:
+            current = (d.app_current() or {}).get("package", "")
+        except Exception:
+            return
+        if not current or current == target:
+            return
+
+        self.log(f"⚠️ 送信後に対象アプリが前面から外れました（今は {current}）。開き直します。")
+        try:
+            d.app_start(target)
+            time.sleep(1.5)
+            back = (d.app_current() or {}).get("package", "")
+            if back == target:
+                self.log("✅ 対象アプリに戻りました。")
+            else:
+                self.log(f"⚠️ 対象アプリに戻せませんでした（今は {back}）。")
+        except Exception as e:
+            self.log(f"⚠️ 対象アプリを開き直せませんでした: {str(e).splitlines()[0][:100]}")
+
     def _monitor_target_package(self):
         """監視対象アプリのパッケージ名（設定 > 開始時に前面だったアプリ）"""
         if self.db is not None:
@@ -2958,6 +2994,21 @@ class AutoReplyWorker:
 
         hit = exact_hit or partial_hit
         if not hit:
+            # 見つからない理由を追えるよう、画面に何があったかを残す。
+            # 「送信ボタンが無い」のか「別の名前だった」のかを切り分けるため。
+            candidates = []
+            for node in self.re_node.findall(xml):
+                if self._is_background_noise_node(node):
+                    continue
+                if not self.re_clickable.search(node):
+                    continue
+                label = self._node_label(node)
+                if label:
+                    candidates.append(label[:12])
+            if candidates:
+                self.log(f"🔎 送信ボタンが見つかりません。画面の押せる要素: {' / '.join(candidates[:10])}")
+            else:
+                self.log("🔎 送信ボタンが見つかりません。押せる要素が1つもありませんでした。")
             return False
 
         label, (left, top, right, bottom) = hit
@@ -2999,9 +3050,38 @@ class AutoReplyWorker:
             self.log(f"⚠️ 「{reply_message}」を送信できませんでした。入力欄に文字が残っている可能性があります。")
 
         time.sleep(1.0)
-        d.press("back")
-        self.log("🔽 キーボードを閉じて待機状態に戻りました。")
+        self._close_keyboard_if_open(d)
         return is_sent
+
+    def _is_keyboard_shown(self, d):
+        """
+        ソフトキーボードが表示されているかを調べる。
+        判断できない場合はFalse（＝BACKを押さない）にして、安全側に倒す。
+        """
+        try:
+            output = d.shell("dumpsys input_method").output
+        except Exception:
+            return False
+        for line in output.splitlines():
+            if "mInputShown" in line:
+                return "mInputShown=true" in line.replace(" ", "")
+        return False
+
+    def _close_keyboard_if_open(self, d):
+        """
+        キーボードが出ているときだけBACKで閉じる。
+
+        ⚠️ 無条件にBACKを押してはいけない。
+        エンターキーで送信した直後はキーボードが既に閉じているため、
+        そのBACKはアプリの「戻る」として働き、チャット画面がルートだと
+        ホーム画面まで戻ってしまう（＝以後まったく送信できなくなる）。
+        """
+        if not self._is_keyboard_shown(d):
+            self.log("🔽 キーボードは閉じています（BACKは押しません）。")
+            return
+        d.press("back")
+        time.sleep(0.3)
+        self.log("🔽 キーボードを閉じて待機状態に戻りました。")
 
     def _scroll_down(self, d, y_min, y_max, silent=False):
         # エミュレータ自動スクロールがオフの場合は一切スクロールしない（定期分・送信直後分の両方）
@@ -3084,6 +3164,10 @@ class AutoReplyWorker:
             else:
                 failure_count += 1
                 self.log(f"⚠️ 送信ボタンが見つからず失敗としてカウントしました。(連続失敗 {failure_count}回)")
+
+            # 送信の流れで対象アプリが背面に落ちてしまった場合は戻す。
+            # 放置すると以後ずっと画面が読めず、何も反応しなくなる。
+            self._restore_target_app_if_left(d)
 
             self._scroll_down(d, y_min_internal, y_max_internal, silent=False)
         else:
