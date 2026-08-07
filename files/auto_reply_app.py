@@ -61,7 +61,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.3.3"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.3.4"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -2601,6 +2601,54 @@ class AutoReplyWorker:
             except (StopIteration, KeyError):
                 break
 
+    # 同じ行へ再挑戦するまでにあける秒数（前回失敗した行だけ待たせる）
+    RETRY_SAME_LOG_SECONDS = 15
+
+    def _select_pending_replies(self, matched_elements, replied_logs, reply_message,
+                                last_log, last_time):
+        """
+        検知ワードに一致した行のうち、これから返信すべきものを古い順に返す。
+
+        ⚠️ 一番下(最新)の1件だけを見てはいけない。
+        短時間に複数人が参加すると一致する行が同時に何件も並ぶが、最新の1件へ
+        返信して「返信済み」にした後も、次の周回で選ばれるのは同じ最新行なので、
+        上に居る人には順番が回らずログにも何も出ないまま流れて消えていた。
+
+        15秒待たせるのは「直前に試して失敗した行」だけにする。
+        全体を待たせると、1件の失敗で後続の人への返信まで止まってしまう。
+
+        ⚠️ この選び方は監視ループから切り出してある。以前はループの中に
+        直接書かれていたため、検証しようとするとテスト側へ同じ判定を書き写す
+        しかなく、実装を変えてもテストが通り続けてしまう状態だった。
+        """
+        pending = [
+            item for item in sorted(matched_elements, key=lambda x: x[1])
+            if item[0] not in replied_logs and reply_message not in item[0]
+        ]
+        now = time.time()
+        return [
+            item for item in pending
+            if item[0] != last_log or (now - last_time) > self.RETRY_SAME_LOG_SECONDS
+        ]
+
+    def _forget_replied_off_screen(self, replied_logs, chat_texts):
+        """
+        画面から消えたメッセージは「返信済み」の記録から外す。
+
+        ⚠️ 「画面に残っている間だけ覚える」のが肝。
+        ずっと覚えていると、同じ人が入り直しても文面が同じために二度と返信できない。
+        逆にまったく覚えないと、画面に残り続ける行へ延々と返信してしまう。
+        「見えている間は送らない／流れて消えたら忘れる」なら両方を満たせる。
+
+        画面を1件も読めなかった周回では何も忘れない。読み取りが一瞬失敗しただけで
+        記録が消えると、まだ画面にある行へ返信し直してしまうため。
+        """
+        if not chat_texts:
+            return
+        visible = {text for text, _ in chat_texts}
+        for logged in [t for t in replied_logs if t not in visible]:
+            del replied_logs[logged]
+
     # 検知ワードの「惜しい間違い」とみなす共通部分の最低文字数。
     # 短すぎると「が」「は」だけで反応してしまい、助言として役に立たない。
     MIN_NEAR_MISS_LENGTH = 4
@@ -3647,6 +3695,11 @@ class AutoReplyWorker:
                 chat_texts = [item for item in chat_texts if not any(ignore in item[0] for ignore in IGNORE_WORDS)]
                 out_of_bounds_texts = [t for t in out_of_bounds_texts if not any(ignore in t for ignore in IGNORE_WORDS)]
 
+                # 画面から流れて消えた行は「返信済み」の記録から外す。
+                # 同じ人が入り直した時に、文面が同じというだけで
+                # 二度と返信できなくなるのを防ぐ。
+                self._forget_replied_off_screen(replied_logs, chat_texts)
+
                 # 検知ワードの有無を素早く判定するための検索用文字列。
                 # 生のXMLではなく、エスケープを戻した後のテキストを使う。
                 detected_texts_joined = "\n".join([t for t, _ in chat_texts] + out_of_bounds_texts)
@@ -3693,6 +3746,13 @@ class AutoReplyWorker:
                     if trigger_word not in detected_texts_joined:
                         continue
 
+                    # ⚠️ 既にクールダウン待ちの行があるトリガーは、今回は触らない。
+                    # 待ち行列は1トリガーにつき1件しか持てないため、ここで次の行を
+                    # 拾うと待機中の行を上書きしてしまい、古い人を追い越して
+                    # 新しい人へ先に返信してしまう（「順番に送る」が崩れる）。
+                    if trigger_word in pending_sends:
+                        continue
+
                     matched_elements = [item for item in chat_texts if trigger_word in item[0]]
 
                     if not matched_elements:
@@ -3705,24 +3765,15 @@ class AutoReplyWorker:
                                 out_of_bounds_warned[trigger_word] = latest_out
                         continue
 
-                    latest_item = max(matched_elements, key=lambda x: x[1])
-                    latest_log = latest_item[0]
-
-                    if reply_message in latest_log:
-                        last_processed_logs[trigger_word] = (latest_log, time.time())
-                        continue
-
-                    # 一度きちんと返信できた行には二度と返信しない。
-                    # ⚠️ 参加メッセージは画面に残り続けるため、この歯止めが無いと
-                    # 下の「15秒経ったら再送」に毎回引っかかり、同じ人に延々と送り続けてしまう。
-                    if latest_log in replied_logs:
-                        continue
-
                     last_log, last_time = last_processed_logs.get(trigger_word, ("", 0))
+                    pending = self._select_pending_replies(
+                        matched_elements, replied_logs, reply_message, last_log, last_time)
 
-                    # 同じ行での再試行は、前回“失敗した”場合のみ15秒後に行う
-                    if last_log != latest_log or (time.time() - last_time) > 15:
+                    if pending:
+                        latest_log = pending[0][0]
                         self.log(f"🎯 検知!【{trigger_word}】ログ:「{latest_log}」")
+                        if len(pending) > 1:
+                            self.log(f"📥 未返信があと{len(pending) - 1}件あります。順番に処理します。")
 
                         # クールダウン機能が有効かつ、同じトリガーの前回送信から設定秒数経っていない場合は、
                         # 即座に送信せずキューに入れて後で送る（連続送信の抑制）
@@ -5244,10 +5295,18 @@ class App(ctk.CTk):
 
     # --- 設定タブ（送信クールダウン） ---
     def build_settings_tab(self):
-        self.build_emulator_section(self.tab_settings)
-        self.build_auto_ok_section(self.tab_settings)
+        # ⚠️ 中身を tab_settings へ直接置かないこと。
+        # エミュレータ・自動OK・クールダウン・GitHub・自動更新・ローカル更新と
+        # 区画が増えて縦に長くなっており、素のフレームだと下がはみ出したまま
+        # スクロールできず、画面外の設定を操作できなくなる。
+        # タイマータブ・読み上げタブと同じくスクロール枠で包む。
+        self.settings_scroll = ctk.CTkScrollableFrame(self.tab_settings, fg_color="transparent")
+        self.settings_scroll.pack(fill="both", expand=True)
 
-        frame = ctk.CTkFrame(self.tab_settings, fg_color="transparent")
+        self.build_emulator_section(self.settings_scroll)
+        self.build_auto_ok_section(self.settings_scroll)
+
+        frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         frame.pack(fill="x", padx=20, pady=(10, 20))
 
         ctk.CTkLabel(
@@ -5279,10 +5338,10 @@ class App(ctk.CTk):
         ).pack(anchor="w", pady=(15, 0))
 
         # --- GitHub連携（更新の取得元リポジトリ） ---
-        github_separator = ctk.CTkFrame(self.tab_settings, height=2, fg_color="gray30")
+        github_separator = ctk.CTkFrame(self.settings_scroll, height=2, fg_color="gray30")
         github_separator.pack(fill="x", padx=20, pady=(20, 15))
 
-        github_frame = ctk.CTkFrame(self.tab_settings, fg_color="transparent")
+        github_frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         github_frame.pack(fill="x", padx=20, pady=(0, 5))
 
         ctk.CTkLabel(
@@ -5330,10 +5389,10 @@ class App(ctk.CTk):
         self.github_status_label.pack(anchor="w")
 
         # --- 自動アップデート ---
-        auto_update_separator = ctk.CTkFrame(self.tab_settings, height=2, fg_color="gray30")
+        auto_update_separator = ctk.CTkFrame(self.settings_scroll, height=2, fg_color="gray30")
         auto_update_separator.pack(fill="x", padx=20, pady=(20, 15))
 
-        auto_update_frame = ctk.CTkFrame(self.tab_settings, fg_color="transparent")
+        auto_update_frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         auto_update_frame.pack(fill="x", padx=20, pady=(0, 5))
 
         ctk.CTkLabel(
@@ -5359,10 +5418,10 @@ class App(ctk.CTk):
         ).pack(anchor="w")
 
         # --- ローカルzipからのアップデート（動作確認・デバッグ用） ---
-        separator = ctk.CTkFrame(self.tab_settings, height=2, fg_color="gray30")
+        separator = ctk.CTkFrame(self.settings_scroll, height=2, fg_color="gray30")
         separator.pack(fill="x", padx=20, pady=(20, 20))
 
-        local_update_frame = ctk.CTkFrame(self.tab_settings, fg_color="transparent")
+        local_update_frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         local_update_frame.pack(fill="x", padx=20, pady=(0, 20))
 
         ctk.CTkLabel(
