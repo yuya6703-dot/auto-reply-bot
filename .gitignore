@@ -24,3 +24,10 @@ files.zip
 venv/
 .vscode/
 .idea/
+
+# HTTPS配信用の証明書と秘密鍵（実行時に自動生成される）
+# ⚠️ 秘密鍵は絶対にリポジトリへ入れないこと
+**/tailscale.crt
+**/tailscale.key
+**/self.crt
+**/self.key

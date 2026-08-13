@@ -30,6 +30,19 @@ import queue
 import difflib
 import socket
 import secrets
+import ssl
+import ipaddress
+
+# HTTPSで配信するための自己署名証明書を作るのに使う。
+# ⚠️ ブラウザの音声認識・マイクは「安全なページ(https)」でしか動かない。
+# 入っていない環境ではHTTPSを諦めて平文で配信する（従来どおり動く）。
+try:
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+except Exception:
+    x509 = None
 import http.server
 # 画面ダンプを「木」として読むために使う。正規表現ではノードが平らに潰れて
 # 親子関係が失われるため、「目印とボタンが同じダイアログの中にあるか」を判定できない。
@@ -72,7 +85,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.4.1"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.5.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -295,6 +308,85 @@ AIVISSPEECH_STARTUP_TIMEOUT_SECONDS = 90
 # 1回に読み上げる文字数の上限。長文をそのまま投げるとVOICEVOXの合成に時間がかかり、
 # その間ずっと他の読み上げが待たされるため、入口で切っておく。
 MAX_SPEECH_TEXT_LENGTH = 200
+
+# ====================================================
+# ❓ 疑問文の自動判定（音声認識は句読点を返さないため）
+# ====================================================
+# ⚠️ 音声認識の結果には「？」が付かない。そのままだと疑問文が
+# 平叙文の抑揚で読まれ、質問に聞こえない。
+# 実測: AivisSpeechは「？」「！」の両方で音が変わる。
+#       VOICEVOXは「？」では変わるが「！」では変わらない。
+# 文字の形から疑問文を見分けて「。」を「？」に差し替える。
+# 調整に使っていない文での正解率は90%（実測）。
+
+# 文末が疑問を表す形
+RE_QUESTION_TAIL = re.compile(
+    r"(ますか|ですか|でしょうか|だろうか|ましたか|でしたか|かな|かしら|のか|"
+    r"ないか|ませんか|ありますか|いますか|できますか|か)$")
+
+# 「〜たの」「〜るの」など、動詞に「の」が付いた疑問
+RE_QUESTION_NO_TAIL = re.compile(r"(た|る|ない|てる|でる|んだ)の$")
+
+# 「か」で終わるが疑問ではない語
+RE_NOT_QUESTION = re.compile(
+    r"(そうか|確か|たしか|まさか|静か|しずか|明らか|あきらか|"
+    r"豊か|ゆたか|細か|こまか|柔らか|やわらか)$")
+
+# 文中にあれば疑問の手がかりになる語
+QUESTION_WORDS = ("何", "なに", "なん", "どこ", "いつ", "誰", "だれ", "なぜ",
+                  "どうして", "どっち", "どちら", "どれ", "どの", "いくら",
+                  "いくつ", "どう", "どんな")
+
+# 疑問詞を含むが疑問ではない決まり文句
+QUESTION_FIXED_PHRASES = ("どうもありがとう", "どうも", "どういたしまして",
+                          "どうぞ", "どうか", "なんでもない", "なんとなく")
+
+# 断定で終わっていれば、疑問詞があっても疑問とはみなさない
+RE_ASSERTIVE_TAIL = re.compile(r"(です|ます|だ|である|した|ない)$")
+
+# 文の区切り（この記号で文を分ける）
+RE_SENTENCE_SPLIT = re.compile(r"([。．.！!？?])")
+
+
+def looks_like_question(sentence):
+    """その一文が疑問文らしいか（音声認識には「？」が付かないため、形で見分ける）"""
+    s = (sentence or "").strip()
+    if not s:
+        return False
+    if any(s == p or s.startswith(p) for p in QUESTION_FIXED_PHRASES):
+        return False
+    if RE_NOT_QUESTION.search(s):
+        return False
+    if RE_QUESTION_TAIL.search(s):
+        return True
+    if RE_QUESTION_NO_TAIL.search(s):
+        return True
+    if any(w in s for w in QUESTION_WORDS) and not RE_ASSERTIVE_TAIL.search(s):
+        return True
+    return False
+
+
+def apply_question_marks(text):
+    """
+    文ごとに疑問文かを見て、区切りの「。」を「？」に差し替える。
+
+    ⚠️ 既に「？」「！」が付いている文は触らない。
+    自分で打った文（定型文など）の意図を勝手に変えないため。
+    """
+    raw = (text or "")
+    if not raw.strip():
+        return raw
+
+    parts = RE_SENTENCE_SPLIT.split(raw)
+    out = []
+    # split の結果は [本文, 区切り, 本文, 区切り, ...] の並びになる
+    for i in range(0, len(parts), 2):
+        body = parts[i]
+        mark = parts[i + 1] if i + 1 < len(parts) else ""
+        if body.strip() and mark in ("。", "．", ".") and looks_like_question(body):
+            mark = "？"
+        out.append(body + mark)
+    return "".join(out)
 
 # 読み上げ待ちの上限。ここを超える要求は捨てる（連打・誤送信で延々と喋り続けるのを防ぐ）
 MAX_SPEECH_QUEUE_SIZE = 20
@@ -1572,6 +1664,7 @@ PHONE_BRIDGE_PAGE = """<!DOCTYPE html>
 
 <header>
   <span id="head">🗣️ ずんだもんに読み上げてもらう</span>
+  <a href="/mic">声で話す</a>
   <a href="/voice">声の解析</a>
   <button id="pintoggle" type="button">暗証番号</button>
 </header>
@@ -1925,7 +2018,8 @@ PHONE_BRIDGE_VOICE_PAGE = """<!DOCTYPE html>
 
 <header>
   <span>声の解析</span>
-  <a href="/">送信ページへ</a>
+  <a href="/mic">声で話す</a>
+  <a href="/">送信</a>
   <button id="pintoggle" type="button">暗証番号</button>
 </header>
 
@@ -2179,6 +2273,303 @@ PHONE_BRIDGE_VOICE_PAGE = """<!DOCTYPE html>
 """
 
 
+# スマホの「声で話す」ページ。
+# ⚠️ ブラウザの音声認識(Web Speech API)は「安全なページ」でしか動かない。
+# 平文HTTP(http://192.168.x.x:8765/)では使えないため、Tailscale等でHTTPS化した
+# アドレスから開く必要がある。使えない場合はその旨を画面に出し、
+# キーボードの音声入力を使う既存ページへ誘導する。
+#
+# ⚠️ 音声そのものはPCへ送らない。必要なのは「話した内容の文字」だけで、
+# 読み上げは既存の /speak がそのまま使える。音声を送る仕組みは要らない。
+PHONE_BRIDGE_MIC_PAGE = """<!DOCTYPE html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>声で話す</title>
+<style>
+  :root {
+    --bg:#f2f2f7; --fg:#1c1c1e; --sub:#8e8e93; --bar:#f7f7f8;
+    --line:#d1d1d6; --field:#ffffff; --send:#0b84ff; --card:#ffffff; --rec:#ff3b30;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#000000; --fg:#f2f2f7; --sub:#8e8e93; --bar:#1c1c1e;
+      --line:#38383a; --field:#2c2c2e; --send:#0b84ff; --card:#1c1c1e;
+    }
+  }
+  *, *::before, *::after { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html { height:100%; overflow:hidden; }
+  body {
+    position:fixed; top:0; left:0; right:0; height:100%; margin:0;
+    background:var(--bg); color:var(--fg);
+    font-family:-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  header {
+    flex:none; padding:10px 14px; font-size:13px; color:var(--sub);
+    border-bottom:1px solid var(--line); background:var(--bar);
+    display:flex; align-items:center; gap:8px;
+    padding-top:calc(10px + env(safe-area-inset-top));
+  }
+  header span { flex:1; }
+  header a, header button {
+    flex:none; font-size:13px; color:var(--send); background:none;
+    border:none; padding:4px 2px; text-decoration:none;
+  }
+  #pinrow { flex:none; display:none; padding:10px 14px; background:var(--bar);
+            border-bottom:1px solid var(--line); }
+  #pinrow.open { display:block; }
+  #pin { width:100%; font-size:16px; padding:10px 12px;
+         border:1px solid var(--line); border-radius:10px;
+         background:var(--field); color:var(--fg); }
+
+  #body { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px; }
+  #warn { display:none; background:#3a2326; color:#ffb4b4; border-radius:12px;
+          padding:12px; font-size:13px; line-height:1.7; margin-bottom:12px; }
+  #warn.show { display:block; }
+  #warn a { color:#ffd0d0; }
+
+  #heard { background:var(--card); border:1px solid var(--line); border-radius:12px;
+           padding:14px; min-height:90px; font-size:17px; line-height:1.6;
+           word-break:break-word; }
+  #heard .interim { color:var(--sub); }
+  #heard:empty::before { content:"ここに、話した内容が出ます"; color:var(--sub); font-size:14px; }
+
+  #sent { margin-top:12px; }
+  .row { background:var(--card); border:1px solid var(--line); border-radius:10px;
+         padding:8px 10px; margin-bottom:6px; font-size:14px; line-height:1.4;
+         word-break:break-word; }
+  .row .t { display:block; font-size:10px; color:var(--sub); margin-top:3px; }
+  .row.ng { background:#3a2326; }
+
+  #dock { flex:none; background:var(--bar); border-top:1px solid var(--line);
+          padding:10px 12px calc(12px + env(safe-area-inset-bottom)); }
+  #mic {
+    width:100%; padding:18px 0; border:none; border-radius:14px;
+    font-size:17px; font-weight:600; background:var(--send); color:#fff;
+  }
+  #mic.on { background:var(--rec); }
+  #mic:disabled { opacity:.4; }
+  #opts { display:flex; align-items:center; gap:14px; margin-top:10px;
+          font-size:13px; color:var(--sub); flex-wrap:wrap; }
+  #opts label { display:flex; align-items:center; gap:5px; }
+  #msg { font-size:12px; color:var(--sub); margin-top:8px; min-height:1.2em; text-align:center; }
+  #msg.ng { color:#ff6b6b; }
+</style>
+</head><body>
+
+<header>
+  <span>声で話す</span>
+  <a href="/voice">声の解析</a>
+  <a href="/">送信</a>
+  <button id="pintoggle" type="button">暗証番号</button>
+</header>
+
+<div id="pinrow">
+  <input id="pin" type="text" inputmode="numeric" autocomplete="off"
+         placeholder="PCの画面に表示されている6桁の番号">
+</div>
+
+<div id="body">
+  <div id="warn">
+    <b>このページでは声を聞き取れません。</b><br>
+    ブラウザの音声認識は「https://」で開いたときしか使えません。<br>
+    いまは「http://」で開いているか、この端末が対応していません。<br><br>
+    <a href="/">送信ページ</a>なら、キーボードのマイクで同じことができます。
+  </div>
+
+  <div id="heard"></div>
+  <div id="sent"></div>
+</div>
+
+<div id="dock">
+  <button id="mic" type="button">🎤 押して話す</button>
+  <div id="opts">
+    <label><input type="checkbox" id="auto" checked> 話し終えたら自動で読み上げ</label>
+    <label><input type="checkbox" id="cont"> 続けて聞き取る</label>
+  </div>
+  <div id="msg"></div>
+</div>
+
+<script>
+(function () {
+  var pin = document.getElementById('pin'), pinrow = document.getElementById('pinrow');
+  var pintoggle = document.getElementById('pintoggle');
+  var micBtn = document.getElementById('mic'), heard = document.getElementById('heard');
+  var sent = document.getElementById('sent'), msg = document.getElementById('msg');
+  var warn = document.getElementById('warn');
+  var autoChk = document.getElementById('auto'), contChk = document.getElementById('cont');
+
+  pin.value = localStorage.getItem('pin') || '';
+  if (!pin.value) { pinrow.classList.add('open'); }
+  pintoggle.onclick = function () { pinrow.classList.toggle('open'); };
+  pin.onchange = function () { localStorage.setItem('pin', pin.value.trim()); };
+
+  function say(text, ng) { msg.textContent = text || ''; msg.className = ng ? 'ng' : ''; }
+
+  function post(path, body) {
+    body.pin = pin.value.trim();
+    return fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (d) { return { status: r.status, data: d }; });
+    });
+  }
+
+  function addRow(text, ng) {
+    var row = document.createElement('div');
+    row.className = 'row' + (ng ? ' ng' : '');
+    row.textContent = text;
+    var t = document.createElement('span');
+    t.className = 't';
+    t.textContent = new Date().toLocaleTimeString();
+    row.appendChild(t);
+    // タップでもう一度読み上げ
+    row.onclick = function () { speak(text); };
+    sent.insertBefore(row, sent.firstChild);
+  }
+
+  function speak(text) {
+    text = (text || '').trim();
+    if (!text) { return; }
+    say('PCで読み上げています...');
+    // from_speech を付けると、PC側が疑問文を見分けて「。」を「？」に直す。
+    // 音声認識は「？」を返さないため、これが無いと質問が平叙文の抑揚で読まれる。
+    post('/speak', { text: text, from_speech: true }).then(function (res) {
+      if (!res.data.ok) {
+        if (res.status === 403) { pinrow.classList.add('open'); }
+        say(res.data.message || '読み上げられませんでした。', true);
+        return;
+      }
+      say(res.data.message || '読み上げます。');
+    }).catch(function () { say('PCにつながりませんでした。', true); });
+  }
+
+  // --- 音声認識 ---
+  // ⚠️ 安全なページ(https)でしか使えない。使えない端末・状況では
+  //     黙って無反応にせず、理由を画面に出す。
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR || !window.isSecureContext) {
+    warn.classList.add('show');
+    micBtn.disabled = true;
+    micBtn.textContent = '🎤 このページでは使えません';
+    say(!window.isSecureContext ? 'https:// で開き直してください。'
+                                : 'この端末のブラウザが音声認識に対応していません。', true);
+    return;
+  }
+
+  var rec = new SR();
+  rec.lang = 'ja-JP';
+  rec.interimResults = true;
+  rec.continuous = false;      // 「続けて聞き取る」ONのときは終了時に自分で再開する
+
+  var listening = false;
+  var finalText = '';
+
+  function render(interim) {
+    heard.textContent = '';
+    if (finalText) { heard.appendChild(document.createTextNode(finalText)); }
+    if (interim) {
+      var s = document.createElement('span');
+      s.className = 'interim';
+      s.textContent = interim;
+      heard.appendChild(s);
+    }
+  }
+
+  rec.onstart = function () {
+    listening = true;
+    micBtn.classList.add('on');
+    micBtn.textContent = '■ 聞き取り中（押すと止める）';
+    say('話してください...');
+  };
+
+  var ENDS_WITH_PUNCT = /[。、！？!?,.]$/;
+
+  // ⚠️ 音声認識は句読点を返さない。そのまま繋ぐと
+  //   「こんにちは今日はいい天気ですね」のように一続きになり、
+  //   PC側の音声合成が文の切れ目を掴めず、息継ぎのない棒読みになる。
+  //   （実測: 句読点なしだと「コンニチワキョオワ」が1つの句として繋がる）
+  //   認識が確定した区切り＝話の区切りなので、そこに「。」を補って渡す。
+  //
+  // ⚠️ 確定した文を「足していく」書き方にしてはいけない。
+  //   onresult は同じ結果を何度も配り直すことがある（iOSでよく起きる。
+  //   e.resultIndex が既に確定した位置まで巻き戻ってくる）。
+  //   足す書き方だと、そのたびに同じ言葉が二重三重に混ざる。
+  //   毎回 results 全体から組み立て直せば、何度呼ばれても結果は変わらない。
+  function buildFinal(results) {
+    var out = '';
+    for (var i = 0; i < results.length; i++) {
+      if (!results[i].isFinal) { continue; }
+      var t = (results[i][0].transcript || '').trim();
+      if (!t) { continue; }
+      if (out && !ENDS_WITH_PUNCT.test(out)) { out += '。'; }
+      out += t;
+    }
+    return out;
+  }
+
+  rec.onresult = function (e) {
+    var interim = '';
+    for (var i = 0; i < e.results.length; i++) {
+      if (!e.results[i].isFinal) { interim += e.results[i][0].transcript; }
+    }
+    finalText = buildFinal(e.results);
+    render(interim);
+  };
+
+  rec.onerror = function (e) {
+    if (e.error === 'no-speech') { say('声が聞き取れませんでした。'); return; }
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      say('マイクの使用が許可されていません。ブラウザの設定を確認してください。', true);
+      stopListening();
+      return;
+    }
+    say('聞き取りに失敗しました（' + e.error + '）。', true);
+  };
+
+  rec.onend = function () {
+    var text = finalText.trim();
+    // 文末にも区切りを付ける（尻切れの読み方になるのを防ぐ）
+    if (text && !/[。、！？!?,.]$/.test(text)) { text += '。'; }
+    finalText = '';
+    if (text) {
+      render('');
+      if (autoChk.checked) { addRow(text); speak(text); }
+      else { addRow(text); say('「読み上げ」は各行をタップしてください。'); }
+    }
+    // 「続けて聞き取る」なら、止めるまで繰り返す
+    if (listening && contChk.checked) {
+      try { rec.start(); return; } catch (err) { /* すぐには再開できない場合は下で止める */ }
+    }
+    stopListening();
+  };
+
+  function startListening() {
+    finalText = '';
+    heard.textContent = '';
+    try { rec.start(); }
+    catch (err) { say('聞き取りを開始できませんでした。', true); }
+  }
+
+  function stopListening() {
+    listening = false;
+    micBtn.classList.remove('on');
+    micBtn.textContent = '🎤 押して話す';
+    try { rec.stop(); } catch (err) { /* 既に止まっている */ }
+  }
+
+  micBtn.onclick = function () {
+    if (listening) { stopListening(); say(''); }
+    else { startListening(); }
+  };
+})();
+</script></body></html>
+"""
+
+
 class _BridgeHTTPServer(http.server.ThreadingHTTPServer):
     """
     待ち受け用のHTTPサーバー。
@@ -2229,6 +2620,11 @@ class PhoneBridgeServer:
         # 解析結果の預かり所（PHONE_BRIDGE_MAX_ANALYSES 参照）
         self._analyses = {}
         self._analysis_lock = threading.Lock()
+        # HTTPSで配信しているか。スマホのブラウザでマイク（音声認識）を使うには
+        # 「安全なページ」である必要があり、平文HTTPでは使えない。
+        self.use_https = False
+        self.cert_hostname = ""      # 証明書に書かれている名前（この名前で開いてもらう）
+        self.cert_is_trusted = False # 正規の証明書か（自己署名なら警告が出る）
 
     def remember_analysis(self, query):
         """解析結果を預かり、それを指す合言葉を返す（古いものから捨てる）"""
@@ -2295,7 +2691,9 @@ class PhoneBridgeServer:
             return "127.0.0.1"
 
     def get_url(self):
-        return f"http://{self.get_lan_ip()}:{self.port}/"
+        scheme = "https" if self.use_https else "http"
+        host = self.cert_hostname or self.get_lan_ip()
+        return f"{scheme}://{host}:{self.port}/"
 
     def is_running(self):
         return self._httpd is not None
@@ -2327,6 +2725,8 @@ class PhoneBridgeServer:
                     page = PHONE_BRIDGE_PAGE
                 elif self.path in ("/voice", "/voice/"):
                     page = PHONE_BRIDGE_VOICE_PAGE
+                elif self.path in ("/mic", "/mic/"):
+                    page = PHONE_BRIDGE_MIC_PAGE
                 else:
                     self.send_error(404)
                     return
@@ -2456,6 +2856,11 @@ class PhoneBridgeServer:
                                           "phrases": server.list_phrases()})
                     return
 
+                # ⚠️ 音声認識から来た文にだけ「？」を補う。
+                # 自分で打った文（定型文など）は、書いたとおりの記号を尊重する。
+                if payload.get("from_speech"):
+                    text = apply_question_marks(text)
+
                 accepted = server.on_text(text)
                 if not accepted:
                     self._send_json(429, {"ok": False, "message": "読み上げが混み合っています。少し待ってください。"})
@@ -2468,11 +2873,164 @@ class PhoneBridgeServer:
 
         return Handler
 
-    def start(self, pin):
+    # --- HTTPS用の証明書 ---
+    # ⚠️ スマホのブラウザでマイク（音声認識）を使うには「安全なページ」が要る。
+    # 平文HTTPだとブラウザがマイクを開かせてくれない。
+    #
+    # 証明書は2通り。
+    #   ① Tailscaleの正規証明書 … 警告なしで開ける。ただしtailnet側で
+    #      「HTTPS Certificates」を有効にしていないと発行できない
+    #   ② 自作の証明書（自己署名）… いつでも作れるが、初回だけブラウザの
+    #      警告を手動でまたぐ必要がある
+    # ①が使えるなら①、駄目なら②に落とす。
+    TAILSCALE_PATHS = (
+        r"C:\Program Files\Tailscale\tailscale.exe",
+        r"C:\Program Files (x86)\Tailscale\tailscale.exe",
+    )
+
+    @classmethod
+    def _tailscale_exe(cls):
+        for path in cls.TAILSCALE_PATHS:
+            if os.path.exists(path):
+                return path
+        return shutil.which("tailscale") or ""
+
+    @classmethod
+    def tailscale_hostname(cls):
+        """このPCのTailscale上の名前（使っていなければ空文字）"""
+        exe = cls._tailscale_exe()
+        if not exe:
+            return ""
+        try:
+            out = subprocess.run([exe, "status", "--json"], capture_output=True,
+                                 timeout=10, text=True, encoding="utf-8",
+                                 errors="replace").stdout
+            name = (json.loads(out).get("Self") or {}).get("DNSName", "")
+            return name.rstrip(".")
+        except Exception:
+            return ""
+
+    def _try_tailscale_cert(self, cert_dir):
+        """Tailscaleの正規証明書を取りにいく。取れたら (証明書, 鍵, 名前)"""
+        host = self.tailscale_hostname()
+        exe = self._tailscale_exe()
+        if not host or not exe:
+            return None
+        # ⚠️ 保存先が無いと tailscale cert は書き込みに失敗する。
+        # 作らずに呼ぶと「正規証明書が取れない」と誤判定して自己署名に落ち、
+        # 本来は出ないはずのブラウザ警告が出る（実際にそうなっていた）。
+        try:
+            os.makedirs(cert_dir, exist_ok=True)
+        except Exception:
+            return None
+        cert_path = os.path.join(cert_dir, "tailscale.crt")
+        key_path = os.path.join(cert_dir, "tailscale.key")
+        try:
+            result = subprocess.run(
+                [exe, "cert", "--cert-file", cert_path, "--key-file", key_path, host],
+                capture_output=True, timeout=120, text=True,
+                encoding="utf-8", errors="replace")
+        except Exception:
+            return None
+        if result.returncode != 0 or not os.path.exists(cert_path):
+            # tailnet側でHTTPS証明書が有効になっていない場合はここに来る
+            return None
+        return cert_path, key_path, host
+
+    def _make_self_signed(self, cert_dir):
+        """自作の証明書を用意する。既にあって期限内ならそれを使い回す。"""
+        if x509 is None:
+            return None
+        cert_path = os.path.join(cert_dir, "self.crt")
+        key_path = os.path.join(cert_dir, "self.key")
+        host = self.tailscale_hostname() or self.get_lan_ip()
+
+        # 使い回せるものがあるか（毎回作り直すと、スマホ側で警告をまたぎ直しになる）
+        if os.path.exists(cert_path) and os.path.exists(key_path):
+            try:
+                with open(cert_path, "rb") as f:
+                    existing = x509.load_pem_x509_certificate(f.read())
+                not_after = existing.not_valid_after_utc
+                names = [n.value for n in existing.subject]
+                if not_after > datetime.datetime.now(datetime.timezone.utc) and host in names:
+                    return cert_path, key_path, host
+            except Exception:
+                pass
+
+        try:
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+            alt = [x509.DNSName(host), x509.DNSName("localhost")]
+            for addr in {self.get_lan_ip(), "127.0.0.1"}:
+                try:
+                    alt.append(x509.IPAddress(ipaddress.ip_address(addr)))
+                except ValueError:
+                    pass
+            now = datetime.datetime.now(datetime.timezone.utc)
+            cert = (x509.CertificateBuilder()
+                    .subject_name(subject).issuer_name(subject)
+                    .public_key(key.public_key())
+                    .serial_number(x509.random_serial_number())
+                    .not_valid_before(now - datetime.timedelta(minutes=5))
+                    .not_valid_after(now + datetime.timedelta(days=825))
+                    .add_extension(x509.SubjectAlternativeName(alt), critical=False)
+                    .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                    .sign(key, hashes.SHA256()))
+            os.makedirs(cert_dir, exist_ok=True)
+            with open(cert_path, "wb") as f:
+                f.write(cert.public_bytes(serialization.Encoding.PEM))
+            with open(key_path, "wb") as f:
+                f.write(key.private_bytes(serialization.Encoding.PEM,
+                                          serialization.PrivateFormat.TraditionalOpenSSL,
+                                          serialization.NoEncryption()))
+            return cert_path, key_path, host
+        except Exception:
+            return None
+
+    def prepare_https(self, cert_dir):
+        """
+        HTTPSで配信するための証明書を用意する。
+        戻り値: (SSLContext, 名前, 正規の証明書か) / 用意できなければ (None, "", False)
+        """
+        found = self._try_tailscale_cert(cert_dir)
+        trusted = found is not None
+        if found is None:
+            # ⚠️ どちらの証明書になったかは、スマホでの見え方（警告の有無）を
+            # 決める重要な違い。黙って落とさず、必ず理由を残す。
+            if self.tailscale_hostname():
+                self.log("ℹ️ Tailscaleの正規証明書を取得できなかったため、"
+                         "自分で作った証明書を使います（初回だけスマホに警告が出ます）。")
+            found = self._make_self_signed(cert_dir)
+        if found is None:
+            return None, "", False
+        cert_path, key_path, host = found
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert_path, key_path)
+        except Exception:
+            return None, "", False
+        return context, host, trusted
+
+    def start(self, pin, https=False, cert_dir=None):
         """待ち受けを開始する。戻り値: (成功したか, エラーメッセージ)"""
         if self.is_running():
             return True, ""
         self.pin = pin
+        self.use_https = False
+        self.cert_hostname = ""
+        self.cert_is_trusted = False
+
+        context = None
+        if https:
+            context, host, trusted = self.prepare_https(cert_dir or BASE_DIR)
+            if context is None:
+                return False, (
+                    "HTTPS用の証明書を用意できませんでした。\n"
+                    "HTTPSを使わない設定に戻すか、Tailscaleの管理画面で\n"
+                    "「HTTPS Certificates」を有効にしてください。"
+                )
+            self.cert_hostname, self.cert_is_trusted = host, trusted
+
         try:
             httpd = _BridgeHTTPServer(("0.0.0.0", self.port), self._build_handler())
         except OSError as e:
@@ -2481,6 +3039,14 @@ class PhoneBridgeServer:
                 "このアプリを二重に起動していないか、他のアプリが同じポートを使っていないか"
                 f"確認してください。\n\n詳細: {e}"
             )
+
+        if context is not None:
+            try:
+                httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+                self.use_https = True
+            except Exception as e:
+                httpd.server_close()
+                return False, f"HTTPSを開始できませんでした: {str(e).splitlines()[0][:120]}"
 
         self._httpd = httpd
         self._thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -4387,7 +4953,7 @@ class App(ctk.CTk):
             self._watch_clipboard()
 
         if self.phone_bridge_var.get():
-            success, err = self.phone_bridge.start(self.get_phone_bridge_pin())
+            success, err = self.phone_bridge.start(self.get_phone_bridge_pin(), https=self.get_phone_bridge_https())
             if success:
                 self.append_log(f"📱 スマホ連携を開始しました（{self.phone_bridge.get_url()}）。")
             else:
@@ -7244,6 +7810,24 @@ class App(ctk.CTk):
             command=self.on_phone_bridge_toggle
         ).pack(anchor="w", padx=12, pady=(0, 8))
 
+        # ⚠️ スマホのブラウザでマイク（音声認識）を使うには「安全なページ(https)」が要る。
+        # 平文HTTPだとブラウザがマイクを開かせてくれないため、この切り替えを用意する。
+        self.phone_bridge_https_var = ctk.BooleanVar(
+            value=self.db.get_setting("phone_bridge_https", "0") == "1"
+        )
+        https_check = ctk.CTkCheckBox(
+            section, text="HTTPSで配信する（スマホのマイクで話すために必要）",
+            variable=self.phone_bridge_https_var,
+            command=self.on_phone_bridge_https_toggle
+        )
+        https_check.pack(anchor="w", padx=12, pady=(0, 4))
+        if x509 is None:
+            https_check.configure(state="disabled")
+            ctk.CTkLabel(
+                section, text="※ この環境ではHTTPSを使えません（証明書を作る部品がありません）",
+                text_color="#d08a4a", justify="left"
+            ).pack(anchor="w", padx=12, pady=(0, 6))
+
         self.phone_bridge_info_label = ctk.CTkLabel(
             section, text="", justify="left", font=ctk.CTkFont(size=13)
         )
@@ -7683,12 +8267,44 @@ class App(ctk.CTk):
             self.db.save_setting("phone_bridge_pin", pin)
         return pin
 
+    def get_phone_bridge_https(self):
+        """HTTPSで配信する設定か（証明書を作る部品が無ければ常にFalse）"""
+        if x509 is None:
+            return False
+        return self.db.get_setting("phone_bridge_https", "0") == "1"
+
+    def on_phone_bridge_https_toggle(self):
+        enabled = self.phone_bridge_https_var.get()
+        self.db.save_setting("phone_bridge_https", "1" if enabled else "0")
+        self.append_log(f"⚙️ スマホ連携のHTTPSを {'ON' if enabled else 'OFF'} にしました。")
+        # 配信方式が変わるので、動いていれば開き直す
+        if self.phone_bridge.is_running():
+            self.phone_bridge.stop()
+            success, err = self.phone_bridge.start(self.get_phone_bridge_pin(),
+                                                   https=self.get_phone_bridge_https())
+            if not success:
+                self.phone_bridge_https_var.set(False)
+                self.db.save_setting("phone_bridge_https", "0")
+                self.phone_bridge.start(self.get_phone_bridge_pin(), https=False)
+                messagebox.showwarning("HTTPSにできません", err)
+                self.append_log(f"⚠️ HTTPSにできなかったため、通常の配信に戻しました: {err}")
+        self._refresh_phone_bridge_info()
+
     def _refresh_phone_bridge_info(self):
         if self.phone_bridge.is_running():
+            bridge = self.phone_bridge
+            if bridge.use_https and bridge.cert_is_trusted:
+                extra = "\n　　🔒 正規の証明書です（警告は出ません）。スマホのマイクが使えます。"
+            elif bridge.use_https:
+                extra = ("\n　　🔒 自分で作った証明書のため、初回だけスマホに警告が出ます。"
+                         "\n　　　　「詳細」→「アクセスする」で進んでください。以降は出ません。")
+            else:
+                extra = ("\n　　ℹ️ 通常の配信です。スマホのマイクで話す機能を使うには、"
+                         "\n　　　　上の「HTTPSで配信する」をONにしてください。")
             self.phone_bridge_info_label.configure(
                 text=f"✅ 受け取り中です。スマホのブラウザで下のURLを開いてください。\n"
-                     f"　　URL: {self.phone_bridge.get_url()}\n"
-                     f"　　暗証番号: {self.get_phone_bridge_pin()}",
+                     f"　　URL: {bridge.get_url()}\n"
+                     f"　　暗証番号: {self.get_phone_bridge_pin()}{extra}",
                 text_color="#4a9e4a"
             )
         else:
@@ -7699,7 +8315,7 @@ class App(ctk.CTk):
     def on_phone_bridge_toggle(self):
         enabled = self.phone_bridge_var.get()
         if enabled:
-            success, err = self.phone_bridge.start(self.get_phone_bridge_pin())
+            success, err = self.phone_bridge.start(self.get_phone_bridge_pin(), https=self.get_phone_bridge_https())
             if not success:
                 self.phone_bridge_var.set(False)
                 self.db.save_setting("phone_bridge_enabled", "0")
