@@ -72,7 +72,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.4.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.4.1"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -5955,11 +5955,20 @@ class App(ctk.CTk):
     # ⚠️ 保存するのはデバイス名。番号(index)は機器の抜き差しや再起動で
     # ずれるため、番号で覚えると気付かないうちに別のデバイスへ鳴らしてしまう。
     #
-    # ⚠️ 一覧に出すのは DirectSound のものだけにする。実測では、
-    # WASAPI と WDM-KS は音声エンジンの出力(24000Hz)を受け付けず
-    # 「Invalid sample rate」で失敗する。MMEは通るが名前が31文字で切れて
-    # どの機器か分からなくなる。DirectSoundは名前が完全で、レート変換もしてくれる。
-    AUDIO_HOST_API = "Windows DirectSound"
+    # ⚠️ ホストAPIは MME を使う。DirectSound を使ってはいけない。
+    # 実測(2026-08-13):
+    #   ・DirectSoundで CABLE Input へ再生 -> CABLE Output に届く信号は peak=1（無音）
+    #   ・MMEで        CABLE Input へ再生 -> CABLE Output に peak=15002 で届く
+    #   ・DirectSoundの録音は read() が即座に無音を返し続ける（実時間の5781倍）
+    #   ・MMEの録音は正常（1秒でおよそ44100フレーム）
+    # DirectSoundは「ストリームを開けて、書き込めて、時間もかかる」ため
+    # 例外も出ず成功しているように見えるのに、音だけが届かない。
+    # MMEは名前が31文字で切れるが、それは表示上の都合にすぎない。
+    # 実際に音が通ることを優先する。
+    #
+    # WASAPI と WDM-KS は音声エンジンの出力(24000Hz)を
+    # 「Invalid sample rate」で拒否するため使えない。
+    AUDIO_HOST_API = "MME"
     AUDIO_OUTPUT_DEFAULT_LABEL = "既定のデバイス（Windowsの設定に従う）"
 
     def list_output_devices(self):
@@ -5983,20 +5992,57 @@ class App(ctk.CTk):
 
     def _resolve_output_device_index(self, device_name):
         """デバイス名から今の番号を引く。見つからなければNone"""
+        return self._resolve_device_index(device_name, want_output=True)
+
+    def _resolve_device_index(self, device_name, want_output):
+        """
+        デバイス名から今の番号を引く（入力・出力の共通処理）。
+
+        ⚠️ 完全一致だけで探してはいけない。
+        以前のバージョンは DirectSound の完全な名前を保存していたが、
+        今は MME を使っており、MMEはデバイス名を31文字で切る
+        （例: 'CABLE Input (VB-Audio Virtual Cable)' -> 'CABLE Input (VB-Audio Virtual C'）。
+        完全一致だけだと、更新した瞬間に保存済みの設定が全部「見つからない」になる。
+        前方一致でも拾えるようにして、設定を引き継げるようにしておく。
+        """
         if sounddevice is None or not device_name:
             return None
+        key = "max_output_channels" if want_output else "max_input_channels"
         try:
             host_apis = sounddevice.query_hostapis()
+            fallback = None
             for index, device in enumerate(sounddevice.query_devices()):
-                if device.get("max_output_channels", 0) <= 0:
+                if device.get(key, 0) <= 0:
                     continue
                 if host_apis[device["hostapi"]]["name"] != self.AUDIO_HOST_API:
                     continue
-                if (device.get("name") or "").strip() == device_name:
+                name = (device.get("name") or "").strip()
+                if name == device_name:
                     return index
+                # 保存値(長い)が、今の名前(切れている)で始まっているか
+                if fallback is None and name and device_name.startswith(name):
+                    fallback = index
+            return fallback
         except Exception:
             return None
-        return None
+
+    @staticmethod
+    def _match_saved_device(saved, devices, default_label):
+        """
+        保存されている名前を、今の一覧の表記に合わせる。
+
+        ⚠️ 完全一致だけで判定すると、DirectSound時代に保存した長い名前が
+        MMEの切り詰められた名前と一致せず、更新した瞬間に設定が
+        「見つからない」扱いになって既定へ戻ってしまう。前方一致でも拾う。
+        """
+        if not saved or saved == default_label:
+            return default_label
+        if saved in devices:
+            return saved
+        for name in devices:
+            if name != default_label and name and saved.startswith(name):
+                return name
+        return default_label
 
     def get_audio_output_device(self):
         """
@@ -6031,22 +6077,7 @@ class App(ctk.CTk):
 
     def _resolve_input_device_index(self, device_name):
         """入力デバイス名から今の番号を引く。名前が空なら既定(None)を返す"""
-        if sounddevice is None:
-            return None
-        if not device_name:
-            return None
-        try:
-            host_apis = sounddevice.query_hostapis()
-            for index, device in enumerate(sounddevice.query_devices()):
-                if device.get("max_input_channels", 0) <= 0:
-                    continue
-                if host_apis[device["hostapi"]]["name"] != self.AUDIO_HOST_API:
-                    continue
-                if (device.get("name") or "").strip() == device_name:
-                    return index
-        except Exception:
-            return None
-        return None
+        return self._resolve_device_index(device_name, want_output=False)
 
     def get_audio_input_device(self):
         """選ばれている入力デバイス名。既定を使う場合は空文字。"""
@@ -6883,10 +6914,13 @@ class App(ctk.CTk):
         ctk.CTkLabel(row, text="出力先:").pack(side="left", padx=(0, 8))
 
         devices = self.list_output_devices()
-        saved = (self.db.get_setting("audio_output_device", "") or "").strip()
-        if saved not in devices:
-            # 前に選んだ機器が今つながっていない場合は既定に戻す（無音にならないように）
-            saved = self.AUDIO_OUTPUT_DEFAULT_LABEL
+        saved = self._match_saved_device(
+            (self.db.get_setting("audio_output_device", "") or "").strip(),
+            devices, self.AUDIO_OUTPUT_DEFAULT_LABEL)
+        # 名前が切り詰められた分（旧バージョンからの引き継ぎ）は、
+        # 今の表記に置き換えて保存し直す
+        if saved != self.AUDIO_OUTPUT_DEFAULT_LABEL:
+            self.db.save_setting("audio_output_device", saved)
         self.audio_output_var = ctk.StringVar(value=saved)
         self.audio_output_menu = ctk.CTkOptionMenu(
             row, variable=self.audio_output_var, values=devices,
@@ -6916,9 +6950,11 @@ class App(ctk.CTk):
         ctk.CTkLabel(row, text="マイク:").pack(side="left", padx=(0, 8))
 
         devices = self.list_input_devices()
-        saved = (self.db.get_setting("audio_input_device", "") or "").strip()
-        if saved not in devices:
-            saved = self.AUDIO_INPUT_DEFAULT_LABEL
+        saved = self._match_saved_device(
+            (self.db.get_setting("audio_input_device", "") or "").strip(),
+            devices, self.AUDIO_INPUT_DEFAULT_LABEL)
+        if saved != self.AUDIO_INPUT_DEFAULT_LABEL:
+            self.db.save_setting("audio_input_device", saved)
         self.audio_input_var = ctk.StringVar(value=saved)
         self.audio_input_menu = ctk.CTkOptionMenu(
             row, variable=self.audio_input_var, values=devices,
