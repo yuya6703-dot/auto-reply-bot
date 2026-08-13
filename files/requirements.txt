@@ -8,3 +8,6 @@ pygetwindow==0.0.9
 pyautogui==0.9.54
 adbutils==2.12.0
 Pillow==12.1.0
+# 出力デバイスを選んで鳴らすために使う（winsoundは既定デバイスにしか鳴らせない）。
+# PortAudioのDLLを同梱する必要があるため、specファイルでも collect_all しておくこと。
+sounddevice==0.5.1

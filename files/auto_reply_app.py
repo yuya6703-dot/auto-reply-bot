@@ -40,6 +40,17 @@ try:
 except ImportError:
     winsound = None
 
+# 出力デバイスを選んで鳴らすために使う。
+# ⚠️ winsound.PlaySound は「Windowsの既定の再生デバイス」にしか鳴らせず、
+# 送り先を指定する術がない。VB-CABLE等の仮想デバイスへ流したい場合は
+# こちらが要る。入っていない環境でも既定デバイスへは鳴らせるよう、
+# 読み込めなければ従来どおり winsound を使う作りにしてある。
+try:
+    import sounddevice
+except Exception:
+    # ImportErrorだけでなく、PortAudioのDLLが読めない場合もここに来る
+    sounddevice = None
+
 import uiautomator2 as u2
 import pygetwindow as gw
 import pyautogui
@@ -61,7 +72,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.3.4"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.4.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -261,6 +272,23 @@ DEFAULT_VOICEVOX_SPEAKERS = {"ずんだもん": dict(DEFAULT_ZUNDAMON_STYLES)}
 DEFAULT_SPEECH_SPEAKER_NAME = "ずんだもん"
 DEFAULT_SPEECH_STYLE_NAME = "ノーマル"
 
+# AivisSpeech（VOICEVOXと同じAPI形式のローカルエンジン。既定のポートが違う）のデフォルトURL
+DEFAULT_AIVISSPEECH_URL = "http://127.0.0.1:10101"
+
+# ⚠️ 話者の選択は "engine:話者ID" という文字列で保存する（例: "voicevox:3"）。
+# VOICEVOXとAivisSpeechは別エンジンなので、同じ話者IDが別のキャラを指すことがあり、
+# IDだけではどちらのエンジンに投げればよいか判別できない。
+# 旧バージョン（AivisSpeech対応前）が保存した裸の数値文字列は voicevox とみなして読む。
+TTS_ENGINE_VOICEVOX = "voicevox"
+TTS_ENGINE_AIVISSPEECH = "aivisspeech"
+TTS_ENGINES = {
+    TTS_ENGINE_VOICEVOX: {"label": "VOICEVOX", "default_url": DEFAULT_VOICEVOX_URL},
+    TTS_ENGINE_AIVISSPEECH: {"label": "AivisSpeech", "default_url": DEFAULT_AIVISSPEECH_URL},
+}
+
+# AivisSpeechの起動を待つ最大秒数（VOICEVOXと同じく、初回起動には時間がかかる）
+AIVISSPEECH_STARTUP_TIMEOUT_SECONDS = 90
+
 # ====================================================
 # 🗣️ 読み上げ / スマホ連携の設定
 # ====================================================
@@ -286,6 +314,13 @@ DEFAULT_PHONE_BRIDGE_PORT = 8765
 # しばらく門を閉じて、総当たりに現実的でない時間がかかるようにする。
 PHONE_BRIDGE_MAX_PIN_FAILURES = 5
 PHONE_BRIDGE_LOCKOUT_SECONDS = 30
+
+# 解析結果(audio_query)をサーバー側に取っておく件数。
+# ⚠️ 解析結果はスマホへ丸ごと返さない。audio_queryは39文字の文でも約7.7KBあり、
+# 編集のたびに往復させると重いうえ、スマホから来たJSONをそのままエンジンへ
+# 転送することになる。サーバーが預かっておき、スマホからは
+# 「どの解析の、何番目の句を、どのアクセントにするか」だけを送らせる。
+PHONE_BRIDGE_MAX_ANALYSES = 8
 
 # VOICEVOXの起動を待つ最大秒数（起動には数十秒かかることがある）
 VOICEVOX_STARTUP_TIMEOUT_SECONDS = 90
@@ -1449,9 +1484,9 @@ PHONE_BRIDGE_PAGE = """<!DOCTYPE html>
     padding-top:calc(10px + env(safe-area-inset-top));
   }
   header span { flex:1; }
-  header button {
+  header a, header button {
     flex:none; font-size:13px; color:var(--send); background:none;
-    border:none; padding:4px 2px;
+    border:none; padding:4px 2px; text-decoration:none;
   }
   /* 暗証番号は普段は隠しておき、未入力のときと認証に失敗したときだけ開く */
   #pinrow { flex:none; display:none; padding:10px 14px; background:var(--bar);
@@ -1537,6 +1572,7 @@ PHONE_BRIDGE_PAGE = """<!DOCTYPE html>
 
 <header>
   <span id="head">🗣️ ずんだもんに読み上げてもらう</span>
+  <a href="/voice">声の解析</a>
   <button id="pintoggle" type="button">暗証番号</button>
 </header>
 <div id="pinrow">
@@ -1783,6 +1819,366 @@ PHONE_BRIDGE_PAGE = """<!DOCTYPE html>
 """
 
 
+# スマホの「声の解析」ページ。
+# ⚠️ 声の取り込みはスマホのキーボードの音声入力（Gboard等のマイク）に任せている。
+# ブラウザのマイク(Web Speech API / getUserMedia)は「安全なページ」でしか使えず、
+# このサーバーは平文HTTPで配信しているため、ページ側からマイクは開けない。
+# キーボードの音声入力ならOS側の機能なので、平文HTTPでもそのまま使える。
+PHONE_BRIDGE_VOICE_PAGE = """<!DOCTYPE html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>声の解析</title>
+<style>
+  :root {
+    --bg:#f2f2f7; --fg:#1c1c1e; --sub:#8e8e93; --bar:#f7f7f8;
+    --line:#d1d1d6; --field:#ffffff; --send:#0b84ff; --card:#ffffff;
+    --hi:#0b84ff; --lo:#8e8e93;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#000000; --fg:#f2f2f7; --sub:#8e8e93; --bar:#1c1c1e;
+      --line:#38383a; --field:#2c2c2e; --send:#0b84ff; --card:#1c1c1e;
+    }
+  }
+  *, *::before, *::after { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html { height:100%; overflow:hidden; }
+  body {
+    position:fixed; top:0; left:0; right:0; height:100%; margin:0;
+    background:var(--bg); color:var(--fg);
+    font-family:-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  header {
+    flex:none; padding:10px 14px; font-size:13px; color:var(--sub);
+    border-bottom:1px solid var(--line); background:var(--bar);
+    display:flex; align-items:center; gap:8px;
+    padding-top:calc(10px + env(safe-area-inset-top));
+  }
+  header span { flex:1; }
+  header a, header button {
+    flex:none; font-size:13px; color:var(--send); background:none;
+    border:none; padding:4px 2px; text-decoration:none;
+  }
+  #pinrow { flex:none; display:none; padding:10px 14px; background:var(--bar);
+            border-bottom:1px solid var(--line); }
+  #pinrow.open { display:block; }
+  #pin {
+    width:100%; font-size:16px; padding:10px 12px;
+    border:1px solid var(--line); border-radius:10px;
+    background:var(--field); color:var(--fg);
+  }
+
+  #body { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:12px; }
+  #guide { color:var(--sub); font-size:13px; line-height:1.7; margin:4px 2px 14px; }
+
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:12px; margin-bottom:12px; }
+  .cardhead { font-size:12px; font-weight:600; color:var(--sub); margin-bottom:8px; }
+  #kana { font-size:15px; line-height:1.6; word-break:break-all; }
+  #engine { font-size:11px; color:var(--sub); margin-top:6px; }
+
+  /* アクセント句。モーラを横に並べ、高いモーラを線でつなぐ */
+  .phrase { border-top:1px solid var(--line); padding:10px 0 4px; }
+  .phrase:first-of-type { border-top:none; }
+  .plabel { font-size:11px; color:var(--sub); margin-bottom:6px; }
+  .moras { display:flex; flex-wrap:wrap; gap:4px; }
+  .mora {
+    min-width:38px; padding:6px 4px 4px; border-radius:8px; text-align:center;
+    border:1px solid var(--line); background:var(--field); font-size:15px;
+    line-height:1.2;
+  }
+  /* 高く発音されるモーラ。上に線を引いてピッチの高さを示す */
+  .mora.high { border-top:3px solid var(--hi); color:var(--fg); }
+  .mora.low  { border-top:3px solid var(--lo); color:var(--sub); }
+  .mora small { display:block; font-size:9px; color:var(--sub); margin-top:2px; }
+  /* アクセント核（ここの直後で下がる） */
+  .mora.nucleus { font-weight:700; }
+  .mora.nucleus small { color:var(--hi); }
+
+  .accentrow { display:flex; align-items:center; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .accentrow label { font-size:12px; color:var(--sub); }
+  .accentrow select {
+    font-size:15px; padding:6px 8px; border-radius:8px;
+    border:1px solid var(--line); background:var(--field); color:var(--fg);
+  }
+
+  #dock { flex:none; background:var(--bar); border-top:1px solid var(--line);
+          padding:8px 10px calc(8px + env(safe-area-inset-bottom)); }
+  #dock.kb { padding-bottom:8px; }
+  #inrow { display:flex; align-items:flex-end; gap:8px; }
+  #text {
+    flex:1; min-width:0; font-size:16px; line-height:1.35; padding:9px 12px;
+    border:1px solid var(--line); border-radius:18px;
+    background:var(--field); color:var(--fg); resize:none; max-height:110px;
+    font-family:inherit;
+  }
+  #btns { display:flex; gap:8px; margin-top:8px; }
+  #btns button { flex:1; font-size:15px; padding:11px 0; border:none; border-radius:10px; }
+  #analyze { background:var(--send); color:#fff; }
+  #speak { background:#34c759; color:#fff; }
+  #btns button:disabled { opacity:.4; }
+  #msg { font-size:12px; color:var(--sub); margin-top:7px; min-height:1.2em; text-align:center; }
+  #msg.ng { color:#ff6b6b; }
+</style>
+</head><body>
+
+<header>
+  <span>声の解析</span>
+  <a href="/">送信ページへ</a>
+  <button id="pintoggle" type="button">暗証番号</button>
+</header>
+
+<div id="pinrow">
+  <input id="pin" type="text" inputmode="numeric" autocomplete="off"
+         placeholder="PCの画面に表示されている6桁の番号">
+</div>
+
+<div id="body">
+  <div id="guide">
+    下の欄をタップして、<b>キーボードのマイク</b>から話しかけてください。<br>
+    文字になったら「解析」を押すと、読み方とアクセントが出ます。<br>
+    アクセントを直してから「この読みで喋る」を押すと、PCがその通りに喋ります。
+  </div>
+  <div id="result"></div>
+</div>
+
+<div id="dock">
+  <div id="inrow">
+    <textarea id="text" rows="1" placeholder="🎤 キーボードのマイクで話す"
+              enterkeyhint="done" autocomplete="off"></textarea>
+  </div>
+  <div id="btns">
+    <button id="analyze" type="button" disabled>解析</button>
+    <button id="speak" type="button" disabled>この読みで喋る</button>
+  </div>
+  <div id="msg"></div>
+</div>
+
+<script>
+(function () {
+  var pin = document.getElementById('pin'), pinrow = document.getElementById('pinrow');
+  var pintoggle = document.getElementById('pintoggle');
+  var text = document.getElementById('text');
+  var analyze = document.getElementById('analyze'), speak = document.getElementById('speak');
+  var result = document.getElementById('result'), msg = document.getElementById('msg');
+  var dock = document.getElementById('dock'), bodyEl = document.getElementById('body');
+
+  var current = null;      // 直近の解析結果 {token, phrases, text}
+
+  pin.value = localStorage.getItem('pin') || '';
+  if (!pin.value) { pinrow.classList.add('open'); }
+  pintoggle.onclick = function () { pinrow.classList.toggle('open'); };
+  pin.onchange = function () { localStorage.setItem('pin', pin.value.trim()); };
+
+  // キーボードに追従させる（送信ページと同じ考え方）。
+  // 実際に見えている高さへ body を縮めれば、入力欄がキーボードに隠れない。
+  var vv = window.visualViewport;
+  if (vv) {
+    var pending = null;
+    var applyFit = function () {
+      document.body.style.height = vv.height + 'px';
+      if (window.scrollX || window.scrollY) { window.scrollTo(0, 0); }
+      dock.classList.toggle('kb', vv.height < window.innerHeight - 1);
+    };
+    var fit = function () {
+      if (pending) { return; }
+      pending = setTimeout(function () { pending = null; applyFit(); }, 16);
+    };
+    vv.addEventListener('resize', fit);
+    vv.addEventListener('scroll', fit);
+    text.addEventListener('focus', fit);
+    text.addEventListener('blur', fit);
+    window.addEventListener('orientationchange', fit);
+    applyFit();
+  }
+
+  function autosize() {
+    text.style.height = 'auto';
+    text.style.height = Math.min(text.scrollHeight + 2, 110) + 'px';
+  }
+  function refresh() {
+    analyze.disabled = text.value.trim() === '';
+    autosize();
+  }
+  text.addEventListener('input', refresh);
+
+  function post(path, body) {
+    body.pin = pin.value.trim();
+    return fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (d) { return { status: r.status, data: d }; });
+    });
+  }
+
+  function say(message, ng) {
+    msg.textContent = message || '';
+    msg.className = ng ? 'ng' : '';
+  }
+
+  // --- 解析結果を描く ---
+  // アクセントは「何モーラ目の直後で下がるか」。0は平板（下がらない）。
+  // 高く読むモーラを線で示し、核のモーラに印を付ける。
+  function draw(data) {
+    result.textContent = '';
+
+    var head = document.createElement('div');
+    head.className = 'card';
+    var h1 = document.createElement('div');
+    h1.className = 'cardhead';
+    h1.textContent = '読み方';
+    var kana = document.createElement('div');
+    kana.id = 'kana';
+    kana.textContent = data.kana || '(読みを取得できませんでした)';
+    var eng = document.createElement('div');
+    eng.id = 'engine';
+    eng.textContent = '解析: ' + data.engine + ' ／ 「' + data.text + '」';
+    head.appendChild(h1); head.appendChild(kana); head.appendChild(eng);
+    result.appendChild(head);
+
+    if (!data.phrases || !data.phrases.length) { return; }
+
+    var card = document.createElement('div');
+    card.className = 'card';
+    var h2 = document.createElement('div');
+    h2.className = 'cardhead';
+    h2.textContent = 'アクセント（直したいところを選び直せます）';
+    card.appendChild(h2);
+
+    data.phrases.forEach(function (phrase, index) {
+      var box = document.createElement('div');
+      box.className = 'phrase';
+
+      var label = document.createElement('div');
+      label.className = 'plabel';
+      label.textContent = (index + 1) + 'つ目「' + phrase.surface + '」'
+                          + (phrase.pause ? '（このあと間があく）' : '');
+      box.appendChild(label);
+
+      var moras = document.createElement('div');
+      moras.className = 'moras';
+      box.appendChild(moras);
+
+      var row = document.createElement('div');
+      row.className = 'accentrow';
+      var sel = document.createElement('select');
+      var opt0 = document.createElement('option');
+      opt0.value = '0';
+      opt0.textContent = '平板（下がらない）';
+      sel.appendChild(opt0);
+      phrase.moras.forEach(function (m, i) {
+        var o = document.createElement('option');
+        o.value = String(i + 1);
+        o.textContent = (i + 1) + '「' + m + '」のあとで下がる';
+        sel.appendChild(o);
+      });
+      sel.value = String(phrase.accent);
+
+      // 高低の帯を引き直す。日本語のアクセントの決まり:
+      //   ・1モーラ目と2モーラ目は必ず高さが違う
+      //   ・核(accent)のモーラまでが高く、その直後から低くなる
+      //   ・核が0(平板)なら、1モーラ目だけ低くて以降ずっと高い
+      function paint() {
+        var accent = parseInt(sel.value, 10);
+        moras.textContent = '';
+        phrase.moras.forEach(function (m, i) {
+          var pos = i + 1;
+          var high;
+          if (accent === 0) { high = pos !== 1; }
+          else if (accent === 1) { high = pos === 1; }
+          else { high = pos > 1 && pos <= accent; }
+
+          var cell = document.createElement('div');
+          cell.className = 'mora ' + (high ? 'high' : 'low')
+                           + (accent !== 0 && pos === accent ? ' nucleus' : '');
+          cell.textContent = m;
+          var tag = document.createElement('small');
+          tag.textContent = (accent !== 0 && pos === accent) ? '↓' : (high ? '高' : '低');
+          cell.appendChild(tag);
+          // モーラを直接たたいても、そこを核にできる
+          cell.onclick = function () {
+            sel.value = (parseInt(sel.value, 10) === pos) ? '0' : String(pos);
+            paint();
+          };
+          moras.appendChild(cell);
+        });
+      }
+      sel.onchange = paint;
+      paint();
+
+      var caption = document.createElement('label');
+      caption.textContent = 'アクセント:';
+      row.appendChild(caption);
+      row.appendChild(sel);
+      box.appendChild(row);
+
+      phrase._select = sel;
+      card.appendChild(box);
+    });
+
+    result.appendChild(card);
+  }
+
+  function doAnalyze() {
+    var body = text.value.trim();
+    if (!body) { return; }
+    analyze.disabled = true;
+    speak.disabled = true;
+    say('解析しています...');
+    post('/analyze', { text: body }).then(function (res) {
+      analyze.disabled = false;
+      if (!res.data.ok) {
+        if (res.status === 403) { pinrow.classList.add('open'); }
+        current = null;
+        say(res.data.message || '解析できませんでした。', true);
+        return;
+      }
+      current = res.data;
+      draw(res.data);
+      speak.disabled = false;
+      say(res.data.message || '解析しました。');
+      bodyEl.scrollTop = 0;
+    }).catch(function () {
+      analyze.disabled = false;
+      say('PCにつながりませんでした。', true);
+    });
+  }
+
+  function doSpeak() {
+    if (!current) { return; }
+    var accents = current.phrases.map(function (p) {
+      return p._select ? parseInt(p._select.value, 10) : p.accent;
+    });
+    speak.disabled = true;
+    say('PCで読み上げています...');
+    post('/speak_accent', { token: current.token, accents: accents, label: current.text })
+      .then(function (res) {
+        speak.disabled = false;
+        if (!res.data.ok) {
+          if (res.status === 403) { pinrow.classList.add('open'); }
+          // 解析結果が消えていたら、案内どおり解析し直せるようにする
+          if (res.status === 404) { current = null; }
+          say(res.data.message || '読み上げられませんでした。', true);
+          return;
+        }
+        say(res.data.message || '読み上げました。');
+      }).catch(function () {
+        speak.disabled = false;
+        say('PCにつながりませんでした。', true);
+      });
+  }
+
+  analyze.onclick = doAnalyze;
+  speak.onclick = doSpeak;
+  refresh();
+})();
+</script></body></html>
+"""
+
+
 class _BridgeHTTPServer(http.server.ThreadingHTTPServer):
     """
     待ち受け用のHTTPサーバー。
@@ -1811,12 +2207,16 @@ class PhoneBridgeServer:
     """
 
     def __init__(self, on_text, log_callback=None, port=DEFAULT_PHONE_BRIDGE_PORT,
-                 list_phrases=None, save_phrase=None, delete_phrase=None):
+                 list_phrases=None, save_phrase=None, delete_phrase=None,
+                 analyze_text=None, speak_query=None):
         self.on_text = on_text                       # 受け取った文字を渡す先（読み上げキューへの投入）
         # 定型文の取得・保存・削除。渡されない場合は定型文機能なしで動く
         self.list_phrases = list_phrases or (lambda: [])
         self.save_phrase = save_phrase or (lambda text: False)
         self.delete_phrase = delete_phrase or (lambda text: False)
+        # 声の解析ページ用。渡されない場合は解析機能なしで動く
+        self.analyze_text = analyze_text or (lambda text: (None, "解析機能が使えません。"))
+        self.speak_query = speak_query or (lambda query, label="": (False, "読み上げ機能が使えません。"))
         self.log_callback = log_callback or (lambda m: None)
         self.port = port
         self.pin = ""
@@ -1826,6 +2226,25 @@ class PhoneBridgeServer:
         self._fail_count = 0
         self._blocked_until = 0.0
         self._fail_lock = threading.Lock()
+        # 解析結果の預かり所（PHONE_BRIDGE_MAX_ANALYSES 参照）
+        self._analyses = {}
+        self._analysis_lock = threading.Lock()
+
+    def remember_analysis(self, query):
+        """解析結果を預かり、それを指す合言葉を返す（古いものから捨てる）"""
+        token = secrets.token_urlsafe(12)
+        with self._analysis_lock:
+            self._analyses[token] = query
+            while len(self._analyses) > PHONE_BRIDGE_MAX_ANALYSES:
+                try:
+                    del self._analyses[next(iter(self._analyses))]
+                except (StopIteration, KeyError):
+                    break
+        return token
+
+    def get_analysis(self, token):
+        with self._analysis_lock:
+            return self._analyses.get(token)
 
     def check_pin(self, pin):
         """
@@ -1904,10 +2323,14 @@ class PhoneBridgeServer:
                 self.wfile.write(body)
 
             def do_GET(self):
-                if self.path not in ("/", "/index.html"):
+                if self.path in ("/", "/index.html"):
+                    page = PHONE_BRIDGE_PAGE
+                elif self.path in ("/voice", "/voice/"):
+                    page = PHONE_BRIDGE_VOICE_PAGE
+                else:
                     self.send_error(404)
                     return
-                body = PHONE_BRIDGE_PAGE.encode("utf-8")
+                body = page.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -1917,7 +2340,8 @@ class PhoneBridgeServer:
                 self.wfile.write(body)
 
             def do_POST(self):
-                if self.path not in ("/speak", "/phrases", "/phrases/add", "/phrases/delete"):
+                if self.path not in ("/speak", "/phrases", "/phrases/add", "/phrases/delete",
+                                     "/analyze", "/speak_accent"):
                     self.send_error(404)
                     return
                 try:
@@ -1954,6 +2378,41 @@ class PhoneBridgeServer:
                     self._send_json(200, {"ok": True, "phrases": server.list_phrases()})
                     return
 
+                # --- 編集したアクセントで喋らせる ---
+                # 預けてある解析結果に、スマホから来たアクセント位置だけを当てはめる。
+                # スマホから受け取るのは数値の配列だけなので、
+                # エンジンへ任意のJSONを転送させずに済む。
+                if self.path == "/speak_accent":
+                    query = server.get_analysis(str(payload.get("token", "")))
+                    if query is None:
+                        self._send_json(404, {
+                            "ok": False, "message": "解析結果が見つかりません。もう一度解析してください。"})
+                        return
+
+                    phrases = query.get("accent_phrases") or []
+                    accents = payload.get("accents")
+                    if not isinstance(accents, list) or len(accents) != len(phrases):
+                        self._send_json(400, {"ok": False, "message": "アクセントの指定が不正です。"})
+                        return
+
+                    edited = json.loads(json.dumps(query))     # 預かり分を壊さないよう複製する
+                    for phrase, raw_accent in zip(edited["accent_phrases"], accents):
+                        mora_count = len(phrase.get("moras") or [])
+                        try:
+                            value = int(raw_accent)
+                        except (TypeError, ValueError):
+                            self._send_json(400, {"ok": False, "message": "アクセントの指定が不正です。"})
+                            return
+                        # 0(平板)〜モーラ数 の範囲に収める。範囲外を渡すとエンジンが落ちる
+                        phrase["accent"] = max(0, min(mora_count, value))
+
+                    ok, reason = server.speak_query(edited, str(payload.get("label", "")))
+                    if not ok:
+                        self._send_json(500, {"ok": False, "message": reason})
+                        return
+                    self._send_json(200, {"ok": True, "message": "このアクセントで読み上げます。"})
+                    return
+
                 text = text.strip()
                 if not text:
                     self._send_json(400, {"ok": False, "message": "文が空です。"})
@@ -1961,6 +2420,25 @@ class PhoneBridgeServer:
 
                 truncated = len(text) > MAX_SPEECH_TEXT_LENGTH
                 text = text[:MAX_SPEECH_TEXT_LENGTH]
+
+                # --- 文を解析して、アクセント構造をスマホへ返す ---
+                if self.path == "/analyze":
+                    result, reason = server.analyze_text(text)
+                    if result is None:
+                        self._send_json(503, {"ok": False, "message": reason})
+                        return
+                    # audio_queryはサーバーが預かり、スマホには合言葉と要約だけ返す
+                    self._send_json(200, {
+                        "ok": True,
+                        "token": server.remember_analysis(result["query"]),
+                        "text": text,
+                        "kana": result["kana"],
+                        "engine": result["engine_label"],
+                        "phrases": result["phrases"],
+                        "message": "解析しました。" if not truncated
+                                   else f"長かったので先頭{MAX_SPEECH_TEXT_LENGTH}文字だけ解析しました。",
+                    })
+                    return
 
                 if self.path == "/phrases/add":
                     if not server.save_phrase(text):
@@ -3868,8 +4346,11 @@ class App(ctk.CTk):
             list_phrases=self._phone_bridge_phrases,
             save_phrase=self._on_phone_bridge_save_phrase,
             delete_phrase=self._on_phone_bridge_delete_phrase,
+            analyze_text=self._on_phone_bridge_analyze,
+            speak_query=self._on_phone_bridge_speak_query,
         )
         self._voicevox_process = None
+        self._aivisspeech_process = None
 
         self.last_coords = self._load_last_coords()
 
@@ -3895,9 +4376,11 @@ class App(ctk.CTk):
         self.after(1500, self._run_scheduled_update_check)
 
     def _restore_speech_features(self):
-        """前回ONにしていたクリップボード監視・スマホ連携・VOICEVOX自動起動を再開する"""
+        """前回ONにしていたクリップボード監視・スマホ連携・VOICEVOX/AivisSpeech自動起動を再開する"""
         if self.db.get_setting("voicevox_autostart", "0") == "1":
             self.start_voicevox(silent=True)
+        if self.db.get_setting("aivisspeech_autostart", "0") == "1":
+            self.start_aivisspeech(silent=True)
 
         if self.clipboard_watch_var.get():
             self._clipboard_last_text = (self._read_clipboard_text() or "").strip()
@@ -4674,8 +5157,8 @@ class App(ctk.CTk):
         style_frame = ctk.CTkFrame(self.zundamon_frame, fg_color="transparent")
         style_frame.pack(anchor="w", fill="x", pady=(0, 5))
 
-        # アラームの声も、読み上げと同じくVOICEVOXの全キャラから選べる
-        speakers = self.get_voicevox_speakers()
+        # アラームの声も、読み上げと同じくVOICEVOX・AivisSpeechの全キャラから選べる
+        speakers = self.get_all_speakers()
         saved_speaker = self.get_zundamon_speaker_id()
         alarm_char, alarm_style = self.find_speaker_by_id(saved_speaker)
         if alarm_char not in speakers:
@@ -4793,7 +5276,7 @@ class App(ctk.CTk):
 
     def on_alarm_char_change(self, char_name=None):
         """アラームのキャラを変えたら、そのキャラのスタイルにプルダウンを差し替える"""
-        styles = self.get_voicevox_speakers().get(self.alarm_char_var.get(), {})
+        styles = self.get_all_speakers().get(self.alarm_char_var.get(), {})
         if not styles:
             return
         names = list(styles.keys())
@@ -4821,6 +5304,16 @@ class App(ctk.CTk):
         """
         self.save_voicevox_url()
         self.refresh_voicevox_speakers()
+
+    def save_aivisspeech_url(self):
+        url = self.get_aivisspeech_url()
+        if url != (self.db.get_setting("aivisspeech_url", DEFAULT_AIVISSPEECH_URL) or "").rstrip("/"):
+            self.db.save_setting("aivisspeech_url", url)
+
+    def check_aivisspeech_connection(self):
+        """AivisSpeechに接続してキャラ一覧を取り直す（VOICEVOX版と同じ形）"""
+        self.save_aivisspeech_url()
+        self.refresh_aivisspeech_speakers()
 
     def select_alarm_sound_file(self):
         path = filedialog.askopenfilename(
@@ -5038,36 +5531,34 @@ class App(ctk.CTk):
             return entry.get().strip() or DEFAULT_ZUNDAMON_TEXT
         return self.db.get_setting("alarm_zundamon_text", DEFAULT_ZUNDAMON_TEXT)
 
+    # 話者未設定時の既定選択（VOICEVOXのずんだもん・ノーマル）
+    DEFAULT_VOICE_SELECTOR = f"{TTS_ENGINE_VOICEVOX}:{DEFAULT_ZUNDAMON_STYLES['ノーマル']}"
+
     def get_zundamon_speaker_id(self):
-        """アラームに使う話者ID（読み上げ用は get_speech_speaker_id）"""
+        """アラームに使う話者選択("engine:話者ID")。読み上げ用は get_speech_speaker_id"""
         var = getattr(self, "zundamon_style_var", None)
         char_var = getattr(self, "alarm_char_var", None)
         if var is not None and char_var is not None and self._on_main_thread():
-            styles = self.get_voicevox_speakers().get(char_var.get(), {})
+            styles = self.get_all_speakers().get(char_var.get(), {})
             if var.get() in styles:
                 return styles[var.get()]
-        try:
-            return int(self.db.get_setting("alarm_zundamon_speaker", str(DEFAULT_ZUNDAMON_STYLES["ノーマル"])))
-        except (TypeError, ValueError):
-            return DEFAULT_ZUNDAMON_STYLES["ノーマル"]
+        saved = self.db.get_setting("alarm_zundamon_speaker", self.DEFAULT_VOICE_SELECTOR)
+        return self._normalize_voice_selector(saved) or self.DEFAULT_VOICE_SELECTOR
 
     def get_speech_speaker_id(self):
         """
-        読み上げに使う話者ID。アラーム用とは別に持つ。
+        読み上げに使う話者選択("engine:話者ID")。アラーム用とは別に持つ。
         （アラームは注意を引きたい／読み上げは会話用と、目的が違うため設定を分けている）
         """
         var = getattr(self, "speech_style_var", None)
         if var is not None and self._on_main_thread():
-            speakers = self.get_voicevox_speakers()
+            speakers = self.get_all_speakers()
             char = self.speech_char_var.get()
             style = var.get()
             if char in speakers and style in speakers[char]:
                 return speakers[char][style]
-        try:
-            return int(self.db.get_setting("speech_speaker_id",
-                                           str(DEFAULT_ZUNDAMON_STYLES["ノーマル"])))
-        except (TypeError, ValueError):
-            return DEFAULT_ZUNDAMON_STYLES["ノーマル"]
+        saved = self.db.get_setting("speech_speaker_id", self.DEFAULT_VOICE_SELECTOR)
+        return self._normalize_voice_selector(saved) or self.DEFAULT_VOICE_SELECTOR
 
     def get_speech_volume(self):
         """読み上げの音量(0〜100)。ワーカースレッドからも呼ばれるのでDBフォールバックあり。"""
@@ -5134,12 +5625,18 @@ class App(ctk.CTk):
         self._voicevox_speakers = {k: dict(v) for k, v in DEFAULT_VOICEVOX_SPEAKERS.items()}
         return self._voicevox_speakers
 
-    def find_speaker_by_id(self, speaker_id):
-        """話者IDから (キャラ名, スタイル名) を逆引きする。見つからなければ既定値。"""
-        for name, styles in self.get_voicevox_speakers().items():
-            for style_name, sid in styles.items():
-                if sid == speaker_id:
-                    return name, style_name
+    def find_speaker_by_id(self, voice_selector):
+        """
+        話者選択("engine:話者ID"。旧形式の裸のIDも受け付ける)から
+        (キャラ表示名, スタイル名) を逆引きする。見つからなければ既定値。
+        検索はVOICEVOX・AivisSpeechの両方から（get_all_speakers参照）。
+        """
+        selector = self._normalize_voice_selector(voice_selector)
+        if selector is not None:
+            for name, styles in self.get_all_speakers().items():
+                for style_name, sid in styles.items():
+                    if sid == selector:
+                        return name, style_name
         return DEFAULT_SPEECH_SPEAKER_NAME, DEFAULT_SPEECH_STYLE_NAME
 
     def synthesize_zundamon_wav(self, text, speaker_id):
@@ -5174,15 +5671,489 @@ class App(ctk.CTk):
         cache[cache_key] = wav_data
         return wav_data
 
+    # --- AivisSpeech連携 ---
+    # ⚠️ AivisSpeechはVOICEVOXと同じAPI形式（/speakers, /audio_query, /synthesis）の
+    # ローカルエンジンだが、既定のポートが違う別プロセスなので、URL・キャラ一覧・
+    # WAVキャッシュはVOICEVOXとは完全に分けて持つ。上のVOICEVOX用の各メソッドと
+    # 1対1で対応している（コメントの重複は避け、違いがある部分だけ補足する）。
+    def get_aivisspeech_url(self):
+        entry = getattr(self, "aivisspeech_url_entry", None)
+        if entry is not None and self._on_main_thread():
+            return entry.get().strip().rstrip("/") or DEFAULT_AIVISSPEECH_URL
+        return (self.db.get_setting("aivisspeech_url", DEFAULT_AIVISSPEECH_URL) or DEFAULT_AIVISSPEECH_URL).rstrip("/")
+
+    def _aivisspeech_request(self, path, method="GET", data=None, timeout=30):
+        url = f"{self.get_aivisspeech_url()}{path}"
+        req = urllib.request.Request(url, data=data, method=method)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            return res.read()
+
+    def fetch_aivisspeech_speakers(self):
+        """AivisSpeechエンジンから全キャラのスタイル一覧を {キャラ名: {スタイル名: 話者ID}} で返す。"""
+        raw = self._aivisspeech_request("/speakers", timeout=15)
+        speakers = json.loads(raw.decode("utf-8"))
+        result = {}
+        for speaker in speakers:
+            name = (speaker.get("name") or "").strip()
+            styles = {s["name"]: s["id"] for s in speaker.get("styles", []) if "id" in s}
+            if name and styles:
+                result[name] = styles
+        if not result:
+            raise RuntimeError("エンジンから音声が1つも見つかりませんでした。")
+        return result
+
+    def get_aivisspeech_speakers(self):
+        """
+        保存済みのAivisSpeechキャラ一覧を返す。まだ一度も取得していなければ空。
+
+        ⚠️ VOICEVOXと違い、既定値（ハードコードされた話者ID）は用意しない。
+        AivisSpeechはユーザーが入れる音声モデルによってキャラ構成が変わるため、
+        実際に接続して取得するまでは「選べるキャラが無い」のが正直な状態。
+        当て推量のIDを既定値にすると、確認もせず合成に失敗する原因になる。
+        """
+        cached = getattr(self, "_aivisspeech_speakers", None)
+        if cached is not None:
+            return cached
+        raw = self.db.get_setting("aivisspeech_speakers", "")
+        if raw:
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict) and loaded:
+                    self._aivisspeech_speakers = {
+                        k: {sk: int(sv) for sk, sv in v.items()}
+                        for k, v in loaded.items() if isinstance(v, dict)
+                    }
+                    return self._aivisspeech_speakers
+            except (ValueError, TypeError):
+                pass
+        self._aivisspeech_speakers = {}
+        return self._aivisspeech_speakers
+
+    def synthesize_aivisspeech_wav(self, text, speaker_id):
+        """AivisSpeechで読み上げ音声を合成してWAVデータ(bytes)を返す。挙動はVOICEVOX版と同じ。"""
+        cache_key = (self.get_aivisspeech_url(), speaker_id, text)
+        cache = getattr(self, "_aivisspeech_wav_cache", None)
+        if cache is None:
+            cache = self._aivisspeech_wav_cache = {}
+        if cache_key in cache:
+            return cache[cache_key]
+
+        query_path = f"/audio_query?text={urllib.parse.quote(text)}&speaker={speaker_id}"
+        query_json = self._aivisspeech_request(query_path, method="POST", data=b"")
+        wav_data = self._aivisspeech_request(
+            f"/synthesis?speaker={speaker_id}", method="POST", data=query_json, timeout=60
+        )
+
+        while len(cache) >= MAX_SPEECH_WAV_CACHE:
+            try:
+                del cache[next(iter(cache))]
+            except (StopIteration, KeyError, RuntimeError):
+                break
+        cache[cache_key] = wav_data
+        return wav_data
+
+    # --- VOICEVOX / AivisSpeech をまとめて扱う層 ---
+    # ⚠️ 話者の選択は "engine:話者ID" の文字列（例: "voicevox:3"）で表す。
+    # 裸の数値（旧バージョンがDBに保存した形式）は voicevox とみなして読み替える。
+    def _normalize_voice_selector(self, raw):
+        """"3" や "voicevox:3" を "voicevox:3" の形に正規化する。読めなければNone。"""
+        text = str(raw).strip() if raw is not None else ""
+        if not text:
+            return None
+        if ":" in text:
+            engine, _, sid = text.partition(":")
+            if engine in TTS_ENGINES and sid.lstrip("-").isdigit():
+                return f"{engine}:{sid}"
+            return None
+        if text.lstrip("-").isdigit():
+            return f"{TTS_ENGINE_VOICEVOX}:{text}"
+        return None
+
+    def _split_voice_selector(self, raw):
+        """話者選択を (エンジン名, 話者ID(int)) に分解する。読めなければVOICEVOXの既定値。"""
+        selector = self._normalize_voice_selector(raw)
+        if selector is None:
+            selector = f"{TTS_ENGINE_VOICEVOX}:{DEFAULT_ZUNDAMON_STYLES['ノーマル']}"
+        engine, _, sid = selector.partition(":")
+        return engine, int(sid)
+
+    def get_all_speakers(self):
+        """
+        VOICEVOXとAivisSpeech、両方のキャラをまとめた一覧を返す。
+        {表示名: {スタイル名: "engine:話者ID"}}
+
+        AivisSpeech側のキャラ名には印を付けて区別する。VOICEVOX側の表示名は
+        AivisSpeech対応前と同じ無印のまま（既存の保存設定・表示への影響を避けるため）。
+        """
+        combined = {}
+        for name, styles in self.get_voicevox_speakers().items():
+            combined[name] = {style: f"{TTS_ENGINE_VOICEVOX}:{sid}" for style, sid in styles.items()}
+
+        suffix = f"（{TTS_ENGINES[TTS_ENGINE_AIVISSPEECH]['label']}）"
+        for name, styles in self.get_aivisspeech_speakers().items():
+            display_name = f"{name}{suffix}"
+            while display_name in combined:      # 名前が衝突した場合の保険
+                display_name += "_"
+            combined[display_name] = {style: f"{TTS_ENGINE_AIVISSPEECH}:{sid}" for style, sid in styles.items()}
+        return combined
+
+    def synthesize_voice_wav(self, text, voice_selector):
+        """
+        話者選択("engine:話者ID")に従って、正しいエンジンで音声を合成する。
+        アラーム・読み上げのどちらも、実際の合成はここを通す。
+        """
+        engine, speaker_id = self._split_voice_selector(voice_selector)
+        if engine == TTS_ENGINE_AIVISSPEECH:
+            return self.synthesize_aivisspeech_wav(text, speaker_id)
+        return self.synthesize_zundamon_wav(text, speaker_id)
+
+    def _engine_request(self, engine, path, method="GET", data=None, timeout=30):
+        """エンジン名に応じて、正しいエンジンへHTTPリクエストを投げる"""
+        if engine == TTS_ENGINE_AIVISSPEECH:
+            return self._aivisspeech_request(path, method=method, data=data, timeout=timeout)
+        return self._voicevox_request(path, method=method, data=data, timeout=timeout)
+
+    # --- アクセント解析（スマホの解析ページ用） ---
+    def analyze_accent(self, text, voice_selector=None):
+        """
+        文を今の声のエンジンに解析させ、アクセント句・モーラの構造を返す。
+
+        戻り値: {"engine":..., "speaker":..., "kana":..., "query":<audio_query全体>,
+                 "phrases":[{"surface":..., "accent":..., "moras":[...]}]}
+
+        「どういうものなのか」を見せるのが目的なので、エンジンが返した
+        audio_query をそのまま query に入れて持ち回る。合成し直すときに
+        同じものを送り返せば、解析結果と実際に喋る音がずれない。
+        """
+        selector = self._normalize_voice_selector(voice_selector) or self.get_speech_speaker_id()
+        engine, speaker_id = self._split_voice_selector(selector)
+
+        raw = self._engine_request(
+            engine, f"/audio_query?text={urllib.parse.quote(text)}&speaker={speaker_id}",
+            method="POST", data=b"", timeout=30)
+        query = json.loads(raw.decode("utf-8"))
+        return {
+            "engine": engine,
+            "engine_label": TTS_ENGINES[engine]["label"],
+            "selector": selector,
+            "kana": query.get("kana") or "",
+            "phrases": self._summarize_accent_phrases(query.get("accent_phrases") or []),
+            "query": query,
+        }
+
+    @staticmethod
+    def _summarize_accent_phrases(accent_phrases):
+        """画面に出しやすい形（表記・アクセント核の位置・モーラ一覧）に整える"""
+        result = []
+        for phrase in accent_phrases:
+            moras = phrase.get("moras") or []
+            result.append({
+                "surface": "".join(m.get("text", "") for m in moras),
+                "accent": phrase.get("accent", 0),
+                "moras": [m.get("text", "") for m in moras],
+                "pause": bool(phrase.get("pause_mora")),
+            })
+        return result
+
+    def synthesize_from_query(self, query, voice_selector, recalculate=True):
+        """
+        編集済みの audio_query から音声を合成する。
+
+        ⚠️ accent の数値を書き換えただけでは音は変わらない。
+        moras には既にピッチ(pitch)が入っており、/synthesis はそちらを見るため、
+        accent だけ直しても元のままの音が返ってくる（実測で確認済み）。
+        アクセントを変えたら必ず /mora_data に通してピッチを計算し直すこと。
+        """
+        engine, speaker_id = self._split_voice_selector(voice_selector)
+
+        if recalculate and query.get("accent_phrases"):
+            try:
+                raw = self._engine_request(
+                    engine, f"/mora_data?speaker={speaker_id}", method="POST",
+                    data=json.dumps(query["accent_phrases"]).encode("utf-8"), timeout=30)
+                query = dict(query, accent_phrases=json.loads(raw.decode("utf-8")))
+            except Exception:
+                # 再計算できなくても、元のクエリで喋れるだけは喋らせる
+                pass
+
+        return self._engine_request(
+            engine, f"/synthesis?speaker={speaker_id}", method="POST",
+            data=json.dumps(query).encode("utf-8"), timeout=60)
+
     # --- 再生 ---
     def _play_wav_bytes(self, wav_data, volume_percent):
-        if winsound is None or not wav_data:
+        """
+        WAVデータを鳴らす。出力デバイスが選ばれていればそこへ、
+        選ばれていなければWindowsの既定デバイスへ流す。
+        """
+        if not wav_data:
+            return False
+
+        device = self.get_audio_output_device()
+        if device:
+            if self._play_wav_to_device(wav_data, volume_percent, device):
+                return True
+            # 選んだデバイスで鳴らせなかった場合は、黙って無音にせず既定へ落とす。
+            # （デバイスを抜いた・名前が変わった等でも、とりあえず音は出る）
+            self._warn_output_device_once(device)
+
+        if winsound is None:
             return False
         try:
             winsound.PlaySound(self._apply_volume_to_wav(wav_data, volume_percent), winsound.SND_MEMORY)
             return True
         except Exception:
             return False
+
+    def _play_wav_to_device(self, wav_data, volume_percent, device_name):
+        """
+        指定した出力デバイスへWAVを流す。鳴らせたらTrue。
+
+        ⚠️ 書き込んだだけでは再生は終わらない。
+        RawOutputStream.write() は再生完了を待たずに返る（実測: 4.2秒の音声で0.04秒）。
+        そのまま閉じると途中で切れるため、音の長さぶん待ってから閉じること。
+        """
+        if sounddevice is None:
+            return False
+        index = self._resolve_output_device_index(device_name)
+        if index is None:
+            return False
+        try:
+            adjusted = self._apply_volume_to_wav(wav_data, volume_percent)
+            with wave.open(io.BytesIO(adjusted), "rb") as w:
+                channels, sampwidth, framerate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+                frame_count = w.getnframes()
+                frames = w.readframes(frame_count)
+            if sampwidth != 2 or not frames:
+                return False        # 16bit以外は扱わない（winsound側に任せる）
+
+            stream = sounddevice.RawOutputStream(
+                samplerate=framerate, channels=channels, dtype="int16", device=index)
+            try:
+                stream.start()
+                stream.write(frames)
+                time.sleep(frame_count / float(framerate) + 0.2)
+            finally:
+                stream.stop()
+                stream.close()
+            return True
+        except Exception:
+            return False
+
+    def _warn_output_device_once(self, device_name):
+        """出力デバイスで鳴らせなかったことを、同じ相手につき1度だけ知らせる"""
+        if getattr(self, "_warned_output_device", None) == device_name:
+            return
+        self._warned_output_device = device_name
+        self._post_to_ui(lambda: self.append_log(
+            f"⚠️ 出力デバイス「{device_name}」で鳴らせませんでした。"
+            "既定のデバイスで鳴らします（設定を選び直してください）。"))
+
+    # --- 出力デバイスの選択 ---
+    # ⚠️ 保存するのはデバイス名。番号(index)は機器の抜き差しや再起動で
+    # ずれるため、番号で覚えると気付かないうちに別のデバイスへ鳴らしてしまう。
+    #
+    # ⚠️ 一覧に出すのは DirectSound のものだけにする。実測では、
+    # WASAPI と WDM-KS は音声エンジンの出力(24000Hz)を受け付けず
+    # 「Invalid sample rate」で失敗する。MMEは通るが名前が31文字で切れて
+    # どの機器か分からなくなる。DirectSoundは名前が完全で、レート変換もしてくれる。
+    AUDIO_HOST_API = "Windows DirectSound"
+    AUDIO_OUTPUT_DEFAULT_LABEL = "既定のデバイス（Windowsの設定に従う）"
+
+    def list_output_devices(self):
+        """選べる出力デバイス名の一覧を返す（先頭は既定を表す項目）"""
+        names = [self.AUDIO_OUTPUT_DEFAULT_LABEL]
+        if sounddevice is None:
+            return names
+        try:
+            host_apis = sounddevice.query_hostapis()
+            for device in sounddevice.query_devices():
+                if device.get("max_output_channels", 0) <= 0:
+                    continue
+                if host_apis[device["hostapi"]]["name"] != self.AUDIO_HOST_API:
+                    continue
+                name = (device.get("name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+        except Exception:
+            pass
+        return names
+
+    def _resolve_output_device_index(self, device_name):
+        """デバイス名から今の番号を引く。見つからなければNone"""
+        if sounddevice is None or not device_name:
+            return None
+        try:
+            host_apis = sounddevice.query_hostapis()
+            for index, device in enumerate(sounddevice.query_devices()):
+                if device.get("max_output_channels", 0) <= 0:
+                    continue
+                if host_apis[device["hostapi"]]["name"] != self.AUDIO_HOST_API:
+                    continue
+                if (device.get("name") or "").strip() == device_name:
+                    return index
+        except Exception:
+            return None
+        return None
+
+    def get_audio_output_device(self):
+        """
+        選ばれている出力デバイス名。既定を使う場合は空文字。
+        ワーカースレッドからも呼ばれるのでDBを読む（_on_main_thread参照）。
+        """
+        name = (self.db.get_setting("audio_output_device", "") or "").strip()
+        return "" if name == self.AUDIO_OUTPUT_DEFAULT_LABEL else name
+
+    # --- 入力デバイス（マイク）の選択 ---
+    # ⚠️ 出力側と同じく、保存するのはデバイス名。番号は抜き差しでずれる。
+    AUDIO_INPUT_DEFAULT_LABEL = "既定のマイク（Windowsの設定に従う）"
+
+    def list_input_devices(self):
+        """選べる入力デバイス名の一覧を返す（先頭は既定を表す項目）"""
+        names = [self.AUDIO_INPUT_DEFAULT_LABEL]
+        if sounddevice is None:
+            return names
+        try:
+            host_apis = sounddevice.query_hostapis()
+            for device in sounddevice.query_devices():
+                if device.get("max_input_channels", 0) <= 0:
+                    continue
+                if host_apis[device["hostapi"]]["name"] != self.AUDIO_HOST_API:
+                    continue
+                name = (device.get("name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+        except Exception:
+            pass
+        return names
+
+    def _resolve_input_device_index(self, device_name):
+        """入力デバイス名から今の番号を引く。名前が空なら既定(None)を返す"""
+        if sounddevice is None:
+            return None
+        if not device_name:
+            return None
+        try:
+            host_apis = sounddevice.query_hostapis()
+            for index, device in enumerate(sounddevice.query_devices()):
+                if device.get("max_input_channels", 0) <= 0:
+                    continue
+                if host_apis[device["hostapi"]]["name"] != self.AUDIO_HOST_API:
+                    continue
+                if (device.get("name") or "").strip() == device_name:
+                    return index
+        except Exception:
+            return None
+        return None
+
+    def get_audio_input_device(self):
+        """選ばれている入力デバイス名。既定を使う場合は空文字。"""
+        name = (self.db.get_setting("audio_input_device", "") or "").strip()
+        return "" if name == self.AUDIO_INPUT_DEFAULT_LABEL else name
+
+    def measure_input_level(self, seconds=1.0):
+        """
+        マイクが拾えているか確かめるため、少しだけ録って音の大きさ(0〜100)を返す。
+        録れなければ (None, 理由) を返す。
+        """
+        if sounddevice is None:
+            return None, "この環境ではマイクを扱えません。"
+        name = self.get_audio_input_device()
+        index = self._resolve_input_device_index(name)
+        if name and index is None:
+            return None, f"マイク「{name}」が見つかりません。"
+        try:
+            channels, rate = self._input_stream_format(index)
+            captured = bytearray()
+            with sounddevice.RawInputStream(
+                    samplerate=rate, channels=channels, dtype="int16", device=index) as stream:
+                deadline = time.time() + seconds
+                while time.time() < deadline:
+                    data, _overflowed = stream.read(1024)
+                    captured += bytes(data)
+        except Exception as e:
+            return None, f"マイクを開けませんでした（{str(e).splitlines()[-1][:80]}）。"
+
+        if not captured:
+            return None, "マイクから何も録れませんでした。"
+        samples = array.array("h")
+        samples.frombytes(bytes(captured[: len(captured) // 2 * 2]))
+        peak = max((abs(v) for v in samples), default=0)
+        return int(peak / 32767 * 100), ""
+
+    def _input_stream_format(self, index):
+        """その入力デバイスで使うチャンネル数とサンプリングレートを決める"""
+        channels, rate = 1, 44100
+        try:
+            info = sounddevice.query_devices(index if index is not None else None, "input")
+            channels = min(2, max(1, int(info.get("max_input_channels", 1))))
+            rate = int(info.get("default_samplerate") or 44100)
+        except Exception:
+            pass
+        return channels, rate
+
+    # --- マイクの音を出力先へ流す（パススルー） ---
+    # ⚠️ 出力先がスピーカーだと、スピーカーの音をマイクが拾って
+    # ハウリングする。VB-CABLE等の仮想デバイスへ流す使い方を想定している。
+    def is_input_passthrough_running(self):
+        thread = getattr(self, "_passthrough_thread", None)
+        return thread is not None and thread.is_alive()
+
+    def start_input_passthrough(self):
+        """マイクの音を、選んでいる出力先へ流し続ける。戻り値: (開始できたか, 理由)"""
+        if self.is_input_passthrough_running():
+            return True, ""
+        if sounddevice is None:
+            return False, "この環境ではマイクを扱えません。"
+
+        in_name = self.get_audio_input_device()
+        in_index = self._resolve_input_device_index(in_name)
+        if in_name and in_index is None:
+            return False, f"マイク「{in_name}」が見つかりません。"
+
+        out_name = self.get_audio_output_device()
+        out_index = self._resolve_output_device_index(out_name)
+        if not out_name:
+            return False, ("出力先が「既定のデバイス」のままです。\n"
+                           "スピーカーへ流すとハウリングするため、"
+                           "VB-CABLE等の出力先を選んでから使ってください。")
+        if out_index is None:
+            return False, f"出力先「{out_name}」が見つかりません。"
+
+        self._passthrough_stop = threading.Event()
+        stop_event = self._passthrough_stop
+
+        def run():
+            try:
+                channels, rate = self._input_stream_format(in_index)
+                with sounddevice.RawInputStream(
+                        samplerate=rate, channels=channels, dtype="int16",
+                        device=in_index, blocksize=1024) as source, \
+                     sounddevice.RawOutputStream(
+                        samplerate=rate, channels=channels, dtype="int16",
+                        device=out_index, blocksize=1024) as sink:
+                    while not stop_event.is_set():
+                        data, _overflowed = source.read(1024)
+                        sink.write(data)
+            except Exception as e:
+                message = f"⚠️ マイクの転送が止まりました（{str(e).splitlines()[-1][:80]}）。"
+                self._post_to_ui(lambda: self.append_log(message))
+                self._post_to_ui(self._sync_passthrough_ui)
+
+        self._passthrough_thread = threading.Thread(target=run, daemon=True)
+        self._passthrough_thread.start()
+        return True, ""
+
+    def stop_input_passthrough(self):
+        event = getattr(self, "_passthrough_stop", None)
+        if event is not None:
+            event.set()
+        thread = getattr(self, "_passthrough_thread", None)
+        if thread is not None:
+            thread.join(timeout=2)
+        self._passthrough_thread = None
 
     def _play_beep_once(self, volume_percent):
         """指定音量でビープ音を1回鳴らす（再生が終わるまでブロックする）"""
@@ -5210,12 +6181,14 @@ class App(ctk.CTk):
         sound_type = self.get_alarm_sound_type()
 
         if sound_type == ALARM_TYPE_ZUNDAMON:
+            voice_selector = self.get_zundamon_speaker_id()
             try:
-                return self.synthesize_zundamon_wav(self.get_zundamon_text(), self.get_zundamon_speaker_id()), None
+                return self.synthesize_voice_wav(self.get_zundamon_text(), voice_selector), None
             except Exception as e:
+                engine, _ = self._split_voice_selector(voice_selector)
                 return None, (
-                    f"ずんだもん音声の生成に失敗しました（{e}）。\n"
-                    "VOICEVOXが起動しているか確認してください。ビープ音で代替します。"
+                    f"音声の生成に失敗しました（{e}）。\n"
+                    f"{TTS_ENGINES[engine]['label']}が起動しているか確認してください。ビープ音で代替します。"
                 )
 
         if sound_type == ALARM_TYPE_FILE:
@@ -5469,8 +6442,9 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             frame,
-            text="マイクで話せないときに、打った文をずんだもんの声で流すための機能です。\n"
-                 "読み上げにはVOICEVOXの起動が必要です（音声の設定はタイマータブにあります）。",
+            text="マイクで話せないときに、打った文をキャラの声で流すための機能です。\n"
+                 "読み上げにはVOICEVOXまたはAivisSpeechの起動が必要です"
+                 "（声の選択は下の「🎤 読み上げの声」にあります）。",
             justify="left", text_color="gray70"
         ).pack(anchor="w", pady=(0, 10))
 
@@ -5514,6 +6488,62 @@ class App(ctk.CTk):
             voicevox_section, text="", justify="left", text_color="gray70"
         )
         self.voicevox_status_label.pack(anchor="w", padx=12, pady=(0, 10))
+
+        # --- AivisSpeechの起動 ---
+        # VOICEVOXと同じAPI形式の別エンジン。両方インストールしておいて、
+        # アラーム・読み上げのキャラごとにどちらのエンジンを使うか選べる。
+        aivisspeech_section = ctk.CTkFrame(frame)
+        aivisspeech_section.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(
+            aivisspeech_section, text="🟣 AivisSpeechの起動",
+            font=ctk.CTkFont(weight="bold")
+        ).pack(anchor="w", padx=12, pady=(10, 5))
+
+        aivisspeech_path_frame = ctk.CTkFrame(aivisspeech_section, fg_color="transparent")
+        aivisspeech_path_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 5))
+
+        ctk.CTkLabel(aivisspeech_path_frame, text="AivisSpeechの場所:").pack(side="left", padx=(0, 8))
+        self.aivisspeech_path_label = ctk.CTkLabel(
+            aivisspeech_path_frame, text=self._aivisspeech_path_display_text(),
+            text_color="gray70", anchor="w"
+        )
+        self.aivisspeech_path_label.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(aivisspeech_path_frame, text="📂 場所を選択", width=110,
+                      command=self.select_aivisspeech_exe).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(aivisspeech_path_frame, text="▶ 今すぐ起動", width=110,
+                      fg_color="green", hover_color="darkgreen",
+                      command=lambda: self.start_aivisspeech(silent=False)).pack(side="left", padx=5)
+
+        self.aivisspeech_autostart_var = ctk.BooleanVar(
+            value=self.db.get_setting("aivisspeech_autostart", "0") == "1"
+        )
+        ctk.CTkCheckBox(
+            aivisspeech_section, text="このツールの起動と同時にAivisSpeechも起動する",
+            variable=self.aivisspeech_autostart_var,
+            command=self.on_aivisspeech_autostart_toggle
+        ).pack(anchor="w", padx=12, pady=(0, 5))
+
+        aivisspeech_url_frame = ctk.CTkFrame(aivisspeech_section, fg_color="transparent")
+        aivisspeech_url_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 5))
+
+        ctk.CTkLabel(aivisspeech_url_frame, text="AivisSpeech URL:").pack(side="left", padx=(0, 8))
+        self.aivisspeech_url_entry = ctk.CTkEntry(aivisspeech_url_frame, width=200)
+        self.aivisspeech_url_entry.insert(0, self.db.get_setting("aivisspeech_url", DEFAULT_AIVISSPEECH_URL))
+        self.aivisspeech_url_entry.pack(side="left")
+        self.aivisspeech_url_entry.bind("<FocusOut>", lambda e: self.save_aivisspeech_url())
+        self.aivisspeech_url_entry.bind("<Return>", lambda e: self.save_aivisspeech_url())
+        self.aivisspeech_url_entry.bind("<Button-3>", self._show_entry_context_menu)
+
+        ctk.CTkButton(aivisspeech_url_frame, text="🔄 接続確認", width=100,
+                      command=self.check_aivisspeech_connection).pack(side="left", padx=(8, 5))
+        ctk.CTkButton(aivisspeech_url_frame, text="🔄 キャラ一覧を取得", width=150,
+                      command=self.refresh_aivisspeech_speakers).pack(side="left")
+
+        self.aivisspeech_status_label = ctk.CTkLabel(
+            aivisspeech_section, text="", justify="left", text_color="gray70"
+        )
+        self.aivisspeech_status_label.pack(anchor="w", padx=12, pady=(0, 10))
 
         self.build_speech_voice_section(frame)
 
@@ -5793,11 +6823,11 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             section,
-            text="VOICEVOXに入っているキャラから選べます。アラーム音の声とは別に設定できます。",
+            text="VOICEVOXやAivisSpeechに入っているキャラから選べます。アラーム音の声とは別に設定できます。",
             justify="left", text_color="gray70"
         ).pack(anchor="w", padx=12, pady=(0, 8))
 
-        speakers = self.get_voicevox_speakers()
+        speakers = self.get_all_speakers()
         saved_id = self.get_speech_speaker_id()
         char_name, style_name = self.find_speaker_by_id(saved_id)
         if char_name not in speakers:
@@ -5843,9 +6873,176 @@ class App(ctk.CTk):
         ctk.CTkButton(vol_frame, text="🔊 試聴", width=90,
                       command=self.test_speech_voice).pack(side="left")
 
+        self.build_audio_output_section(section)
+
+    def build_audio_output_section(self, parent):
+        """読み上げ・アラームを鳴らす出力デバイスを選ぶエリア"""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
+
+        ctk.CTkLabel(row, text="出力先:").pack(side="left", padx=(0, 8))
+
+        devices = self.list_output_devices()
+        saved = (self.db.get_setting("audio_output_device", "") or "").strip()
+        if saved not in devices:
+            # 前に選んだ機器が今つながっていない場合は既定に戻す（無音にならないように）
+            saved = self.AUDIO_OUTPUT_DEFAULT_LABEL
+        self.audio_output_var = ctk.StringVar(value=saved)
+        self.audio_output_menu = ctk.CTkOptionMenu(
+            row, variable=self.audio_output_var, values=devices,
+            command=self.on_audio_output_change, width=290)
+        self.audio_output_menu.pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(row, text="🔄", width=36,
+                      command=self.refresh_output_devices).pack(side="left", padx=(0, 8))
+
+        if sounddevice is None:
+            # 出せない理由を黙って隠さない
+            ctk.CTkLabel(
+                row, text="※ この環境では出力先を選べません（既定のデバイスに鳴ります）",
+                text_color="#d08a4a").pack(side="left")
+        else:
+            ctk.CTkLabel(
+                row, text="※ VB-CABLE等を選ぶと、その先へ声を流せます",
+                text_color="gray70").pack(side="left")
+
+        self.build_audio_input_section(parent)
+
+    def build_audio_input_section(self, parent):
+        """マイク（入力デバイス）を選ぶエリア"""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(anchor="w", fill="x", padx=12, pady=(0, 4))
+
+        ctk.CTkLabel(row, text="マイク:").pack(side="left", padx=(0, 8))
+
+        devices = self.list_input_devices()
+        saved = (self.db.get_setting("audio_input_device", "") or "").strip()
+        if saved not in devices:
+            saved = self.AUDIO_INPUT_DEFAULT_LABEL
+        self.audio_input_var = ctk.StringVar(value=saved)
+        self.audio_input_menu = ctk.CTkOptionMenu(
+            row, variable=self.audio_input_var, values=devices,
+            command=self.on_audio_input_change, width=290)
+        self.audio_input_menu.pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(row, text="🔄", width=36,
+                      command=self.refresh_input_devices).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(row, text="🎙️ 拾えるか確認", width=130,
+                      command=self.check_input_level).pack(side="left")
+
+        pass_row = ctk.CTkFrame(parent, fg_color="transparent")
+        pass_row.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
+
+        self.input_passthrough_var = ctk.BooleanVar(value=False)
+        self.input_passthrough_check = ctk.CTkCheckBox(
+            pass_row, text="マイクの音を出力先へ流す",
+            variable=self.input_passthrough_var,
+            command=self.on_input_passthrough_toggle)
+        self.input_passthrough_check.pack(side="left", padx=(0, 10))
+
+        self.input_status_label = ctk.CTkLabel(pass_row, text="", text_color="gray70")
+        self.input_status_label.pack(side="left")
+
+        if sounddevice is None:
+            self.input_passthrough_check.configure(state="disabled")
+            self._set_input_status("※ この環境ではマイクを扱えません", "#d08a4a")
+        else:
+            self._set_input_status("※ 自分の声と読み上げを、同じ出力先にまとめられます")
+
+    def _set_input_status(self, text, color="gray70"):
+        self.input_status_label.configure(text=text, text_color=color)
+
+    def _sync_passthrough_ui(self):
+        """転送が止まったときに、チェックの状態を実態に合わせる"""
+        if not self.is_input_passthrough_running():
+            self.input_passthrough_var.set(False)
+            self._set_input_status("※ マイクの転送は止まっています")
+
+    def refresh_input_devices(self):
+        devices = self.list_input_devices()
+        self.audio_input_menu.configure(values=devices)
+        if self.audio_input_var.get() not in devices:
+            self.audio_input_var.set(self.AUDIO_INPUT_DEFAULT_LABEL)
+            self.db.save_setting("audio_input_device", "")
+            self.append_log("ℹ️ 選んでいたマイクが見つからないため、既定に戻しました。")
+        self.append_log(f"🔄 マイクの一覧を更新しました（{len(devices) - 1}件）。")
+
+    def on_audio_input_change(self, name=None):
+        chosen = self.audio_input_var.get()
+        if chosen == self.AUDIO_INPUT_DEFAULT_LABEL:
+            self.db.save_setting("audio_input_device", "")
+            self.append_log("⚙️ マイクを既定のデバイスにしました。")
+        else:
+            self.db.save_setting("audio_input_device", chosen)
+            self.append_log(f"⚙️ マイクを「{chosen}」にしました。")
+        # 転送中にマイクを変えたら、新しいマイクで開き直す
+        if self.is_input_passthrough_running():
+            self.stop_input_passthrough()
+            started, reason = self.start_input_passthrough()
+            if not started:
+                self.input_passthrough_var.set(False)
+                self._set_input_status(f"⚠️ {reason.splitlines()[0]}", "#d08a4a")
+
+    def check_input_level(self):
+        """マイクが拾えているかを、実際に少し録って確かめる"""
+        self._set_input_status("マイクを確認しています...")
+        self.update_idletasks()
+
+        def run():
+            level, reason = self.measure_input_level()
+            if level is None:
+                self._post_to_ui(lambda: self._set_input_status(f"⚠️ {reason}", "#d08a4a"))
+                self._post_to_ui(lambda: self.append_log(f"⚠️ マイクの確認: {reason}"))
+                return
+            if level < 2:
+                text, color = f"音を拾えていません（音量 {level}%）。話しながらもう一度お試しください。", "#d08a4a"
+            else:
+                text, color = f"✅ 拾えています（音量 {level}%）", "#4a9e4a"
+            self._post_to_ui(lambda: self._set_input_status(text, color))
+            self._post_to_ui(lambda: self.append_log(f"🎙️ マイクの確認: 音量 {level}%"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_input_passthrough_toggle(self):
+        if self.input_passthrough_var.get():
+            started, reason = self.start_input_passthrough()
+            if not started:
+                self.input_passthrough_var.set(False)
+                self._set_input_status(f"⚠️ {reason.splitlines()[0]}", "#d08a4a")
+                messagebox.showwarning("マイクの転送", reason)
+                return
+            out = self.get_audio_output_device()
+            self._set_input_status(f"🔴 転送中 → {out}", "#4a9e4a")
+            self.append_log(f"🔴 マイクの音を「{out}」へ流し始めました。")
+        else:
+            self.stop_input_passthrough()
+            self._set_input_status("※ 自分の声と読み上げを、同じ出力先にまとめられます")
+            self.append_log("⏹️ マイクの転送を止めました。")
+
+    def refresh_output_devices(self):
+        """つなぎ直した機器を拾い直す"""
+        devices = self.list_output_devices()
+        self.audio_output_menu.configure(values=devices)
+        if self.audio_output_var.get() not in devices:
+            self.audio_output_var.set(self.AUDIO_OUTPUT_DEFAULT_LABEL)
+            self.db.save_setting("audio_output_device", "")
+            self.append_log("ℹ️ 選んでいた出力先が見つからないため、既定のデバイスに戻しました。")
+        self.append_log(f"🔄 出力先の一覧を更新しました（{len(devices) - 1}件）。")
+
+    def on_audio_output_change(self, name=None):
+        chosen = self.audio_output_var.get()
+        if chosen == self.AUDIO_OUTPUT_DEFAULT_LABEL:
+            self.db.save_setting("audio_output_device", "")
+            self.append_log("⚙️ 出力先を既定のデバイスにしました。")
+        else:
+            self.db.save_setting("audio_output_device", chosen)
+            self.append_log(f"⚙️ 出力先を「{chosen}」にしました。")
+        # 選び直したら、前の機器で出した警告は忘れる
+        self._warned_output_device = None
+
     def on_speech_char_change(self, char_name=None):
         """キャラを変えたら、そのキャラが持つスタイルにプルダウンを差し替える"""
-        speakers = self.get_voicevox_speakers()
+        speakers = self.get_all_speakers()
         styles = speakers.get(self.speech_char_var.get(), {})
         if not styles:
             return
@@ -5856,7 +7053,7 @@ class App(ctk.CTk):
         self.on_speech_style_change()
 
     def on_speech_style_change(self, style_name=None):
-        speakers = self.get_voicevox_speakers()
+        speakers = self.get_all_speakers()
         char = self.speech_char_var.get()
         style = self.speech_style_var.get()
         speaker_id = speakers.get(char, {}).get(style)
@@ -5899,16 +7096,37 @@ class App(ctk.CTk):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _apply_voicevox_speakers(self, speakers):
-        """取得したキャラ一覧を保存し、両方のプルダウンに反映する"""
-        self._voicevox_speakers = speakers
-        self.db.save_setting("voicevox_speakers", json.dumps(speakers, ensure_ascii=False))
-        # 合成結果のキャッシュは話者IDごとなので捨てなくてよいが、
-        # スタイル構成が変わった可能性があるため念のため空にする
-        self._zundamon_wav_cache = {}
+    def refresh_aivisspeech_speakers(self):
+        """AivisSpeechから全キャラを取り直してプルダウンに反映する（VOICEVOX版と同じ形）"""
+        self.append_log("🔄 AivisSpeechからキャラ一覧を取得しています...")
 
+        def run():
+            try:
+                speakers = self.fetch_aivisspeech_speakers()
+            except Exception as e:
+                message = (
+                    f"AivisSpeechからキャラ一覧を取得できませんでした。\n\n"
+                    f"URL: {self.get_aivisspeech_url()}\n詳細: {e}\n\n"
+                    "AivisSpeechを起動してから、もう一度お試しください。"
+                )
+                self._post_to_ui(lambda: messagebox.showerror("取得できません", message))
+                self._post_to_ui(lambda: self.append_log("⚠️ キャラ一覧を取得できませんでした。"))
+                return
+            self._post_to_ui(lambda: self._apply_aivisspeech_speakers(speakers))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _refresh_voice_dropdowns(self):
+        """
+        キャラ選択プルダウン(アラーム/読み上げ)を、いま分かっている全エンジンの
+        キャラ(get_all_speakers)で作り直す。
+
+        ⚠️ どちらか一方のエンジンだけを取得し直した場合でも、必ずここを通して
+        「取得済みの全エンジン分」で作り直すこと。取得した側の一覧だけで
+        プルダウンを差し替えると、もう一方のエンジンの選択肢が消えてしまう。
+        """
+        speakers = self.get_all_speakers()
         names = sorted(speakers.keys())
-
         # 読み上げタブとアラーム（タイマータブ）は同じキャラ一覧を共有する
         for char_var, char_menu, on_change in (
             (getattr(self, "speech_char_var", None), getattr(self, "speech_char_menu", None),
@@ -5919,15 +7137,39 @@ class App(ctk.CTk):
             if char_var is None or char_menu is None:
                 continue
             char_menu.configure(values=names)
-            if char_var.get() not in speakers:
+            if names and char_var.get() not in speakers:
                 char_var.set(names[0])
             on_change()
 
+    def _apply_voicevox_speakers(self, speakers):
+        """取得したVOICEVOXのキャラ一覧を保存し、両方のプルダウンに反映する"""
+        self._voicevox_speakers = speakers
+        self.db.save_setting("voicevox_speakers", json.dumps(speakers, ensure_ascii=False))
+        # 合成結果のキャッシュは話者IDごとなので捨てなくてよいが、
+        # スタイル構成が変わった可能性があるため念のため空にする
+        self._zundamon_wav_cache = {}
+        self._refresh_voice_dropdowns()
+
         total_styles = sum(len(v) for v in speakers.values())
-        self.append_log(f"✅ VOICEVOXから{len(names)}キャラ・{total_styles}スタイルを読み込みました。")
+        self.append_log(f"✅ VOICEVOXから{len(speakers)}キャラ・{total_styles}スタイルを読み込みました。")
         messagebox.showinfo(
             "取得しました",
-            f"{len(names)}キャラ・{total_styles}スタイルを読み込みました。\n"
+            f"{len(speakers)}キャラ・{total_styles}スタイルを読み込みました。\n"
+            "「キャラ」と「スタイル」から選んでください。"
+        )
+
+    def _apply_aivisspeech_speakers(self, speakers):
+        """取得したAivisSpeechのキャラ一覧を保存し、両方のプルダウンに反映する"""
+        self._aivisspeech_speakers = speakers
+        self.db.save_setting("aivisspeech_speakers", json.dumps(speakers, ensure_ascii=False))
+        self._aivisspeech_wav_cache = {}
+        self._refresh_voice_dropdowns()
+
+        total_styles = sum(len(v) for v in speakers.values())
+        self.append_log(f"✅ AivisSpeechから{len(speakers)}キャラ・{total_styles}スタイルを読み込みました。")
+        messagebox.showinfo(
+            "取得しました",
+            f"{len(speakers)}キャラ・{total_styles}スタイルを読み込みました。\n"
             "「キャラ」と「スタイル」から選んでください。"
         )
 
@@ -6019,6 +7261,30 @@ class App(ctk.CTk):
         """
         self._ui_queue.put(callback)
 
+    # UI更新の失敗を記録する種類の上限。
+    # 同じ失敗が毎周回で起きてもファイルを溢れさせないための歯止め。
+    MAX_UI_ERROR_KINDS = 20
+
+    def _record_ui_callback_error(self, detail):
+        """UI更新の失敗を残す（同じ内容は1度だけ／ループは止めない）"""
+        seen = getattr(self, "_ui_error_seen", None)
+        if seen is None:
+            seen = self._ui_error_seen = {}
+        key = (detail.strip().splitlines() or ["unknown"])[-1][:200]
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] != 1 or len(seen) > self.MAX_UI_ERROR_KINDS:
+            return
+        write_error_log(f"UI更新の処理に失敗しました:\n{detail}")
+        # 画面にも一度だけ知らせる。ここでの失敗が再帰しないよう印を立てる。
+        if not getattr(self, "_ui_error_notified", False):
+            self._ui_error_notified = True
+            try:
+                self.append_log(
+                    "⚠️ 画面の更新処理でエラーが発生しました。"
+                    f"詳細は {os.path.basename(ERROR_LOG_FILE)} を確認してください。")
+            except Exception:
+                pass
+
     def _pump_ui_queue(self):
         """
         ワーカーから届いた用件をメインスレッドで実行する。
@@ -6033,7 +7299,12 @@ class App(ctk.CTk):
                 try:
                     callback()
                 except Exception:
-                    pass
+                    # ⚠️ 握りつぶすだけにしてはいけない。
+                    # ここはワーカーからUIへの用件が すべて 通る一本道なので、
+                    # 何も残さないと「ログが出ない」「読み上げ履歴が増えない」
+                    # といった症状の手掛かりが完全に消える。
+                    # ループは止めず、同じ内容は1度だけ記録する。
+                    self._record_ui_callback_error(traceback.format_exc())
         finally:
             # 終了処理に入っていたら予約し直さない（破棄後の発火を避ける）
             if not getattr(self, "_closing", False):
@@ -6074,15 +7345,17 @@ class App(ctk.CTk):
         """
         while True:
             text, _source = self._speech_queue.get()
+            voice_selector = self.get_speech_speaker_id()
             try:
                 # 読み上げはアラームとは別の声・音量を使う
-                wav_data = self.synthesize_zundamon_wav(text, self.get_speech_speaker_id())
+                wav_data = self.synthesize_voice_wav(text, voice_selector)
                 self._play_wav_bytes(wav_data, self.get_speech_volume())
             except Exception as e:
-                # VOICEVOX未起動などで失敗しても、ワーカーごと止めてはいけない
+                # エンジン未起動などで失敗しても、ワーカーごと止めてはいけない
+                engine, _ = self._split_voice_selector(voice_selector)
                 message = (
                     f"⚠️ 読み上げに失敗しました（{e}）。"
-                    "VOICEVOXが起動しているか確認してください。"
+                    f"{TTS_ENGINES[engine]['label']}が起動しているか確認してください。"
                 )
                 self._post_to_ui(lambda m=message: self.append_log(m))
             finally:
@@ -6259,6 +7532,112 @@ class App(ctk.CTk):
     def _set_voicevox_status(self, text, color="gray70"):
         self.voicevox_status_label.configure(text=text, text_color=color)
 
+    # --- AivisSpeechの自動起動 ---
+    # ⚠️ VOICEVOXの起動処理と1対1で対応している（同じ罠・同じ対策も含めて）。
+    # 特に start_aivisspeech の except節: 節を抜けると変数eは消えるため、
+    # _post_to_ui に渡すlambdaの中でeを直接参照するとNameErrorになり、
+    # 肝心の失敗理由が表示されない。VOICEVOX版と同じく、先に文字列へ組み立てておく。
+    def get_aivisspeech_exe_path(self):
+        return self.db.get_setting("aivisspeech_exe_path", "") or ""
+
+    def is_aivisspeech_ready(self, timeout=2):
+        """AivisSpeechエンジンが応答するか（＝すでに起動しているか）を確かめる"""
+        try:
+            self._aivisspeech_request("/version", timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    def select_aivisspeech_exe(self):
+        path = filedialog.askopenfilename(
+            title="AivisSpeechの実行ファイル(AivisSpeech.exe)を選択",
+            filetypes=[("実行ファイル", "*.exe"), ("すべてのファイル", "*.*")]
+        )
+        if not path:
+            return
+        self.db.save_setting("aivisspeech_exe_path", path)
+        self.aivisspeech_path_label.configure(text=self._aivisspeech_path_display_text())
+        self.append_log(f"✅ AivisSpeechの場所を設定しました: {os.path.basename(path)}")
+
+    def _aivisspeech_path_display_text(self):
+        path = self.get_aivisspeech_exe_path()
+        return os.path.basename(path) if path else "未設定"
+
+    def on_aivisspeech_autostart_toggle(self):
+        enabled = self.aivisspeech_autostart_var.get()
+        self.db.save_setting("aivisspeech_autostart", "1" if enabled else "0")
+        self.append_log(f"⚙️ AivisSpeechの同時起動を {'ON' if enabled else 'OFF'} にしました。")
+        if enabled and not self.get_aivisspeech_exe_path():
+            messagebox.showinfo(
+                "AivisSpeechの場所",
+                "AivisSpeechの実行ファイルの場所を設定してください。\n"
+                "「📂 場所を選択」から AivisSpeech.exe を指定します。"
+            )
+
+    def start_aivisspeech(self, silent=False):
+        """
+        AivisSpeechを起動する。すでに起動していれば何もしない。
+        起動には時間がかかるため、待ち受けは必ずワーカースレッドで行う。
+        """
+        path = self.get_aivisspeech_exe_path()
+        if not path or not os.path.exists(path):
+            message = (
+                "AivisSpeechの場所が設定されていません。「📂 場所を選択」から指定してください。"
+                if not path else
+                f"設定されたAivisSpeechが見つかりません: {path}"
+            )
+            self._set_aivisspeech_status(f"⚠️ {message}", "#d08a4a")
+            self.append_log(f"⚠️ {message}")
+            if not silent:
+                messagebox.showwarning("AivisSpeech", message)
+            return
+
+        self._set_aivisspeech_status("AivisSpeechの状態を確認しています...", "gray70")
+
+        def run():
+            if self.is_aivisspeech_ready():
+                self._post_to_ui(lambda: self._on_aivisspeech_ready(already_running=True))
+                return
+
+            try:
+                self._aivisspeech_process = subprocess.Popen([path], cwd=os.path.dirname(path) or None)
+            except Exception as e:
+                message = f"起動に失敗しました: {e}"
+                self._post_to_ui(lambda: self._on_aivisspeech_failed(message, silent))
+                return
+
+            self._post_to_ui(lambda: self._set_aivisspeech_status(
+                "AivisSpeechを起動しています...（初回は時間がかかります）", "gray70"))
+
+            deadline = time.time() + AIVISSPEECH_STARTUP_TIMEOUT_SECONDS
+            while time.time() < deadline:
+                if self.is_aivisspeech_ready():
+                    self._post_to_ui(lambda: self._on_aivisspeech_ready(already_running=False))
+                    return
+                time.sleep(2)
+
+            self._post_to_ui(lambda: self._on_aivisspeech_failed(
+                f"{AIVISSPEECH_STARTUP_TIMEOUT_SECONDS}秒待っても応答がありませんでした。", silent))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_aivisspeech_ready(self, already_running):
+        if already_running:
+            self._set_aivisspeech_status("✅ AivisSpeechは既に起動しています。", "#4a9e4a")
+            self.append_log("✅ AivisSpeechは既に起動していました。")
+        else:
+            self._set_aivisspeech_status("✅ AivisSpeechの起動が完了しました。", "#4a9e4a")
+            self.append_log("✅ AivisSpeechを起動しました。読み上げが使えます。")
+
+    def _on_aivisspeech_failed(self, message, silent):
+        self._set_aivisspeech_status(f"⚠️ {message}", "#d08a4a")
+        self.append_log(f"⚠️ AivisSpeech: {message}")
+        if not silent:
+            messagebox.showwarning("AivisSpeech", message)
+
+    def _set_aivisspeech_status(self, text, color="gray70"):
+        self.aivisspeech_status_label.configure(text=text, text_color=color)
+
     # --- スマホ連携 ---
     def get_phone_bridge_pin(self):
         """暗証番号を返す。まだ無ければ作って保存する（毎回入力し直さずに済むように）。"""
@@ -6358,6 +7737,46 @@ class App(ctk.CTk):
             self._post_to_ui(self._refresh_speech_phrase_listbox)
             self._post_to_ui(lambda: self.append_log(f"🗑️ スマホから定型文を削除しました:「{text}」"))
         return success
+
+    # --- スマホの「声の解析」ページ用 ---
+    # ⚠️ どちらもサーバースレッドから呼ばれる。UIウィジェットには触らないこと。
+    def _on_phone_bridge_analyze(self, text):
+        """スマホから届いた文を解析して、アクセント構造を返す。失敗したら (None, 理由)"""
+        try:
+            result = self.analyze_accent(text)
+        except Exception as e:
+            engine, _ = self._split_voice_selector(self.get_speech_speaker_id())
+            reason = (f"{TTS_ENGINES[engine]['label']}に解析させられませんでした"
+                      f"（{str(e).splitlines()[0][:80]}）。起動しているか確認してください。")
+            self._post_to_ui(lambda: self.append_log(f"⚠️ スマホの解析: {reason}"))
+            return None, reason
+        self._post_to_ui(lambda: self.append_log(f"🔍 スマホから解析しました:「{text}」→ {result['kana'] or '(読みなし)'}"))
+        return result, ""
+
+    def _on_phone_bridge_speak_query(self, query, label=""):
+        """
+        スマホで編集されたアクセントのまま喋らせる。
+
+        読み上げキュー(request_speech)は「文字から合成する」作りなので通せない。
+        ここは編集済みクエリからWAVを作り、同じ再生経路に流す。
+        """
+        selector = self.get_speech_speaker_id()
+        try:
+            wav_data = self.synthesize_from_query(query, selector)
+        except Exception as e:
+            engine, _ = self._split_voice_selector(selector)
+            reason = (f"{TTS_ENGINES[engine]['label']}で合成できませんでした"
+                      f"（{str(e).splitlines()[0][:80]}）。")
+            self._post_to_ui(lambda: self.append_log(f"⚠️ スマホの解析: {reason}"))
+            return False, reason
+
+        volume = self.get_speech_volume()
+        # 再生は音が鳴り終わるまで戻らないため、スマホを待たせないよう別スレッドで行う
+        threading.Thread(
+            target=lambda: self._play_wav_bytes(wav_data, volume), daemon=True).start()
+        shown = label or "(編集したアクセント)"
+        self._post_to_ui(lambda: self.append_log(f"🗣️ スマホの解析から読み上げました:「{shown}」"))
+        return True, ""
 
     # --- GitHub連携 ---
     def _set_github_status(self, text, color="gray70"):
@@ -6870,8 +8289,24 @@ class App(ctk.CTk):
                 self.log_textbox.configure(state="disabled")
                 if self.auto_scroll_var.get():
                     self.log_textbox.yview("end")
+        # ⚠️ ワーカースレッドから after() を直接呼ばない。
+        # mainloopが回っている間は通るが、起動直後や終了処理中は
+        # RuntimeError("main thread is not in main loop") になり、
+        # そのログ行は画面に出ないまま消える（DBには残るので気付きにくい）。
+        # 監視スレッドはこの append_log を毎周回で呼ぶため、そちらは
+        # _post_to_ui の伝言板を経由してメインスレッドで実行させる。
+        #
+        # ⚠️ メインスレッドからの分まで伝言板に回してはいけない。
+        # 伝言板は120msごとにしか掃き出さないため、「ログを出した直後に
+        # ログ欄を読む」処理（ログのコピー等）が古い内容を見てしまう。
+        if self._on_main_thread() or getattr(self, "_ui_queue", None) is None:
+            try:
+                self.after(0, update_gui)
+            except Exception:
+                pass
+            return
         try:
-            self.after(0, update_gui)
+            self._post_to_ui(update_gui)
         except Exception:
             pass
 
@@ -7389,6 +8824,8 @@ class App(ctk.CTk):
             self.worker.stop()
         # 待ち受けポートを掴んだままにしないよう、確実に閉じる
         self.phone_bridge.stop()
+        # マイクの転送も止める。開いたままだと音声デバイスを掴み続けてしまう
+        self.stop_input_passthrough()
         self._cancel_scheduled_jobs()
         self._check_thread_and_destroy()
 

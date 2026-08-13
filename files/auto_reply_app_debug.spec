@@ -16,6 +16,18 @@ tmp_ret = collect_all('pygetwindow')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('PIL')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# sounddevice は PortAudio の DLL を同梱しないと、exe側で読み込みに失敗して
+# 出力デバイスの選択が丸ごと使えなくなる（音は既定デバイスに鳴る）。
+#
+# ⚠️ sounddevice だけを collect_all しても DLL は入らない。
+# sounddevice.py は単一モジュールでパッケージではないため、PyInstallerが
+# 「not a package」として data/binary の収集を丸ごと飛ばす（警告は出るが失敗はしない）。
+# 実体の libportaudio*.dll は別パッケージ _sounddevice_data にあるので、
+# そちらも必ず collect_all すること。
+tmp_ret = collect_all('sounddevice')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('_sounddevice_data')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
