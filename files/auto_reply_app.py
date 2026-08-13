@@ -85,7 +85,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.5.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.6.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -366,9 +366,46 @@ def looks_like_question(sentence):
     return False
 
 
-def apply_question_marks(text):
+# ⚠️ 感嘆（！）は文字だけでは判定できない。
+# 「すごいですね」は感嘆にも平静にもなり、決めるのは声の勢いだから。
+# そのため主な手がかりは「話した声の大きさ」で、文字は補助に使う。
+# 実測(AivisSpeech): 「！」を付けると音量が31%増え(RMS 4334->5677)、やや短くなる。
+#
+# 文字だけで感嘆と言い切れるのは、感動詞がそれ単体で一文になっている場合。
+# 「すごいですね」ではなく「すごい」「やった」のような短い一言。
+EXCLAIM_WORDS = ("やった", "すごい", "すご", "うわ", "わあ", "わー", "おお", "おー",
+                 "えー", "ええ", "うそ", "まじ", "やば", "いいね", "最高", "よし",
+                 "おめでとう", "ありがとう", "がんばれ", "頑張れ", "おはよう")
+
+# 言い方の癖を取り除いて見比べるための処理。
+# ⚠️ 促音「っ」をどこでも消してはいけない。「やった」が「やた」になり、
+#    肝心の語が一致しなくなる。促音を削るのは語尾だけにする。
+# ⚠️ 伸ばし棒は語尾だけでは足りない。「すごーい」のように語中に入るため。
+RE_EXCLAIM_LONG = re.compile(r"[ー〜~]+")        # 伸ばし棒はどこでも消す
+RE_EXCLAIM_TAIL = re.compile(r"[ッっ!！\s]+$")   # 促音・記号は語尾だけ消す
+
+
+def looks_like_exclamation(sentence):
     """
-    文ごとに疑問文かを見て、区切りの「。」を「？」に差し替える。
+    その一文が、文字だけで感嘆と言い切れるか。
+
+    ⚠️ 迷ったらFalseにする。余計な「！」は付け忘れよりずっと耳障りなため。
+    """
+    s = (sentence or "").strip()
+    if not s:
+        return False
+    if looks_like_question(s):
+        return False        # 疑問が優先（「すごいですか」は感嘆ではない）
+    core = RE_EXCLAIM_TAIL.sub("", RE_EXCLAIM_LONG.sub("", s))
+    return core in EXCLAIM_WORDS
+
+
+def apply_sentence_marks(text, loud=False):
+    """
+    文ごとに区切りの「。」を「？」「！」へ差し替える。
+
+    loud=True は「普段より大きな声で言われた」という合図。
+    感嘆かどうかは声の勢いで決まるので、これが主な手がかりになる。
 
     ⚠️ 既に「？」「！」が付いている文は触らない。
     自分で打った文（定型文など）の意図を勝手に変えないため。
@@ -383,10 +420,18 @@ def apply_question_marks(text):
     for i in range(0, len(parts), 2):
         body = parts[i]
         mark = parts[i + 1] if i + 1 < len(parts) else ""
-        if body.strip() and mark in ("。", "．", ".") and looks_like_question(body):
-            mark = "？"
+        if body.strip() and mark in ("。", "．", "."):
+            if looks_like_question(body):
+                mark = "？"          # 疑問が最優先
+            elif loud or looks_like_exclamation(body):
+                mark = "！"
         out.append(body + mark)
     return "".join(out)
+
+
+def apply_question_marks(text):
+    """文ごとに疑問文かを見て「。」を「？」に差し替える（声の大きさは使わない）"""
+    return apply_sentence_marks(text, loud=False)
 
 # 読み上げ待ちの上限。ここを超える要求は捨てる（連打・誤送信で延々と喋り続けるのを防ぐ）
 MAX_SPEECH_QUEUE_SIZE = 20
@@ -2431,13 +2476,14 @@ PHONE_BRIDGE_MIC_PAGE = """<!DOCTYPE html>
     sent.insertBefore(row, sent.firstChild);
   }
 
-  function speak(text) {
+  function speak(text, loud) {
     text = (text || '').trim();
     if (!text) { return; }
     say('PCで読み上げています...');
     // from_speech を付けると、PC側が疑問文を見分けて「。」を「？」に直す。
     // 音声認識は「？」を返さないため、これが無いと質問が平叙文の抑揚で読まれる。
-    post('/speak', { text: text, from_speech: true }).then(function (res) {
+    // loud は「普段より大きな声だった」という合図。「！」の判定に使う。
+    post('/speak', { text: text, from_speech: true, loud: !!loud }).then(function (res) {
       if (!res.data.ok) {
         if (res.status === 403) { pinrow.classList.add('open'); }
         say(res.data.message || '読み上げられませんでした。', true);
@@ -2535,9 +2581,11 @@ PHONE_BRIDGE_MIC_PAGE = """<!DOCTYPE html>
     // 文末にも区切りを付ける（尻切れの読み方になるのを防ぐ）
     if (text && !/[。、！？!?,.]$/.test(text)) { text += '。'; }
     finalText = '';
+    var loud = wasLoud();
+    rememberLevel();
     if (text) {
       render('');
-      if (autoChk.checked) { addRow(text); speak(text); }
+      if (autoChk.checked) { addRow(text); speak(text, loud); }
       else { addRow(text); say('「読み上げ」は各行をタップしてください。'); }
     }
     // 「続けて聞き取る」なら、止めるまで繰り返す
@@ -2547,9 +2595,83 @@ PHONE_BRIDGE_MIC_PAGE = """<!DOCTYPE html>
     stopListening();
   };
 
+  // --- 声の大きさを測る（感嘆「！」の判定に使う） ---
+  // ⚠️ 「！」かどうかは文字だけでは決まらない。
+  //    「すごいですね」は感嘆にも平静にもなり、決めるのは声の勢い。
+  //    そこでマイクの音量を測り、その人の普段の声より大きければ感嘆とみなす。
+  //    絶対値ではなく「その人の平均との比」で見るので、声の大きさや
+  //    マイクの感度が人それぞれでも成り立つ。
+  //
+  // ⚠️ 音声認識と同時にマイクを開けるかは端末によって違う。
+  //    開けなかった場合は黙って諦め、文字の手がかりだけで判定する。
+  var audioCtx = null, analyser = null, micStream = null, levelTimer = null;
+  var peakLevel = 0;          // この発話でいちばん大きかった音量
+  var loudHistory = [];       // 過去の発話の音量（その人の普段の声を知るため）
+  var MAX_LOUD_HISTORY = 12;
+  var LOUD_RATIO = 1.35;      // 普段の何倍で「大きな声」とみなすか
+
+  function startLevelMeter() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { return; }
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) { return; }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      micStream = stream;
+      audioCtx = new Ctx();
+      var src = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      src.connect(analyser);
+      var buf = new Uint8Array(analyser.fftSize);
+      levelTimer = setInterval(function () {
+        analyser.getByteTimeDomainData(buf);
+        var sum = 0;
+        for (var i = 0; i < buf.length; i++) {
+          var v = (buf[i] - 128) / 128;
+          sum += v * v;
+        }
+        var rms = Math.sqrt(sum / buf.length);
+        if (rms > peakLevel) { peakLevel = rms; }
+      }, 50);
+    }).catch(function () {
+      // マイクを二重に開けない端末では、文字の手がかりだけで判定する
+      analyser = null;
+    });
+  }
+
+  function stopLevelMeter() {
+    if (levelTimer) { clearInterval(levelTimer); levelTimer = null; }
+    if (micStream) {
+      micStream.getTracks().forEach(function (t) { t.stop(); });
+      micStream = null;
+    }
+    if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+    analyser = null;
+  }
+
+  // この発話が「普段より大きな声」だったか。
+  // 測れていない、または比べる相手が少ないうちは判定しない（false）。
+  function wasLoud() {
+    if (!peakLevel) { return false; }
+    if (loudHistory.length < 3) { return false; }
+    var sum = 0;
+    for (var i = 0; i < loudHistory.length; i++) { sum += loudHistory[i]; }
+    var avg = sum / loudHistory.length;
+    return avg > 0 && peakLevel > avg * LOUD_RATIO;
+  }
+
+  function rememberLevel() {
+    if (peakLevel > 0) {
+      loudHistory.push(peakLevel);
+      if (loudHistory.length > MAX_LOUD_HISTORY) { loudHistory.shift(); }
+    }
+    peakLevel = 0;
+  }
+
   function startListening() {
     finalText = '';
     heard.textContent = '';
+    peakLevel = 0;
+    if (!analyser) { startLevelMeter(); }
     try { rec.start(); }
     catch (err) { say('聞き取りを開始できませんでした。', true); }
   }
@@ -2559,6 +2681,7 @@ PHONE_BRIDGE_MIC_PAGE = """<!DOCTYPE html>
     micBtn.classList.remove('on');
     micBtn.textContent = '🎤 押して話す';
     try { rec.stop(); } catch (err) { /* 既に止まっている */ }
+    stopLevelMeter();     // マイクを掴んだままにしない
   }
 
   micBtn.onclick = function () {
@@ -2856,10 +2979,11 @@ class PhoneBridgeServer:
                                           "phrases": server.list_phrases()})
                     return
 
-                # ⚠️ 音声認識から来た文にだけ「？」を補う。
+                # ⚠️ 音声認識から来た文にだけ「？」「！」を補う。
                 # 自分で打った文（定型文など）は、書いたとおりの記号を尊重する。
+                # loud は「普段より大きな声だった」という合図（感嘆の主な手がかり）。
                 if payload.get("from_speech"):
-                    text = apply_question_marks(text)
+                    text = apply_sentence_marks(text, loud=bool(payload.get("loud")))
 
                 accepted = server.on_text(text)
                 if not accepted:
