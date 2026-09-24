@@ -85,7 +85,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.6.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.7.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -178,6 +178,11 @@ PENDING_UPDATE_DIR = os.path.join(
     "AutoReplyTool", "pending_update"
 )
 PENDING_UPDATE_MANIFEST = os.path.join(PENDING_UPDATE_DIR, "manifest.json")
+
+# キーワード自動返信のマスタースイッチ（設定キー）。"1"でON、"0"でOFF。
+# ⚠️ セット/ペアごとの有効・無効フラグは書き換えない。ここをOFFにしている間だけ
+# 「有効キーワードが0件」として扱い、ONに戻せば元の組み合わせがそのまま復活する。
+KEYWORD_AUTO_REPLY_SETTING = "keyword_auto_reply_enabled"
 
 # 絶対に反応させない（無視する）ワードのリスト
 IGNORE_WORDS = [
@@ -885,7 +890,14 @@ class DatabaseManager:
         1つの {検知ワード: 返信ワード} にまとめて返す。
         監視ループはセットの概念を意識せず、この結果だけを見れば良い。
         複数の有効セットで同じ検知ワードが重複している場合は、後勝ちで上書きされる。
+
+        「キーワード自動返信」がOFFのときは、有効なセットがあっても空で返す。
+        監視ループは元から「有効キーワードが0件なら何も送らない」作りなので、
+        ここで止めればループ側を一切変えずに自動返信だけを切れる。
+        画面の読み取り・ログ・手入力送信はそのまま動き続ける。
         """
+        if self.get_setting(KEYWORD_AUTO_REPLY_SETTING, "1") != "1":
+            return {}
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -3504,6 +3516,15 @@ class AutoReplyWorker:
         # 設定を読み込むたびに最新化される。
         self._log_keep_words = []
 
+        # 手入力した文字の送信待ちと、直近で手入力送信した文。
+        # ⚠️ 送信そのものは必ず監視スレッドにやらせること。別スレッドから直接
+        #    エミュレータへ入力すると監視ループの操作と混ざる。MuMuは画面を
+        #    4枚同時に動かしていて座標が重なるため、狙いと別の画面を触ってしまい
+        #    「設定アプリが勝手に開く」「ホーム画面に戻る」が起きる。
+        self._manual_queue = []
+        self._recent_manual_texts = []
+        self._manual_lock = threading.Lock()
+
     def log(self, message):
         # 画面には実際の内容を表示し、DBに保存する分だけ第三者の名前を伏せる
         self.log_callback(message)
@@ -3535,6 +3556,54 @@ class AutoReplyWorker:
 
     def is_alive(self):
         return self.thread is not None and self.thread.is_alive()
+
+    # --- 手入力送信 ---
+    # 送信待ちに積める上限。連打などで無限にたまらないようにする
+    MAX_MANUAL_QUEUE = 20
+    # 「自分が手入力で送った文」として覚えておく件数。
+    # 画面から流れて消えるまで持てれば十分なので、返信済み記録より少なくてよい
+    MAX_RECENT_MANUAL_TEXTS = 10
+
+    def enqueue_manual_text(self, text):
+        """
+        手入力した文字を送信待ちに積む。実際の送信は監視スレッドが行う。
+        戻り値: (受け付けたか, 画面に出す文言)
+
+        ⚠️ ここからエミュレータへ直接送ってはいけない。UIスレッドを止めてしまううえ、
+        監視ループの操作と競合する。積むだけにして、送るのは監視スレッドに任せる。
+        """
+        text = (text or "").strip()
+        if not text:
+            return False, "送る文字が入力されていません。"
+        if not (self.is_running and self.is_alive()):
+            return False, "監視中ではないため送信できません。先に「▶ 開始」で監視を始めてください。"
+
+        with self._manual_lock:
+            if len(self._manual_queue) >= self.MAX_MANUAL_QUEUE:
+                return False, f"送信待ちが{self.MAX_MANUAL_QUEUE}件たまっています。送り終わるまで少し待ってください。"
+            self._manual_queue.append(text)
+            waiting = len(self._manual_queue)
+
+        if waiting > 1:
+            return True, f"送信待ちに追加しました（順番待ち{waiting}件）。"
+        return True, "送信待ちに追加しました。"
+
+    def has_manual_pending(self):
+        """送信待ちの手入力があるか（監視ループが毎周回これで様子を見る）"""
+        with self._manual_lock:
+            return bool(self._manual_queue)
+
+    def _is_own_manual_text(self, chat_line):
+        """
+        画面のこの行が、自分が手入力で送った文かどうか。
+
+        ⚠️ これが無いと、手入力した文に検知ワードが含まれていた場合に
+        自分の発言へ自動返信してしまう（自分相手に延々と返し続ける）。
+        既存の「返信ワードを含む行は対象外」という考え方を、手入力にも広げたもの。
+        """
+        with self._manual_lock:
+            recent = list(self._recent_manual_texts)
+        return any(text and text in chat_line for text in recent)
 
     # --- エミュレータ接続 ---
     def _prepare_mumu(self):
@@ -3685,6 +3754,13 @@ class AutoReplyWorker:
         「有効にしたつもりのワードが動いていない」ことに気付けない。
         検知が起きないときの原因が真っ先にここだと分かるよう、開始時に必ず出す。
         """
+        # 自分でOFFにしている場合と、設定し忘れている場合を混同させない。
+        # どちらも「有効キーワード0件」になるが、直す場所が全く違うため。
+        if self.db and self.db.get_setting(KEYWORD_AUTO_REPLY_SETTING, "1") != "1":
+            self.log("⏸️ キーワード自動返信はOFFです。検知しても自動では送りません。")
+            self.log("💡 画面の読み取りと手入力送信は、このまま使えます。")
+            return
+
         keywords = self.db.get_active_keywords() if self.db else {}
         if not keywords:
             self.log("⚠️ 有効な検知ワードが1つもありません。このままでは何も反応しません。")
@@ -3791,7 +3867,9 @@ class AutoReplyWorker:
         """
         pending = [
             item for item in sorted(matched_elements, key=lambda x: x[1])
-            if item[0] not in replied_logs and reply_message not in item[0]
+            if item[0] not in replied_logs
+            and reply_message not in item[0]
+            and not self._is_own_manual_text(item[0])
         ]
         now = time.time()
         return [
@@ -4452,6 +4530,25 @@ class AutoReplyWorker:
         label = (t_match.group(1) if t_match else "") + (d_match.group(1) if d_match else "")
         return html.unescape(label).strip()
 
+    @staticmethod
+    def _normalize_for_compare(text):
+        """
+        「入力欄に入った文字」と「入れようとした文字」を見比べるための正規化。
+
+        ⚠️ 改行と空白は消してから比べること。アプリ側の入力欄が1行用だと、
+        入れた改行が勝手に捨てられたり空白に変わったりする。そのまま比べると
+        「入らなかった」と誤判定し、直接入力でもう一度打ち込んで文字が二重になる。
+        """
+        return re.sub(r"\s+", "", text or "")
+
+    def _input_text_matches(self, d, expected):
+        """入力欄に expected の書き出しが入っているか（改行・空白の違いは無視する）"""
+        head = self._normalize_for_compare(expected[:15])
+        if not head:
+            # 空白だけの文字列は比べようがない。入った扱いにして先へ進める
+            return True
+        return head in self._normalize_for_compare(self._current_input_text(d))
+
     def _current_input_text(self, d):
         """入力欄(EditText)に今入っている文字を返す。見つからない・空なら空文字。"""
         try:
@@ -4491,7 +4588,7 @@ class AutoReplyWorker:
             self._keyevent(d, ANDROID_KEYCODE_PASTE)
             time.sleep(0.6)
             # 長文は折り返しや省略が起きうるので、先頭部分が入っていれば成功とみなす
-            if reply_message[:15] in self._current_input_text(d):
+            if self._input_text_matches(d, reply_message):
                 self.log("📋 返信ワードを貼り付けました。")
                 return True
             self._clipboard_paste_available = False
@@ -4616,7 +4713,7 @@ class AutoReplyWorker:
             self._keyevent(d, ANDROID_KEYCODE_ENTER)
             time.sleep(0.6)
             self._check_after_action(d, "エンターキー")
-            if reply_message[:15] not in self._current_input_text(d):
+            if not self._input_text_matches(d, reply_message):
                 is_sent = True
                 self.log("↩️ 送信ボタンが見つからないため、エンターキーで送信しました。")
 
@@ -4762,6 +4859,54 @@ class AutoReplyWorker:
 
         return failure_count, sent_ok
 
+    def _drain_manual_sends(self, d, nodes, half_y, y_min_internal, y_max_internal,
+                            failure_count, FAILURE_WARN_THRESHOLD, all_nodes=None):
+        """
+        手入力送信の待ち行列を、積まれた順に送り切る。
+        戻り値: (更新後のfailure_count, 1件でも送ったか)
+
+        ⚠️ 1件送るごとに画面を読み直すこと。nodes（入力欄や送信ボタンの位置）は
+        送信した瞬間に古くなるため、2件目を古いnodesのまま送ると座標を外す。
+        """
+        sent_any = False
+        while self.is_running:
+            with self._manual_lock:
+                if not self._manual_queue:
+                    break
+                text = self._manual_queue.pop(0)
+                # 送る前に覚える。送信後に覚えると、その間に監視ループが1周して
+                # 自分の発言へ自動返信してしまう隙ができる。
+                self._recent_manual_texts.append(text)
+                while len(self._recent_manual_texts) > self.MAX_RECENT_MANUAL_TEXTS:
+                    self._recent_manual_texts.pop(0)
+
+            self.log(f"✍️ 手入力送信します:「{text}」")
+            failure_count, sent_ok = self._execute_reply(
+                d, nodes, half_y, y_min_internal, y_max_internal, text,
+                failure_count, FAILURE_WARN_THRESHOLD, all_nodes=all_nodes
+            )
+            sent_any = True
+            if not sent_ok:
+                self.log("⚠️ 手入力送信に失敗しました。入力欄に文字が残っていないか確認してください。")
+
+            with self._manual_lock:
+                more = bool(self._manual_queue)
+            if not more:
+                break
+
+            # 次の1件のために画面を取り直す
+            try:
+                xml_dump = d.dump_hierarchy(compressed=True)
+                self._update_target_display(xml_dump)
+                _, _, nodes, all_nodes = self._extract_chat_texts(
+                    xml_dump, y_min_internal, y_max_internal)
+            except Exception as e:
+                self.log(f"⚠️ 画面を読み直せなかったため、残りの手入力は次の周回で送ります: {e}")
+                break
+            time.sleep(0.5)
+
+        return failure_count, sent_any
+
     # --- メインループ ---
     def _monitor_loop(self, screen_x1, screen_y1, screen_x2, screen_y2):
         # 準備段階(接続・監視範囲の計算)で例外が起きた場合もfinallyを必ず通すため、
@@ -4860,6 +5005,19 @@ class AutoReplyWorker:
                     time.sleep(0.6)
                     continue
 
+                # 手入力送信の待ちがあれば、キーワード判定より先に送る。
+                # 人がいま送ろうとしている文を後回しにすると、会話の順序が入れ替わる。
+                if self.has_manual_pending():
+                    failure_count, manual_sent = self._drain_manual_sends(
+                        d, nodes, half_y, y_min_internal, y_max_internal,
+                        failure_count, FAILURE_WARN_THRESHOLD, all_nodes=all_nodes
+                    )
+                    if manual_sent:
+                        last_scroll_time = time.time()
+                        # 送信で画面が変わっている。古い読み取り結果のまま
+                        # キーワード判定へ進まず、次の周回で取り直す。
+                        continue
+
                 chat_texts = [item for item in chat_texts if not any(ignore in item[0] for ignore in IGNORE_WORDS)]
                 out_of_bounds_texts = [t for t in out_of_bounds_texts if not any(ignore in t for ignore in IGNORE_WORDS)]
 
@@ -4882,6 +5040,12 @@ class AutoReplyWorker:
                             # 実際に一致したときは「🎯 検知!【ワード】」が出る。
                             self.log(f"👀 画面の文字を読み取りました:「{current_latest}」")
                         self._last_seen_any_chat = current_latest
+
+                # キーワード自動返信をOFFにした（または有効な検知ワードが無くなった）場合、
+                # 待機中だった送信も取り消す。「OFFにしたのに少し後から送られた」を防ぐ。
+                if not keywords_map and pending_sends:
+                    self.log(f"⏸️ 有効な検知ワードが無くなったため、待機中だった送信{len(pending_sends)}件を取り消しました。")
+                    pending_sends.clear()
 
                 # 遅延待ち（クールダウン）中の送信をチェックする。
                 # 機能がオフになった場合は待機させず、たまっているものを即座に送信する。
@@ -5200,9 +5364,30 @@ class App(ctk.CTk):
 
     # --- キーワード設定タブ ---
     def build_keywords_tab(self):
+        # --- キーワード自動返信のON/OFF（このタブ全体の効き方を決める） ---
+        # ⚠️ OFFにしてもセット/ペアごとの☑は書き換えない。OFFの間だけ
+        # 「有効キーワードが0件」として扱うので、ONに戻せば以前の組み合わせが
+        # そのまま復活する。フラグを直接消すと、戻すときに元の状態が分からなくなる。
+        master_frame = ctk.CTkFrame(self.tab_keywords)
+        master_frame.pack(fill="x", padx=10, pady=(10, 0))
+
+        self.auto_reply_var = ctk.BooleanVar(
+            value=self.db.get_setting(KEYWORD_AUTO_REPLY_SETTING, "1") == "1"
+        )
+        self.auto_reply_switch = ctk.CTkSwitch(
+            master_frame, text="キーワード自動返信", variable=self.auto_reply_var,
+            command=self.on_auto_reply_toggle
+        )
+        self.auto_reply_switch.pack(side="left", padx=10, pady=8)
+
+        # スイッチが下の一覧にどう効くかは見ただけでは分からないため、言葉で添える
+        self.auto_reply_hint = ctk.CTkLabel(master_frame, text="", text_color="gray")
+        self.auto_reply_hint.pack(side="left", padx=(0, 10))
+        self._refresh_auto_reply_hint()
+
         # --- セット選択・管理エリア ---
         set_frame = ctk.CTkFrame(self.tab_keywords, fg_color="transparent")
-        set_frame.pack(fill="x", padx=10, pady=(10, 5))
+        set_frame.pack(fill="x", padx=10, pady=(5, 5))
 
         ctk.CTkLabel(set_frame, text="セット:").pack(side="left", padx=(0, 5))
 
@@ -5283,6 +5468,38 @@ class App(ctk.CTk):
                       width=140).pack(side="left", padx=5)
         ctk.CTkButton(kw_btn_frame, text="🗑️ 削除", fg_color="red", hover_color="darkred",
                       command=self.delete_keyword, width=80).pack(side="left", padx=5)
+
+        # --- 手入力送信（Windowsでコピーした文をそのままエミュレータへ） ---
+        # ⚠️ 自動返信のスイッチと同じタブに置いている。手で送る直前に自動返信を
+        # 切る、という操作が必ずセットになるため、別タブに離すと片方を忘れて
+        # 自分の発言と自動返信が混ざる。
+        manual_frame = ctk.CTkFrame(self.tab_keywords)
+        manual_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        manual_header = ctk.CTkFrame(manual_frame, fg_color="transparent")
+        manual_header.pack(fill="x", padx=8, pady=(6, 0))
+
+        ctk.CTkLabel(
+            manual_header, text="手入力送信", font=ctk.CTkFont(weight="bold")
+        ).pack(side="left")
+
+        self.manual_send_hint = ctk.CTkLabel(
+            manual_header, text="監視を開始すると送れます。", text_color="gray"
+        )
+        self.manual_send_hint.pack(side="left", padx=(8, 0))
+
+        self.manual_send_btn = ctk.CTkButton(
+            manual_header, text="📨 送信 (Ctrl+Enter)", width=170,
+            command=self.send_manual_text, state="disabled"
+        )
+        self.manual_send_btn.pack(side="right")
+
+        self.manual_send_box = ctk.CTkTextbox(manual_frame, height=60)
+        self.manual_send_box.pack(fill="x", padx=8, pady=(4, 8))
+        self.manual_send_box.bind("<Button-3>", self._show_entry_context_menu)
+        # Enterは改行に使うため、送信はCtrl+Enterに割り当てる
+        for seq in ("<Control-Return>", "<Control-KP_Enter>"):
+            self.manual_send_box.bind(seq, lambda e: (self.send_manual_text(), "break")[1])
 
         self.refresh_keyword_set_menu(select_set_id=None)
 
@@ -5421,6 +5638,41 @@ class App(ctk.CTk):
                         inner_entry.icursor("end")
         except Exception:
             pass
+
+    def _refresh_auto_reply_hint(self):
+        """スイッチの効き方を言葉で添える（下の一覧との関係が見ただけでは分からないため）"""
+        if self.auto_reply_var.get():
+            self.auto_reply_hint.configure(
+                text="☑ のペアが一致したら自動で返信します。")
+        else:
+            self.auto_reply_hint.configure(
+                text="OFFの間は自動で返信しません（下の☑はそのまま保たれます）。")
+
+    def on_auto_reply_toggle(self):
+        """キーワード自動返信のON/OFF。監視は止めず、自動での送信だけを切る"""
+        value = "1" if self.auto_reply_var.get() else "0"
+        self.db.save_setting(KEYWORD_AUTO_REPLY_SETTING, value)
+        self._refresh_auto_reply_hint()
+        if value == "1":
+            self.append_log("⚙️ キーワード自動返信を ON にしました。")
+        else:
+            self.append_log("⚙️ キーワード自動返信を OFF にしました。（画面の読み取りと手入力送信は続きます）")
+
+    def send_manual_text(self):
+        """入力欄の文字を、監視スレッド経由でエミュレータのアプリへ送る"""
+        text = self.manual_send_box.get("1.0", "end-1c")
+        accepted, message = self.worker.enqueue_manual_text(text)
+        if accepted:
+            # 受け付けられたときだけ消す。失敗時に消すと打ち直しになる
+            self.manual_send_box.delete("1.0", "end")
+            self.append_log(f"📨 {message}")
+        else:
+            self.append_log(f"⚠️ {message}")
+
+    def _set_manual_send_enabled(self, enabled):
+        """監視中だけ送信できるようにする（停止中はエミュレータへの経路が無い）"""
+        self.manual_send_btn.configure(state="normal" if enabled else "disabled")
+        self.manual_send_hint.configure(text="" if enabled else "監視を開始すると送れます。")
 
     def on_emulator_auto_scroll_toggle(self):
         value = "1" if self.emulator_auto_scroll_var.get() else "0"
@@ -9206,6 +9458,7 @@ class App(ctk.CTk):
         self.start_btn.configure(state="disabled")
         self.start_prev_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self._set_manual_send_enabled(True)
         self._watch_worker_state()
 
     def stop_monitoring(self):
@@ -9223,6 +9476,7 @@ class App(ctk.CTk):
             self.start_btn.configure(state="normal")
             self.start_prev_btn.configure(state="normal" if self.last_coords else "disabled")
             self.stop_btn.configure(state="disabled")
+            self._set_manual_send_enabled(False)
 
     # ====================================================
     # 🔄 アップデート機能
