@@ -182,6 +182,51 @@ check("停止中は1件も送らない", any_sent is False and len(sent) == befo
 check("送信待ちは残したままにする", w._manual_queue == ["止まる直前の1件"], w._manual_queue)
 
 
+print("\n[7] まとめて積む (enqueue_manual_texts)")
+db = new_db()
+w, logs = new_worker(db)
+w.is_running = True
+w.thread = type("T", (), {"is_alive": staticmethod(lambda: True)})()
+
+n, msg = w.enqueue_manual_texts(["1通目", "2通目", "3通目"])
+check("件数を返す", n == 3, (n, msg))
+check("積んだ順が保たれる", w._manual_queue == ["1通目", "2通目", "3通目"], w._manual_queue)
+check("順番に送ると知らせる", "3件を順番に送ります" in msg, msg)
+
+w._manual_queue.clear()
+n, msg = w.enqueue_manual_texts(["  ", "中身あり", "", "\n\n"])
+check("空の欄は飛ばす", w._manual_queue == ["中身あり"], w._manual_queue)
+check("残った1件だけ数える", n == 1, n)
+
+w._manual_queue.clear()
+n, msg = w.enqueue_manual_texts(["   ", ""])
+check("全部空なら断る", n == 0 and "入力されていません" in msg, msg)
+
+# ⚠️ ここが肝。長文を分けたものが途中まで送られてはいけない
+w._manual_queue.clear()
+room_filler = [f"埋める{i}" for i in range(A.AutoReplyWorker.MAX_MANUAL_QUEUE - 2)]
+w.enqueue_manual_texts(room_filler)
+before = list(w._manual_queue)
+n, msg = w.enqueue_manual_texts(["分割1", "分割2", "分割3", "分割4"])
+check("入り切らないなら1件も積まない", n == 0 and w._manual_queue == before, (n, len(w._manual_queue)))
+check("理由を伝える", "途中まで送ると文章が切れて" in msg, msg)
+
+# 1件だけのときは従来どおりの文言
+w._manual_queue.clear()
+w.enqueue_manual_texts([f"埋める{i}" for i in range(A.AutoReplyWorker.MAX_MANUAL_QUEUE)])
+ok, msg = w.enqueue_manual_text("あふれる1件")
+check("1件のときは満杯だと伝える", ok is False and "たまっています" in msg, msg)
+
+check("覚える件数は送信待ちの上限と同じ",
+      A.AutoReplyWorker.MAX_RECENT_MANUAL_TEXTS == A.AutoReplyWorker.MAX_MANUAL_QUEUE,
+      (A.AutoReplyWorker.MAX_RECENT_MANUAL_TEXTS, A.AutoReplyWorker.MAX_MANUAL_QUEUE))
+
+
+print("\n[8] GRAVITYの上限の既定値")
+check("既定は250文字", A.MANUAL_SEND_DEFAULT_LIMIT == 250, A.MANUAL_SEND_DEFAULT_LIMIT)
+check("入力欄の既定は3つ", A.MANUAL_SEND_DEFAULT_BOXES == 3, A.MANUAL_SEND_DEFAULT_BOXES)
+
+
 print("\n" + "=" * 50)
 if FAILS:
     print(f"FAILED {len(FAILS)}件: {FAILS}")

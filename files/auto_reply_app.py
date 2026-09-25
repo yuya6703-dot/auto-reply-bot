@@ -85,7 +85,7 @@ DB_FILE_NAME = os.path.basename(DB_FILE)
 # ====================================================
 # ⚠️ 重要: この値は、GitHubでpushするタグ名（例: v1.1.0 の "1.1.0"部分）と必ず一致させてください。
 # ずれると「最新なのに古いと表示される」「古いのに最新と表示される」といった誤判定の原因になります。
-APP_VERSION = "1.7.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
+APP_VERSION = "1.8.0"  # リリースするたびにこの値を上げ、同じ番号でタグ(例: v1.2.0)をpushしてください
 
 # GitHubリポジトリ情報（owner/repo）の既定値。
 # 設定タブで変更でき、その場合は settings テーブルの github_owner / github_repo が優先される。
@@ -183,6 +183,15 @@ PENDING_UPDATE_MANIFEST = os.path.join(PENDING_UPDATE_DIR, "manifest.json")
 # ⚠️ セット/ペアごとの有効・無効フラグは書き換えない。ここをOFFにしている間だけ
 # 「有効キーワードが0件」として扱い、ONに戻せば元の組み合わせがそのまま復活する。
 KEYWORD_AUTO_REPLY_SETTING = "keyword_auto_reply_enabled"
+
+# 手入力送信の既定値。
+# GRAVITYのルーム内チャットは1通250文字までで、超えた分は送信されず途中で切れる
+# （2026-09-25に本人が確認）。仕様変更やルーム種別で変わり得るため、
+# コードに固定せず設定で持ち、利用者が変えられるようにしている。
+MANUAL_SEND_BOX_COUNT_SETTING = "manual_send_box_count"
+MANUAL_SEND_LIMIT_SETTING = "manual_send_char_limit"
+MANUAL_SEND_DEFAULT_BOXES = 3
+MANUAL_SEND_DEFAULT_LIMIT = 250
 
 # 絶対に反応させない（無視する）ワードのリスト
 IGNORE_WORDS = [
@@ -3561,32 +3570,50 @@ class AutoReplyWorker:
     # 送信待ちに積める上限。連打などで無限にたまらないようにする
     MAX_MANUAL_QUEUE = 20
     # 「自分が手入力で送った文」として覚えておく件数。
-    # 画面から流れて消えるまで持てれば十分なので、返信済み記録より少なくてよい
-    MAX_RECENT_MANUAL_TEXTS = 10
+    # ⚠️ 送信待ちの上限と同じにしておくこと。長文を分けて20件まとめて送ったとき、
+    # 先に送った分が記録から溢れると、自分の発言に自動返信してしまう
+    MAX_RECENT_MANUAL_TEXTS = MAX_MANUAL_QUEUE
 
-    def enqueue_manual_text(self, text):
+    def enqueue_manual_texts(self, texts):
         """
-        手入力した文字を送信待ちに積む。実際の送信は監視スレッドが行う。
-        戻り値: (受け付けたか, 画面に出す文言)
+        手入力した複数の文を、まとめて送信待ちに積む。1通ずつ順番に送られる。
+        戻り値: (受け付けた件数, 画面に出す文言)
 
         ⚠️ ここからエミュレータへ直接送ってはいけない。UIスレッドを止めてしまううえ、
         監視ループの操作と競合する。積むだけにして、送るのは監視スレッドに任せる。
+
+        ⚠️ 全部入らないなら1件も積まない。長文を分けたものが途中まで送られると、
+        文章が切れた状態で相手に届く。それは長さ制限を避けるためにこの機能を
+        作った目的そのものを壊す。
         """
-        text = (text or "").strip()
-        if not text:
-            return False, "送る文字が入力されていません。"
+        cleaned = [t.strip() for t in (texts or [])]
+        cleaned = [t for t in cleaned if t]
+        if not cleaned:
+            return 0, "送る文字が入力されていません。"
         if not (self.is_running and self.is_alive()):
-            return False, "監視中ではないため送信できません。先に「▶ 開始」で監視を始めてください。"
+            return 0, "監視中ではないため送信できません。先に「▶ 開始」で監視を始めてください。"
 
         with self._manual_lock:
-            if len(self._manual_queue) >= self.MAX_MANUAL_QUEUE:
-                return False, f"送信待ちが{self.MAX_MANUAL_QUEUE}件たまっています。送り終わるまで少し待ってください。"
-            self._manual_queue.append(text)
+            room = self.MAX_MANUAL_QUEUE - len(self._manual_queue)
+            if len(cleaned) > room:
+                if len(cleaned) == 1:
+                    return 0, (f"送信待ちが{self.MAX_MANUAL_QUEUE}件たまっています。"
+                               "送り終わるまで少し待ってください。")
+                return 0, (f"{len(cleaned)}件をまとめて入れる余裕がありません（残り{room}件）。"
+                           "途中まで送ると文章が切れてしまうため、1件も積みませんでした。")
+            self._manual_queue.extend(cleaned)
             waiting = len(self._manual_queue)
 
+        if len(cleaned) > 1:
+            return len(cleaned), f"{len(cleaned)}件を順番に送ります（送信待ち{waiting}件）。"
         if waiting > 1:
-            return True, f"送信待ちに追加しました（順番待ち{waiting}件）。"
-        return True, "送信待ちに追加しました。"
+            return 1, f"送信待ちに追加しました（順番待ち{waiting}件）。"
+        return 1, "送信待ちに追加しました。"
+
+    def enqueue_manual_text(self, text):
+        """手入力した1件を送信待ちに積む。戻り値: (受け付けたか, 画面に出す文言)"""
+        count, message = self.enqueue_manual_texts([text])
+        return bool(count), message
 
     def has_manual_pending(self):
         """送信待ちの手入力があるか（監視ループが毎周回これで様子を見る）"""
@@ -5488,18 +5515,44 @@ class App(ctk.CTk):
         )
         self.manual_send_hint.pack(side="left", padx=(8, 0))
 
-        self.manual_send_btn = ctk.CTkButton(
-            manual_header, text="📨 送信 (Ctrl+Enter)", width=170,
-            command=self.send_manual_text, state="disabled"
+        self.manual_send_all_btn = ctk.CTkButton(
+            manual_header, text="📨 まとめて送信", width=140,
+            command=self.send_manual_all, state="disabled"
         )
-        self.manual_send_btn.pack(side="right")
+        self.manual_send_all_btn.pack(side="right")
 
-        self.manual_send_box = ctk.CTkTextbox(manual_frame, height=60)
-        self.manual_send_box.pack(fill="x", padx=8, pady=(4, 8))
-        self.manual_send_box.bind("<Button-3>", self._show_entry_context_menu)
-        # Enterは改行に使うため、送信はCtrl+Enterに割り当てる
-        for seq in ("<Control-Return>", "<Control-KP_Enter>"):
-            self.manual_send_box.bind(seq, lambda e: (self.send_manual_text(), "break")[1])
+        ctk.CTkButton(
+            manual_header, text="＋欄を追加", width=90,
+            fg_color="#555555", hover_color="#3a3a3a",
+            command=self.add_manual_send_box
+        ).pack(side="right", padx=(0, 5))
+
+        # 1通あたりの上限。GRAVITY側の制限に合わせて利用者が決める
+        limit_row = ctk.CTkFrame(manual_frame, fg_color="transparent")
+        limit_row.pack(fill="x", padx=8, pady=(4, 0))
+
+        ctk.CTkLabel(limit_row, text="1通あたりの上限:").pack(side="left")
+        self.manual_limit_entry = ctk.CTkEntry(limit_row, width=60, justify="center")
+        self.manual_limit_entry.insert(0, str(self.get_manual_char_limit()))
+        self.manual_limit_entry.pack(side="left", padx=(5, 3))
+        self.manual_limit_entry.bind("<FocusOut>", lambda e: self.save_manual_char_limit())
+        self.manual_limit_entry.bind("<Return>", lambda e: self.save_manual_char_limit(log=True))
+        self.manual_limit_entry.bind("<Button-3>", self._show_entry_context_menu)
+        ctk.CTkLabel(limit_row, text="文字").pack(side="left")
+        ctk.CTkLabel(
+            limit_row, text="（超えた欄は赤くなります。超えたままではまとめて送信できません）",
+            text_color="gray"
+        ).pack(side="left", padx=(8, 0))
+
+        # 入力欄の並び。欄を増やしてもタブの縦幅が膨らまないよう、ここだけスクロールする
+        self.manual_boxes_frame = ctk.CTkScrollableFrame(
+            manual_frame, height=175, fg_color="transparent"
+        )
+        self.manual_boxes_frame.pack(fill="x", padx=8, pady=(4, 8))
+
+        self.manual_boxes = []
+        for _ in range(self.get_manual_box_count()):
+            self._create_manual_send_box(save=False)
 
         self.refresh_keyword_set_menu(select_set_id=None)
 
@@ -5658,20 +5711,202 @@ class App(ctk.CTk):
         else:
             self.append_log("⚙️ キーワード自動返信を OFF にしました。（画面の読み取りと手入力送信は続きます）")
 
-    def send_manual_text(self):
-        """入力欄の文字を、監視スレッド経由でエミュレータのアプリへ送る"""
-        text = self.manual_send_box.get("1.0", "end-1c")
-        accepted, message = self.worker.enqueue_manual_text(text)
-        if accepted:
-            # 受け付けられたときだけ消す。失敗時に消すと打ち直しになる
-            self.manual_send_box.delete("1.0", "end")
-            self.append_log(f"📨 {message}")
-        else:
+    # --- 手入力送信 ---
+    # 上限を超えた欄を示す色。通常時の枠は目立たせない
+    MANUAL_OVER_COLOR = "#e05555"
+    MANUAL_NORMAL_BORDER = "#4a4a4a"
+
+    def get_manual_box_count(self):
+        """入力欄をいくつ出すか。壊れた値が保存されていても必ず1以上を返す"""
+        try:
+            count = int(normalize_number_text(
+                self.db.get_setting(MANUAL_SEND_BOX_COUNT_SETTING, str(MANUAL_SEND_DEFAULT_BOXES))))
+        except (TypeError, ValueError):
+            count = MANUAL_SEND_DEFAULT_BOXES
+        return max(1, min(count, AutoReplyWorker.MAX_MANUAL_QUEUE))
+
+    def get_manual_char_limit(self):
+        """1通あたりの上限文字数。0以下なら上限なしとして扱う"""
+        try:
+            limit = int(normalize_number_text(
+                self.db.get_setting(MANUAL_SEND_LIMIT_SETTING, str(MANUAL_SEND_DEFAULT_LIMIT))))
+        except (TypeError, ValueError):
+            limit = MANUAL_SEND_DEFAULT_LIMIT
+        return max(0, limit)
+
+    def save_manual_char_limit(self, log=False):
+        """上限の入力を検証して保存し、各欄の文字数表示を作り直す"""
+        raw = normalize_number_text(self.manual_limit_entry.get().strip())
+        try:
+            limit = max(0, int(raw))
+        except (TypeError, ValueError):
+            # 数字として読めない場合は保存済みの値へ戻す（黙って0にしない）
+            limit = self.get_manual_char_limit()
+            self.append_log(f"⚠️ 上限は数字で入力してください。{limit}文字のままにします。")
+        self.db.save_setting(MANUAL_SEND_LIMIT_SETTING, limit)
+        self.manual_limit_entry.delete(0, "end")
+        self.manual_limit_entry.insert(0, str(limit))
+        self._refresh_manual_counts()
+        if log:
+            if limit == 0:
+                self.append_log("⚙️ 1通あたりの上限を「なし」にしました。")
+            else:
+                self.append_log(f"⚙️ 1通あたりの上限を {limit}文字 にしました。")
+
+    def _create_manual_send_box(self, save=True):
+        """入力欄を1つ増やす。番号の振り直しは _renumber_manual_boxes が行う"""
+        if len(self.manual_boxes) >= AutoReplyWorker.MAX_MANUAL_QUEUE:
+            self.append_log(
+                f"⚠️ 入力欄は最大{AutoReplyWorker.MAX_MANUAL_QUEUE}個までです"
+                "（一度に送れる件数と同じにしてあります）。")
+            return None
+
+        row = ctk.CTkFrame(self.manual_boxes_frame, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+
+        index_label = ctk.CTkLabel(row, text="", width=22, text_color="gray")
+        index_label.pack(side="left")
+
+        # ⚠️ 右側の部品を先にpackすること。テキスト欄はexpandするので、
+        # 後回しにすると押し出されて見えなくなる。
+        remove_btn = ctk.CTkButton(row, text="－", width=28,
+                                   fg_color="#555555", hover_color="#3a3a3a")
+        remove_btn.pack(side="right", padx=(5, 0))
+
+        count_label = ctk.CTkLabel(row, text="", width=84, text_color="gray")
+        count_label.pack(side="right", padx=(5, 0))
+
+        box = ctk.CTkTextbox(row, height=50, border_width=1,
+                             border_color=self.MANUAL_NORMAL_BORDER)
+        box.pack(side="left", fill="x", expand=True)
+        box.bind("<Button-3>", self._show_entry_context_menu)
+        # Enterは改行に使うため、その欄だけ送るのはCtrl+Enter
+        for seq in ("<Control-Return>", "<Control-KP_Enter>"):
+            box.bind(seq, lambda e, b=box: (self.send_manual_box(b), "break")[1])
+        # 貼り付けは文字が入る前にイベントが来るため、after_idleで数え直す
+        for seq in ("<KeyRelease>", "<<Paste>>", "<<Cut>>"):
+            box.bind(seq, lambda e: self.after_idle(self._refresh_manual_counts))
+
+        entry = {"row": row, "box": box, "count": count_label, "index": index_label}
+        remove_btn.configure(command=lambda en=entry: self.remove_manual_send_box(en))
+        self.manual_boxes.append(entry)
+
+        self._renumber_manual_boxes()
+        self._refresh_manual_counts()
+        if save:
+            self.db.save_setting(MANUAL_SEND_BOX_COUNT_SETTING, len(self.manual_boxes))
+        return entry
+
+    def add_manual_send_box(self):
+        if self._create_manual_send_box() is not None:
+            self.append_log(f"➕ 入力欄を{len(self.manual_boxes)}個にしました。")
+
+    def remove_manual_send_box(self, entry):
+        """入力欄を1つ減らす。最後の1つは残す（送る手段が無くなるため）"""
+        if len(self.manual_boxes) <= 1:
+            self.append_log("⚠️ 入力欄は1つ以上必要です。")
+            return
+        text = entry["box"].get("1.0", "end-1c").strip()
+        if text and not messagebox.askyesno(
+            "確認",
+            "この欄には文字が入っています。削除しますか？\n\n"
+            f"「{text[:60]}」"
+        ):
+            return
+        entry["row"].destroy()
+        self.manual_boxes.remove(entry)
+        self._renumber_manual_boxes()
+        self.db.save_setting(MANUAL_SEND_BOX_COUNT_SETTING, len(self.manual_boxes))
+        self.append_log(f"➖ 入力欄を{len(self.manual_boxes)}個にしました。")
+
+    def _renumber_manual_boxes(self):
+        """送られる順番が一目で分かるよう、上から1,2,3...と振り直す"""
+        for number, entry in enumerate(self.manual_boxes, start=1):
+            entry["index"].configure(text=str(number))
+
+    def _refresh_manual_counts(self):
+        """各欄の文字数を出し、上限を超えている欄を赤くする"""
+        limit = self.get_manual_char_limit()
+        for entry in self.manual_boxes:
+            length = len(entry["box"].get("1.0", "end-1c"))
+            if limit <= 0:
+                entry["count"].configure(text=f"{length}文字", text_color="gray")
+                entry["box"].configure(border_color=self.MANUAL_NORMAL_BORDER)
+                continue
+            over = length > limit
+            entry["count"].configure(
+                text=f"{length} / {limit}",
+                text_color=self.MANUAL_OVER_COLOR if over else "gray"
+            )
+            entry["box"].configure(
+                border_color=self.MANUAL_OVER_COLOR if over else self.MANUAL_NORMAL_BORDER
+            )
+
+    def _manual_boxes_over_limit(self, entries=None):
+        """上限を超えている欄の番号を返す（空の欄は送らないので対象外）"""
+        limit = self.get_manual_char_limit()
+        if limit <= 0:
+            return []
+        over = []
+        for number, entry in enumerate(self.manual_boxes, start=1):
+            if entries is not None and entry not in entries:
+                continue
+            text = entry["box"].get("1.0", "end-1c")
+            if text.strip() and len(text) > limit:
+                over.append(number)
+        return over
+
+    def send_manual_box(self, box):
+        """その欄だけを送る（Ctrl+Enter）"""
+        target = next((e for e in self.manual_boxes if e["box"] is box), None)
+        if target is None:
+            return
+        self._send_manual_entries([target])
+
+    def send_manual_all(self):
+        """
+        入力欄を上から順に、1通ずつ送る。
+
+        GRAVITYのルーム内チャットは1通250文字までで、超えた分は送信されず途中で切れる。
+        あらかじめ欄に分けておき、ここで順番に送ることで切れずに届く。
+        """
+        filled = [e for e in self.manual_boxes if e["box"].get("1.0", "end-1c").strip()]
+        if not filled:
+            self.append_log("⚠️ 送る文字が入力されていません。")
+            return
+        self._send_manual_entries(filled, label="まとめて")
+
+    def _send_manual_entries(self, entries, label=""):
+        """
+        指定した欄の中身を送信待ちへ積み、受け付けられた欄だけを空にする。
+
+        ⚠️ 上限を超えた欄があるときは1件も送らない。切れると分かっているものを
+        送ってしまっては、この機能を作った意味が無い。
+        """
+        blocking = self._manual_boxes_over_limit(entries)
+        if blocking:
+            numbers = "・".join(str(n) for n in blocking)
+            self.append_log(
+                f"⚠️ {numbers}番目の欄が上限({self.get_manual_char_limit()}文字)を"
+                "超えています。送っても途中で切れるため、送信しませんでした。"
+                "欄を分けてください。")
+            return
+
+        texts = [e["box"].get("1.0", "end-1c") for e in entries]
+        accepted, message = self.worker.enqueue_manual_texts(texts)
+        if not accepted:
             self.append_log(f"⚠️ {message}")
+            return
+
+        # 受け付けられたときだけ消す。失敗時に消すと打ち直しになる
+        for entry in entries:
+            entry["box"].delete("1.0", "end")
+        self._refresh_manual_counts()
+        self.append_log(f"📨 {label}{message}")
 
     def _set_manual_send_enabled(self, enabled):
         """監視中だけ送信できるようにする（停止中はエミュレータへの経路が無い）"""
-        self.manual_send_btn.configure(state="normal" if enabled else "disabled")
+        self.manual_send_all_btn.configure(state="normal" if enabled else "disabled")
         self.manual_send_hint.configure(text="" if enabled else "監視を開始すると送れます。")
 
     def on_emulator_auto_scroll_toggle(self):
