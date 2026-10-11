@@ -32,11 +32,25 @@ KEEP = {
     "投稿する", "心のこもった「いいね」をする", "ユーザーの投稿にコメントする", "ユーザーにメッセージを送る",
     "広告を最後まで見る", "人気投稿をXにシェアする", "新規ユーザーを1人フォローする",
     "ラッキールーレット", "今日の初回チャンス", "GRAVITY",
+    # 音声ルーム
+    "ミッションへ", "毎日報酬をGET", "未受取の報酬あり", "ようこそ！", "メッセージを送信", "プライベート音声ルーム",
+    "応募する",
 }
 # そのまま残してよい形（数字・回数・時刻・景品）
 PATTERNS = [r"\d+", r"\d+/\d+回", r"\d+時間前", r"\d+分前", r"\d{2}/\d{2}( \d{2}:\d{2})?", r"\d+(\.\d+)?K",
             r"昨日\s+\d{2}:\d{2}", r"\d{2}:\d{2}", r"x\d+", r"\s*\d+/\d+回", r"広告を見て再チャレンジ.*",
-            r"広告を１回見るとルーレットを１回まわせるよ！", r"(永久|\d+日间)"]
+            r"広告を１回見るとルーレットを１回まわせるよ！", r"(永久|\d+日间)",
+            r"ゲスト（\d+人）", r"あと\d+日"]
+
+# 音声ルームのチャット欄のお知らせ。名前（やルーム名）の部分だけを伏せ字にして、決まった文言は残す。
+# ⚠️ 丸ごと伏せ字にすると、お知らせの見分け方（parse_chat_rows）をテストできなくなる
+NOTICE_TEMPLATES = [
+    re.compile(r"^(?P<lead>)(?P<name>.+?)(?P<tail>が音声ルームに参加しました)$"),
+    re.compile(r"^(?P<lead>)(?P<name>.+?)(?P<tail>さんが音声ルームにいいねをしました)$"),
+    re.compile(r"^(?P<lead>)(?P<name>.+?)(?P<tail>がマイクをもらいました)$"),
+    re.compile(r"^(?P<lead>ルーム名を)(?P<name>.+?)(?P<tail>に変更しました)$"),
+    re.compile(r"^(?P<lead>\s*)(?P<name>.+?)(?P<tail>さんはアナウンスを更新した)$"),
+]
 
 
 def make(src, dst, names):
@@ -46,10 +60,24 @@ def make(src, dst, names):
             root.remove(top)
     parent = {c: p for p in root.iter() for c in p}
     for node in list(root.iter("node")):
-        if "GET" in (node.get("text") or ""):
+        # 当選表示は「〇〇が 永久フレーム たこはさみ をGET！」の形。
+        # ⚠️ 「GET」だけで消すと、ミッションの「毎日報酬をGET」まで消える（実際に消えた）
+        if "をGET！" in (node.get("text") or ""):
             parent[node].remove(node)
 
     masked = [0]
+    # ⚠️ 同じ文字には同じ伏せ字を付ける。番号が毎回変わると「同じ人の発言か」「いいねをしたのは発言した人か」を
+    #    テストで確かめられなくなる（実際、同じ人の2つの発言といいねが3つの別の番号になっていた）
+    tokens = {}
+
+    def token(original):
+        key = original.strip()
+        if key in names:
+            return names[key]
+        if key not in tokens:
+            masked[0] += 1
+            tokens[key] = f"伏せ字{masked[0]}"
+        return tokens[key]
 
     def clean(value):
         v = value or ""
@@ -59,8 +87,11 @@ def make(src, dst, names):
             return names[v]
         if v.strip() in KEEP or any(re.fullmatch(p, v.strip()) for p in PATTERNS):
             return v
-        masked[0] += 1
-        return f"伏せ字{masked[0]}"
+        for template in NOTICE_TEMPLATES:
+            m = template.match(v)
+            if m:
+                return f"{m.group('lead')}{token(m.group('name'))}{m.group('tail')}"
+        return token(v)
 
     for node in root.iter("node"):
         node.set("text", clean(node.get("text")))

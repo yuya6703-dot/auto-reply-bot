@@ -31,3 +31,6 @@ venv/
 **/tailscale.key
 **/self.crt
 **/self.key
+
+# チャット欄の記録（tools/chat_recorder.py）。他の人の名前や発言がそのまま入るので追跡しない
+recordings/

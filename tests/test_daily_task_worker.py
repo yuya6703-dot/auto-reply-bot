@@ -149,6 +149,9 @@ def base_screens():
         "compose": [f"{CLS}.addfeed.view.AddFeedActivity", fixture("compose.xml")],
         "ad": ["com.mbridge.msdk.reward.player.MBRewardVideoActivity", AD_SCREEN],
         "voiceroom": [f"{CLS}.metaverse.voiceroom.VoiceRoomType2Activity", fixture("mypage.xml")],
+        # 実物の音声ルーム（ゲストの画面）と、「小さくする」を押した後のホーム画面（右に丸い窓が重なる）
+        "room_guest": [f"{CLS}.metaverse.voiceroom.VoiceRoomActivity", fixture("voiceroom_guest.xml")],
+        "room_minimized": [f"{CLS}.MainActivity", fixture("voiceroom_minimized.xml")],
     }
 
 
@@ -172,6 +175,18 @@ def wire_navigation(mu):
 
     mu.on_tap["mypage"] = main_tabs("mypage")
     mu.on_tap["feed"] = main_tabs("feed")
+    mu.on_tap["room_minimized"] = main_tabs("room_minimized")
+    mu.exited_room = False
+
+    def room_tap(x, y):
+        room = s["room_guest"][1]
+        if inside(A.find_by_id(room, "ivExit", display=2)[0], x, y):
+            mu.exited_room = True          # 押してはいけない（ルームから出てしまう）
+            return "mypage"
+        if inside(A.find_by_id(room, "ivZoomout", display=2)[0], x, y):
+            return "room_minimized"
+        return None
+    mu.on_tap["room_guest"] = room_tap
     mu.on_swipe.update({"task_top": "task_scrolled", "task_scrolled": "task_points", "task_points": "task_points"})
     for name in ("task_top", "task_scrolled", "task_points"):
         mu.on_back[name] = "mypage"
@@ -222,7 +237,7 @@ for action in (lambda: w._tap(mu, 400, 830), lambda: w._keyevent(mu, A.ANDROID_K
         check("広告の画面で止まる", "知らない画面" in str(e), str(e))
 check("広告の「install」を含め、何も送っていない", mu.inputs == [], mu.inputs)
 
-print("■ 守り: 音声ルームでは止めて、ルームから出るよう案内する")
+print("■ 守り: 途中で音声ルームの画面になったら止める")
 w, db, logs = new_worker()
 mu = FakeMuMu(base_screens(), "voiceroom")
 try:
@@ -332,6 +347,58 @@ check("知らせる", result is not None and "広告を最後まで見る（2/5�
 check("理由を添える", result is not None and "人が見るもの" in result[1], result)
 check("タスク画面では何も押していない", [t for t in mu.taps if t[0].startswith("task")] == [], mu.taps)
 
+print("■ タスク: 回数は達成・印なし（受け取り待ち）なら、受け取りはせずに知らせる")
+w, db, logs = new_worker()
+screens = base_screens()
+screens["task_top"][1] = edit_task_row(screens["task_top"][1], "投稿する", "1/1回", finish_mark=False)
+mu = FakeMuMu(screens, "mypage")
+wire_navigation(mu)
+result = w._run_daily_tasks(mu)
+check("受け取り待ちとして知らせる", result is not None and "受け取り待ち" in result[1] and "2倍" in result[1], result)
+check("「判断できない」とは言わない", result is not None and "判断できませんでした" not in result[1], result)
+check("もう一度投稿したりしない", not any(s == "compose" for s, _, _ in mu.taps), mu.taps)
+check("タスク画面では何も押していない", [t for t in mu.taps if t[0].startswith("task")] == [], mu.taps)
+
+print("■ タスク: こなした後に受け取り待ちになったら、「回数が増えていない」ではなく受け取り待ちと知らせる")
+w, db, logs = new_worker()
+screens = base_screens()
+done_top = screens["task_top"][1]
+screens["task_top"][1] = edit_task_row(done_top, "投稿する", "0/1回", finish_mark=False)
+mu = FakeMuMu(screens, "mypage")
+wire_navigation(mu)
+compose_tap = mu.on_tap["compose"]
+def compose_then_unclaimed(x, y):
+    nxt = compose_tap(x, y)
+    if nxt == "feed":
+        screens["task_top"][1] = edit_task_row(done_top, "投稿する", "1/1回", finish_mark=False)
+    return nxt
+mu.on_tap["compose"] = compose_then_unclaimed
+result = w._run_daily_tasks(mu)
+check("こなして受け取り待ちと知らせる", result is not None and "こなしました。報酬の受け取り待ち" in result[1], result)
+check("「回数が増えていません」とは言わない", result is not None and "回数が増えていません" not in result[1], result)
+
+print("■ タスク: 途中で報酬の受け取りの画面が出たら、どちらのボタンも押さずに止める（⚠️ 画面は仮）")
+w, db, logs = new_worker()
+screens = base_screens()
+screens["task_top"][1] = edit_task_row(screens["task_top"][1], "投稿する", "0/1回", finish_mark=False)
+reward_xml = ('<hierarchy rotation="0"><node index="0" text="" resource-id="" class="android.widget.FrameLayout" '
+              f'package="{GRAVITY}" content-desc="" clickable="false" bounds="[0,0][540,960]" display-id="2">'
+              f'<node index="0" text="そのまま受け取る" resource-id="" class="android.widget.TextView" package="{GRAVITY}" '
+              'content-desc="" clickable="true" bounds="[80,600][260,660]" display-id="2" />'
+              f'<node index="1" text="広告を見て2倍受け取る" resource-id="" class="android.widget.TextView" package="{GRAVITY}" '
+              'content-desc="" clickable="true" bounds="[280,600][460,660]" display-id="2" /></node></hierarchy>')
+screens["reward"] = [f"{CLS}.MainActivity", reward_xml]
+mu = FakeMuMu(screens, "mypage")
+wire_navigation(mu)
+compose_tap = mu.on_tap["compose"]
+mu.on_tap["compose"] = lambda x, y: "reward" if compose_tap(x, y) == "feed" else None   # 投稿したら受け取りの画面が出る
+try:
+    w._run_daily_tasks(mu)
+    check("止まる", False)
+except A.TaskStop as e:
+    check("止まる", "報酬の受け取りの画面" in str(e) and "どちらも押していません" in str(e), str(e))
+check("受け取りの画面では何も押していない", [t for t in mu.taps if t[0] == "reward"] == [], mu.taps)
+
 print("■ タスク: 送り先が未設定なら、メッセージは飛ばして知らせる")
 w, db, logs = new_worker()
 screens = base_screens()
@@ -355,6 +422,60 @@ try:
 except A.TaskStop as e:
     check("止まる", "知らない画面" in str(e), str(e))
 check("広告の画面では何も押していない", [t for t in mu.taps if t[0] == "ad"] == [], mu.taps)
+
+# ----------------------------------------------------------------------
+print("■ 音声ルームから始めたら、退出せずに「小さくする」を押してから始める（本人の指示）")
+w, db, logs = new_worker()
+screens = base_screens()
+mu = FakeMuMu(screens, "room_guest")
+wire_navigation(mu)
+w._connect_to_emulator = lambda: mu        # 実機につながずに _job_main を通す
+notices = []
+w.notify_callback = lambda title, message: notices.append((title, message))
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("最初に押したのは「小さくする」(449,28)", mu.taps[:1] == [("room_guest", 449, 28)], mu.taps[:2])
+check("退出は押していない", not mu.exited_room)
+check("ルームの画面で押したのは1回だけ", len([t for t in mu.taps if t[0] == "room_guest"]) == 1, mu.taps)
+check("小さくした後、そのままルーレットを回した", any("x300" in m for m in logs), logs[-5:])
+check("終わってもルームには戻らない（丸は押していない）", not any(
+    s == "room_minimized" and inside((412, 650, 540, 778), x, y) for s, x, y in mu.taps), mu.taps)
+check("戻り方をログで伝える", any("右の丸を押すとルームに戻れます" in m for m in logs), logs[-2:])
+check("止まった知らせは出ない", notices == [], notices)
+
+print("■ 「小さくする」が退出に近すぎたら、押さずに止める")
+w, db, logs = new_worker()
+screens = base_screens()
+# 「小さくする」の位置を、退出(483〜530)にくっつく [466,5][484,52] にずらす。
+# 中央 x=475 は、退出の左端483から余白10pxの内側（473〜）に入る
+root = ET.fromstring(screens["room_guest"][1])
+for node in root.iter("node"):
+    if A._resource_name(node) == "ivZoomout":
+        node.set("bounds", "[466,5][484,52]")
+screens["room_guest"][1] = ET.tostring(root, encoding="unicode")
+mu = FakeMuMu(screens, "room_guest")
+wire_navigation(mu)
+try:
+    w._minimize_voice_room_if_needed(mu)
+    check("止まる", False)
+except A.TaskStop as e:
+    check("止まる", "近すぎた" in str(e), str(e))
+check("何も押していない", mu.inputs == [], mu.inputs)
+
+print("■ 音声ルームでなければ、何もしない")
+w, db, logs = new_worker()
+mu = FakeMuMu(base_screens(), "mypage")
+w._minimize_voice_room_if_needed(mu)
+check("押していない", mu.inputs == [], mu.inputs)
+
+print("■ 小さくしたルームの丸は押さない")
+w, db, logs = new_worker()
+mu = FakeMuMu(base_screens(), "room_minimized")
+try:
+    w._tap(mu, 476, 714)
+    check("止まる", False)
+except A.TaskStop as e:
+    check("止まる", "押してはいけない" in str(e), str(e))
+check("何も押していない", mu.inputs == [], mu.inputs)
 
 # ----------------------------------------------------------------------
 # コメント・メッセージ・フォロー。送り先は仮の名前「テストの相手さんです」

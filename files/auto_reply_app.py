@@ -722,7 +722,25 @@ TASK_KNOWN_ACTIVITIES = frozenset({
 # ⚠️ ルーレットの大きいボタンは、回す前は「今日の初回チャンス」（押してよい）、回した後は
 # 「広告を見て再チャレンジ！」（押してはいけない）と、同じ場所のまま文言だけが変わる。
 # 位置で覚えず、押す直前のダンプで毎回判定すること。
-TASK_FORBIDDEN_LABELS = ("200/1回", "2000/10回", "広告を見て", "ギフトを贈る", "install", "Click now")
+TASK_FORBIDDEN_LABELS = ("200/1回", "2000/10回", "広告を見て", "ギフトを贈る", "install", "Click now",
+                         # タスクの報酬を「広告を見て2倍」で受け取るボタン。⚠️ 実物はまだ見ていない
+                         # （2026-10-11 本人の話: クリア後に「そのまま」か「広告を見て2倍」かを選ぶ画面が出る）。
+                         # ボタンの名前が「広告を見て」を含まなくても止められるよう、「2倍」でも止める
+                         "2倍", "２倍")
+
+# タスクの報酬の受け取りの画面の目印。「受け取」と「2倍」が両方画面にあれば、その画面とみなす。
+# ここが出たら、そのまま受け取る方も含めて何も押さずに止めて知らせる（本人の決定: 2倍にするかは本人が選ぶ）。
+# 片方だけでは判定しない（タイムラインの投稿の本文に「2倍」とだけ書いてあることはありうるため）。
+REWARD_CHOICE_RECEIVE_HINTS = ("受け取",)
+# ⚠️ 半角の「x2」は入れない。ルーレットの景品の「x200」などにも当たる
+REWARD_CHOICE_DOUBLE_HINTS = ("2倍", "２倍", "×2")
+
+# 文言の無い、押してはいけない部品（resource-id の名前）。
+#   bpvVoiceRoom: 小さくした音声ルームの丸。ホームやタスク画面の上に別の窓として重なり続け、
+#                 押すとルームが開いてタスクの途中で知らない画面になる（2026-10-11 実測 [412,650][540,778]）。
+#                 丸は動かせる作りとみられるので、位置を決め打ちにせず毎回この部品を探して避ける
+#   ivExit:       音声ルームの退出。「小さくする」(ivZoomout)のすぐ右隣にある
+TASK_FORBIDDEN_IDS = ("bpvVoiceRoom", "ivExit")
 
 # 押してはいけない枠の周りに取る余白（px）。2026-10-11、調査中に「2000/10回」の枠の
 # 20px横を誤って押した（画面の取り違え）。押す位置が少しずれても枠に入らないようにする。
@@ -778,13 +796,25 @@ def find_forbidden_boxes(xml_dump, display=None):
         if display is not None and node.get("display-id") != str(display):
             continue
         label = (node.get("text") or "") + " " + (node.get("content-desc") or "")
-        if not any(word in label for word in TASK_FORBIDDEN_LABELS):
+        if (not any(word in label for word in TASK_FORBIDDEN_LABELS)
+                and _resource_name(node) not in TASK_FORBIDDEN_IDS):
             continue
         for target in (node, _nearest_clickable(node, parent)):
             box = _node_box(target) if target is not None else None
             if box and box not in boxes:
                 boxes.append(box)
     return boxes
+
+
+def has_reward_choice(xml_dump, display=None):
+    """
+    タスクの報酬の受け取りの画面（「そのまま受け取る」か「広告を見て2倍」かを選ぶ画面）が出ているか。
+    ⚠️ 実物はまだ見ていないので、文言の組み合わせで判定している（REWARD_CHOICE_* を参照）。
+    """
+    root = ET.fromstring(xml_dump)
+    texts = [(n.get("text") or "") + " " + (n.get("content-desc") or "") for n in _display_nodes(root, display)]
+    return (any(h in t for t in texts for h in REWARD_CHOICE_RECEIVE_HINTS)
+            and any(h in t for t in texts for h in REWARD_CHOICE_DOUBLE_HINTS))
 
 
 def tap_is_safe(x, y, forbidden_boxes, margin=TASK_FORBIDDEN_MARGIN):
@@ -1061,6 +1091,80 @@ def find_point_shop_buttons(xml_dump, display=None):
             index = int(card.get("index", "0")) if card is not None else 0
             found.append((index, _node_box(node)))
     return [box for _, box in sorted(found)]
+
+
+# ====================================================
+# 💬 音声ルームのチャット欄（意味で読む）
+# ====================================================
+# ⚠️ 今の自動返信は使っていない。自動返信は「監視範囲の中の文字」を部品を問わず読む（意図した仕様）。
+# ここは、チャット欄の行を「誰が何を言ったか」「どんなお知らせか」で読むための土台として置いてある
+# （2026-10-11 本人の希望「チャット欄の情報理解を高めて、後々の開発に活かしたい」）。
+# 部品は開発ログ.md「チャット欄（rvMessages）の部品」に表がある。
+
+CHAT_KIND_MESSAGE = "message"            # 人の発言（名前と本文）
+CHAT_KIND_NOTICE = "notice"              # お知らせの行（参加・いいね・ルーム名の変更など）
+CHAT_KIND_ANNOUNCEMENT = "announcement"  # アナウンス（見出し＋本文）
+CHAT_KIND_UNKNOWN = "unknown"            # 文字はあるが、まだ知らない形の行
+
+# お知らせの文言 → 種類。(?P<subject>) は、誰が・何に、の部分
+CHAT_NOTICE_PATTERNS = (
+    ("join", re.compile(r"^(?P<subject>.+?)が音声ルームに参加しました$")),
+    ("like", re.compile(r"^(?P<subject>.+?)さんが音声ルームにいいねをしました$")),
+    ("mic", re.compile(r"^(?P<subject>.+?)がマイクをもらいました$")),
+    ("rename", re.compile(r"^ルーム名を(?P<subject>.+?)に変更しました$")),
+)
+
+
+def chat_notice_kind(text):
+    """お知らせの文言から (種類, 誰が・何に) を返す。知らない文言は ("", "")"""
+    for kind, pattern in CHAT_NOTICE_PATTERNS:
+        m = pattern.match((text or "").strip())
+        if m:
+            return kind, m.group("subject").strip()
+    return "", ""
+
+
+def parse_chat_rows(xml_dump, display=None):
+    """
+    音声ルームのチャット欄(rvMessages)を、1行ずつ意味で読む（画面の上から順）。
+    戻り値: [{"kind": CHAT_KIND_*, "name": 名前, "text": 本文, "notice": お知らせの種類,
+              "subject": お知らせの誰が・何に, "welcome": 「ようこそ！」ボタンがあるか,
+              "box": 行の枠, "parts": 行の中の部品のIDの並び}, ...]
+
+    ⚠️ アナウンスの本文と人の発言の本文は、どちらも同じID `tvContent`。行の中に `tvUser`（アナウンスの見出し）が
+       あるかで見分ける。名前(`shimmerTextView`)と本文は別の部品なので、行の単位でまとめて読む。
+    ⚠️ 画面の端で切れて文字が見えない行は返さない（スクロールすれば読める）。
+    """
+    root = ET.fromstring(xml_dump)
+    lists = [n for n in _display_nodes(root, display) if _resource_name(n) == "rvMessages"]
+    if not lists:
+        return []
+    rows = []
+    for row in lists[0]:
+        parts, texts = [], {}
+        for node in row.iter("node"):
+            rid = _resource_name(node)
+            if rid and rid not in parts:
+                parts.append(rid)
+            text = (node.get("text") or "").strip()
+            if rid and text:
+                texts.setdefault(rid, text)
+        if not texts:
+            continue
+        item = {"kind": CHAT_KIND_UNKNOWN, "name": "", "text": "", "notice": "", "subject": "",
+                "welcome": texts.get("tvBtn") == "ようこそ！", "box": _node_box(row), "parts": tuple(parts)}
+        if "tvUser" in texts:
+            item.update(kind=CHAT_KIND_ANNOUNCEMENT, text=texts.get("tvContent", ""),
+                        name=re.sub(r"さんはアナウンスを更新した$", "", texts["tvUser"]).strip())
+        elif "shimmerTextView" in texts or "tvContent" in texts:
+            item.update(kind=CHAT_KIND_MESSAGE, name=texts.get("shimmerTextView", ""), text=texts.get("tvContent", ""))
+        elif "tvText" in texts:
+            notice, subject = chat_notice_kind(texts["tvText"])
+            item.update(kind=CHAT_KIND_NOTICE, text=texts["tvText"], notice=notice, subject=subject)
+        else:
+            item["text"] = " / ".join(texts.values())
+        rows.append(item)
+    return rows
 
 
 # ====================================================
@@ -5734,6 +5838,12 @@ class GravityTaskWorker(AutoReplyWorker):
     # 一覧を少しずつ送るなぞり（画面は 540x960）。⚠️ 大きく送ると行を飛ばす（実測でコメントの行が写らなかった）
     SCROLL_X, SCROLL_FROM_Y, SCROLL_TO_Y, SCROLL_MS = 270, 760, 520, 500
 
+    # 報酬の受け取りの画面が出たときの知らせ。⚠️ 「広告を見て2倍」はボットでは押さない（広告は人が見るもの）。
+    # 「そのまま受け取る」も押さない（2倍にするかどうかは本人が選ぶ。2026-10-11 本人の決定）
+    REWARD_STOP_MESSAGE = ("タスクの報酬の受け取りの画面が出ました。そのまま受け取るか、広告を見て2倍にするかを、"
+                           "ご自身で選んでください（ボットはどちらも押していません）。"
+                           "選び終わったら、もう一度「📋 タスクをこなす」を押すと残りから続けます。")
+
     MAIN_ACTIVITY = ".gravity.MainActivity"
     TASK_CENTER_ACTIVITY = ".point.TaskCenterActivity"
     ADD_FEED_ACTIVITY = ".addfeed.view.AddFeedActivity"
@@ -5747,6 +5857,8 @@ class GravityTaskWorker(AutoReplyWorker):
         super().__init__(db, log_callback)
         # 止まったとき・本人の番のときに呼ぶ (見出し, 本文)。ワーカースレッドから呼ばれる
         self.notify_callback = notify_callback or (lambda title, message: None)
+        # 音声ルームを小さくしてから始めたか（終わったときに、戻り方を知らせるため）
+        self._minimized_room = False
 
     # --- 起動 / 停止 ---
     def start_job(self, job):
@@ -5789,6 +5901,9 @@ class GravityTaskWorker(AutoReplyWorker):
             self.log(f"❌ {name}の途中でエラーが起きたため止めました: {first_line}")
             self.notify_callback(f"{name}を止めました", f"エラーが起きました: {first_line}")
         finally:
+            if self._minimized_room:
+                # 終わってもルームには戻らない（本人の決定）。戻り方だけ伝える
+                self.log("ℹ️ 音声ルームは小さくしたままです。画面の右の丸を押すとルームに戻れます。")
             self.is_running = False
 
     # --- 画面を読む ---
@@ -5803,6 +5918,9 @@ class GravityTaskWorker(AutoReplyWorker):
         display = self._update_target_display(xml)
         result = d.shell("dumpsys activity activities")
         component = parse_display_activity(getattr(result, "output", result) or "", display)
+        # タスクの報酬の受け取りの画面は、どの処理の途中で出ても、ここで止める（読むたびに確かめる）
+        if has_reward_choice(xml, display):
+            raise TaskStop(self.REWARD_STOP_MESSAGE)
         return xml, component
 
     def _require_known_screen(self, component):
@@ -5811,10 +5929,48 @@ class GravityTaskWorker(AutoReplyWorker):
             return
         cls = component.rsplit("/", 1)[-1] if component else ""
         if GRAVITY_VOICE_ROOM_HINT in cls.lower():
-            raise TaskStop("GRAVITYが音声ルームの画面のままです。勝手にルームを出ないよう、何も押さずに止めました。"
-                           "ルームから出て（ホームやマイページを開いて）から、もう一度押してください。")
+            # 始めるときの音声ルームは _minimize_voice_room_if_needed が小さくする。ここに来るのは途中で開いたとき
+            raise TaskStop("途中でGRAVITYが音声ルームの画面になりました。勝手にルームを触らないよう、"
+                           "何も押さずに止めました。")
         raise TaskStop(f"知らない画面が出ています（{cls.rsplit('.', 1)[-1] or '不明'}）。"
                        f"何も押さずに止めました。MuMuの画面を確かめてください。")
+
+    def _minimize_voice_room_if_needed(self, d):
+        """
+        音声ルームの画面から始めたときは、退出せずに「小さくする」(ivZoomout)を押してホーム画面へ移る（本人の指示）。
+        小さくしたルームは、画面の右に丸い窓(bpvVoiceRoom)として残る。終わってもルームには戻らない（本人の決定）。
+
+        ⚠️ 「小さくする」のすぐ右隣が退出(ivExit)。押す位置が退出の枠（と余白）に入るなら押さずに止める。
+        ⚠️ 音声ルームは押してよい画面に入れていない（タスクの途中で勝手にルームを触らないため）。
+           この1回だけは _tap を通さず、ここで個別に確かめてから押す。
+        """
+        self._minimized_room = False
+        xml, component = self._read_screen(d)
+        package, _, cls = component.partition("/")
+        if GRAVITY_VOICE_ROOM_HINT not in cls.lower() or package != self._monitor_target_package():
+            return
+        boxes = find_by_id(xml, "ivZoomout", self._target_display)
+        if len(boxes) != 1:
+            raise TaskStop("音声ルームの「小さくする」ボタンが見つかりませんでした。何も押さずに止めました。")
+        x, y = box_center(boxes[0])
+        if not tap_is_safe(x, y, find_forbidden_boxes(xml, self._target_display)):
+            raise TaskStop("音声ルームの「小さくする」ボタンが退出ボタンなどに近すぎたため、何も押さずに止めました。")
+        self.log("🔽 音声ルームを小さくしてから始めます（ルームからは出ません）。")
+        if not AutoReplyWorker._tap(self, d, x, y):
+            raise TaskStop("画面を押す操作を送れませんでした。")
+        self._minimized_room = True
+        # ⚠️ 押した直後は、まだ音声ルームの画面が残っていることがある。ふだんの _wait_for は
+        #    知らない画面ですぐ止めるので使わず、音声ルームの間だけは待つ
+        deadline = time.time() + self.SCREEN_WAIT_SECONDS
+        while True:
+            time.sleep(0.7)
+            _, component = self._read_screen(d)
+            if component.endswith(self.MAIN_ACTIVITY):
+                return
+            if GRAVITY_VOICE_ROOM_HINT not in component.lower():
+                self._require_known_screen(component)
+            if time.time() >= deadline:
+                raise TaskStop("音声ルームを小さくしても、ホーム画面に移りませんでした。")
 
     def _wait_for(self, d, condition, what, timeout=None):
         """condition(xml, component) が真になるまで読み直す。知らない画面が出たら、その場で止める"""
@@ -5969,11 +6125,18 @@ class GravityTaskWorker(AutoReplyWorker):
             self._scroll_down(d)
         return [rows[title] for title in order]
 
+    @staticmethod
+    def _looks_unclaimed(row):
+        """回数は達成しているのにクリアの印が無い行か（報酬の受け取り待ちとみられる）"""
+        progress = row["progress"]
+        return bool(progress) and progress[1] > 0 and progress[0] >= progress[1] and not row["finish_mark"]
+
     def _run_daily_tasks(self, d):
         """タスクを読み、ボットがこなせるものをこなし、最後にまとめて知らせる。知らせる内容 (見出し, 本文) か None を返す"""
         friend = (self.db.get_setting("daily_task_friend_name", "") or "").strip()
         text = (self.db.get_setting("daily_task_text", DEFAULT_DAILY_TASK_TEXT) or "").strip()
 
+        self._minimize_voice_room_if_needed(d)
         self._open_task_center(d)
         rows = self._read_daily_tasks(d)
         if not rows:
@@ -5986,6 +6149,12 @@ class GravityTaskWorker(AutoReplyWorker):
             progress = f"{row['progress'][0]}/{row['progress'][1]}回" if row["progress"] else "回数不明"
             if state == TASK_STATE_DONE:
                 self.log(f"   ✔ 済み: {row['title']}（{progress}）")
+            elif state == TASK_STATE_UNKNOWN and self._looks_unclaimed(row):
+                # 回数は達成しているのに印が無い = 報酬の受け取り待ちとみられる（本人の話から。実物は未確認）。
+                # ⚠️ 受け取りはボットではしない（2倍にするかどうかは本人が選ぶ）
+                self.log(f"   🎁 受け取り待ち: {row['title']}（{progress}）")
+                notes.append(f"・{row['title']}（{progress}）: 報酬の受け取り待ちのようです。"
+                             f"そのまま受け取るか、広告を見て2倍にするかを、ご自身で選んでください")
             elif state == TASK_STATE_UNKNOWN:
                 mark = "クリアの印あり" if row["finish_mark"] else "クリアの印なし"
                 self.log(f"   ? 判断できない: {row['title']}（{progress}・{mark}）")
@@ -6027,6 +6196,11 @@ class GravityTaskWorker(AutoReplyWorker):
                 row = after.get(title)
                 if row and classify_task(row["progress"], row["finish_mark"]) == TASK_STATE_DONE:
                     self.log(f"   ✅ {title}: 済みになりました")
+                elif row and self._looks_unclaimed(row):
+                    # こなして回数は達成したが、報酬はまだ受け取っていない（受け取りは本人が選ぶ）
+                    self.log(f"   ✅ {title}: 回数は達成しました。報酬は受け取り待ちです")
+                    notes.append(f"・{title}: こなしました。報酬の受け取り待ちです。"
+                                 f"そのまま受け取るか、広告を見て2倍にするかを、ご自身で選んでください")
                 else:
                     shown = f"{row['progress'][0]}/{row['progress'][1]}回" if row and row["progress"] else "読めず"
                     self.log(f"   ⚠️ {title}: こなしましたが、まだ済みになっていません（{shown}）")
@@ -6105,6 +6279,7 @@ class GravityTaskWorker(AutoReplyWorker):
     # --- ラッキールーレット（タスクとは別） ---
     def _run_roulette(self, d):
         """無料の1回だけを回す。ポイントで回す・広告で回すボタンは、上の守りで押せないようにしてある"""
+        self._minimize_voice_room_if_needed(d)
         xml = self._open_task_center(d)
         before = text_by_id(xml, "tvPoint", self._target_display)
         buttons = self._scroll_until(
@@ -10227,10 +10402,13 @@ class App(ctk.CTk):
                  "　投稿する / ユーザーの投稿にコメントする / ユーザーにメッセージを送る /\n"
                  "　新規ユーザーを1人フォローする（フォローしたらすぐ外します）\n"
                  "広告・Xへのシェア・心のこもったいいねは、ボットではこなさず、ご自身の番としてお知らせします。\n"
+                 "タスクの報酬は受け取りません（そのまま受け取るか、広告を見て2倍にするかは、ご自身で選んでください）。\n"
                  "「🎡 ルーレットを回す」は、無料の1回（今日の初回チャンス）だけを回します。\n"
                  "⚠️ ポイントで回す・広告で回すボタン、ギフト、広告の画面には、ボットは触りません。\n"
                  "⚠️ 知らない画面が出たら、何も押さずに止めてお知らせします。\n"
-                 "　 自動返信の監視中は実行できません（同じ画面を操作して混ざるため）。",
+                 "　 自動返信の監視中は実行できません（同じ画面を操作して混ざるため）。\n"
+                 "音声ルームの画面から始めたときは、退出せずに「小さくする」を押してから始めます。\n"
+                 "　 終わってもルームには戻りません（画面の右の丸を押すと戻れます）。",
             justify="left", text_color="gray70"
         ).pack(anchor="w", padx=12, pady=(0, 8))
 

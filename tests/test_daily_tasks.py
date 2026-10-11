@@ -120,6 +120,52 @@ boxes = A.find_forbidden_boxes(fixture("roulette_result_dialog.xml"), display=2)
 check("ダイアログの「広告を見て再チャレンジ」は押さない", not A.tap_is_safe(270, 677, boxes), boxes)
 check("右上の×は押してよい", A.tap_is_safe(469, 210, boxes))
 
+print("■ 音声ルーム（ゲストの画面）: 退出の隣の「小さくする」")
+room = fixture("voiceroom_guest.xml")
+boxes = A.find_forbidden_boxes(room, display=2)
+zoom = A.find_by_id(room, "ivZoomout", display=2)
+check("退出(ivExit)は押してはいけない", (483, 5, 530, 52) in boxes, boxes)
+check("「小さくする」は1つだけ", zoom == [(426, 5, 473, 52)], zoom)
+check("「小さくする」の中央は押してよい（退出から34px）", A.tap_is_safe(*A.box_center(zoom[0]), boxes))
+check("退出の左の余白内は押さない", not A.tap_is_safe(476, 28, boxes))
+
+print("■ 小さくしたルームの丸（ホーム画面の上に重なる別の窓）")
+minimized = fixture("voiceroom_minimized.xml")
+boxes = A.find_forbidden_boxes(minimized, display=2)
+check("丸の押せる枠は押してはいけない", (412, 650, 540, 778) in boxes, boxes)
+check("丸の真ん中は押さない", not A.tap_is_safe(476, 714, boxes))
+check("下のタブ（マイページ）は押してよい", A.tap_is_safe(486, 925, boxes))
+check("丸があっても、GRAVITYの画面は画面2と読める", A.find_by_id(minimized, "tab_center", display=2) == [(432, 890, 540, 960)])
+
+print("■ タスクの報酬の受け取りの画面（⚠️ 実物は未確認。本人の話から組んだ仮の画面）")
+def reward_screen(*buttons, extra=()):
+    nodes = "".join(
+        f'<node index="{i}" text="{t}" resource-id="" class="android.widget.TextView" '
+        f'package="{GRAVITY}" content-desc="" clickable="{c}" bounds="{b}" display-id="2" />'
+        for i, (t, c, b) in enumerate(list(buttons) + list(extra)))
+    return (f'<hierarchy rotation="0"><node index="0" text="" resource-id="" class="android.widget.FrameLayout" '
+            f'package="{GRAVITY}" content-desc="" clickable="false" bounds="[0,0][540,960]" display-id="2">'
+            f'{nodes}</node></hierarchy>')
+REWARD = reward_screen(("タスク達成！", "false", "[100,400][440,450]"),
+                       ("そのまま受け取る", "true", "[80,600][260,660]"),
+                       ("広告を見て2倍受け取る", "true", "[280,600][460,660]"))
+check("「受け取」と「2倍」があれば受け取りの画面", A.has_reward_choice(REWARD, display=2))
+check("全角の２倍でも", A.has_reward_choice(reward_screen(("受け取る", "true", "[0,0][9,9]"),
+                                                       ("２倍で受け取る", "true", "[0,0][9,9]")), display=2))
+check("「2倍」だけ（投稿の本文など）では受け取りの画面としない",
+      not A.has_reward_choice(reward_screen(("ポイント2倍キャンペーン", "false", "[0,0][9,9]")), display=2))
+check("「受け取」だけでは受け取りの画面としない",
+      not A.has_reward_choice(reward_screen(("受け取りました", "false", "[0,0][9,9]")), display=2))
+check("ルーレットの結果（x300）は受け取りの画面ではない",
+      not A.has_reward_choice(fixture("roulette_result_dialog.xml"), display=2))
+for name in ("task_center_top.xml", "task_center_scrolled.xml", "feed_home.xml", "voiceroom_guest.xml"):
+    check(f"{name} は受け取りの画面ではない", not A.has_reward_choice(fixture(name), display=2))
+boxes = A.find_forbidden_boxes(REWARD, display=2)
+check("「広告を見て2倍」のボタンは押してはいけない", not A.tap_is_safe(370, 630, boxes), boxes)
+# 名前に「広告を見て」が入っていなくても、「2倍」で止める
+boxes = A.find_forbidden_boxes(reward_screen(("2倍で受け取る", "true", "[280,600][460,660]")), display=2)
+check("「2倍で受け取る」（広告の文言なし）も押してはいけない", not A.tap_is_safe(370, 630, boxes), boxes)
+
 print("■ タスク画面には押してはいけないボタンが無い")
 # 「広告を最後まで見る」はタスク名で、「広告を見て」には当たらない
 check("タスク画面(上)", A.find_forbidden_boxes(fixture("task_center_top.xml"), display=2) == [])

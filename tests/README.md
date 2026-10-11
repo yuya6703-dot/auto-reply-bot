@@ -10,6 +10,7 @@
 | `test_live_newline.py` | **必要** | GRAVITYの実際の入力欄で改行が保たれるか（**送信ボタンは押さない**） |
 | `test_daily_tasks.py` | 不要 | GRAVITYのタスク・ルーレットの「画面を読む」関数。タスクの行と回数、こなすかの判定、押してよい画面か、押してはいけないボタン、目当ての部品の探し方。`fixtures/` の実機ダンプを使う |
 | `test_daily_task_worker.py` | 不要 | タスク・ルーレットの実行役 `GravityTaskWorker` を「にせのMuMu」で通しで動かす。守り（広告・音声ルーム・ポイント消費ボタンの近くでは何も送らない）と、各タスクの流れ |
+| `test_chat_rows.py` | 不要 | 音声ルームのチャット欄を「意味で読む」関数（`parse_chat_rows`）。発言・お知らせ・アナウンスの見分け方。⚠️ 今の自動返信はまだ使っていない |
 | `test_gui_daily_task.py` | 不要 | メインタブのタスク・ルーレットのボタンと、設定タブの区画。監視と同時に動かさないこと（画面が一瞬出る） |
 
 ## 実行
@@ -20,6 +21,7 @@ python tests/test_gui_widgets.py
 python tests/test_daily_tasks.py
 python tests/test_daily_task_worker.py
 python tests/test_gui_daily_task.py
+python tests/test_chat_rows.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方
@@ -35,6 +37,11 @@ python tests/make_fixture.py 取ったダンプ.xml 保存する名前.xml
 決まった文言（ボタン名など）・数字・時刻以外はすべて「伏せ字N」になる。
 名前で探す処理を試したいときだけ `--name 元の名前=仮の名前` で特定の名前を仮の名前に置き換えて残す。
 作った後に表示される「残った文言」を目で確かめること。
+
+お知らせの行（「〜が音声ルームに参加しました」など）は、名前の部分だけを伏せ字にして決まった文言を残す。
+同じ名前には同じ伏せ字を付ける（「同じ人の発言か」をテストで確かめられるように）。
+
+チャット欄の行を集めるときは `tools/chat_recorder.py` を使う（読むだけ。記録は `recordings/` に置かれ、リポジトリには入らない）。
 
 実機テストは MuMu を起動し、GRAVITY の音声ルームを表示してから:
 
