@@ -1,7 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+# アプリのアイコン。exe自体のアイコン(下の EXE の icon=)とは別に、窓・ダイアログに付けるため同梱する。
+# ⚠️ 同梱したファイルは exe の横ではなく _internal に入る（find_app_icon が両方を探す）。
+datas = [('app_icon.ico', '.')]
 binaries = []
 hiddenimports = ['PIL._tkinter_finder']
 tmp_ret = collect_all('customtkinter')
@@ -69,6 +71,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='自動送信ボット',
+    icon='app_icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

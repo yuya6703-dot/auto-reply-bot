@@ -163,6 +163,51 @@ h.daily_task_notify_var.set(False)
 h.on_daily_task_notify_toggle()
 check("お知らせの音をOFFにできる", db.get_setting("daily_task_notify_sound") == "0")
 
+print("■ アプリのアイコン（窓・ダイアログ）")
+icon = A.find_app_icon()
+check("アイコンのファイルが見つかる", icon is not None and icon.endswith(A.APP_ICON_FILE), icon)
+# ⚠️ CustomTkinterのダイアログは、作った0.2秒後に目印を見ずに既定のアイコンで上書きする（5.2.2）。
+# Windowsでは .ico で付けたアイコンを wm_iconbitmap() で読み返せない（None になる）ので、
+# iconbitmap が呼ばれた順を記録し、上書きの時間を過ぎた後で「最後に付いたもの」を見る。
+import time
+
+def recorded(window):
+    calls = []
+    original = window.iconbitmap
+    def record(bitmap=None, default=None):
+        calls.append(bitmap)
+        return original(bitmap, default)
+    window.iconbitmap = record
+    return calls
+
+def pump_until(condition, timeout=5.0):
+    """
+    条件がそろうまで画面の処理を回す。
+    ⚠️ 決まった秒数だけ回すと、1回の update() が長引いたときに0.2秒後の上書きより先に終わり、
+    たまたま失敗する（実際に1度起きた）。上書きと付け直しが起きたのを見てから止める。
+    """
+    end = time.time() + timeout
+    while time.time() < end and not condition():
+        h.update()
+        time.sleep(0.02)
+
+plain = ctk.CTkToplevel(h)
+plain_calls = recorded(plain)
+dialog = ctk.CTkToplevel(h)
+dialog_calls = recorded(dialog)
+A.App._apply_window_icon(dialog)
+# 対策したダイアログは「付ける → 既定のアイコンに上書きされる → 付け直す」の3回呼ばれるはず
+pump_until(lambda: plain_calls and len(dialog_calls) >= 3)
+# 付け直した後に、さらに上書きされないことも見る
+settle = time.time() + 0.5
+pump_until(lambda: time.time() >= settle)
+check("何もしないダイアログは、既定のアイコンに上書きされる（この対策が要る理由）",
+      bool(plain_calls) and "CustomTkinter" in str(plain_calls[-1]), plain_calls)
+check("アイコンを付けたダイアログは、上書きの後もアプリのアイコンのまま",
+      bool(dialog_calls) and dialog_calls[-1] == icon, dialog_calls)
+plain.destroy()
+dialog.destroy()
+
 h.destroy()
 print()
 if FAILS:

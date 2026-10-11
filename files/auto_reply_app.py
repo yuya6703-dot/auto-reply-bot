@@ -80,6 +80,24 @@ else:
 DB_FILE = os.path.join(BASE_DIR, "app_data.db")
 DB_FILE_NAME = os.path.basename(DB_FILE)
 
+# アプリのアイコン（窓・タスクバー・exe・ショートカットで共通）。
+# ⚠️ exe（--onedir）では同梱したファイルが exe の横ではなく _internal(sys._MEIPASS) に入る。
+# .py で動かすときはこのファイルの横にある。両方を探すこと。
+APP_ICON_FILE = "app_icon.ico"
+# タスクバーでの、このアプリの名札。⚠️ これを決めないと、.py で動かしたときに
+# タスクバーが「Python」の仲間として扱い、窓のアイコンではなく Python のアイコンを出す。
+APP_USER_MODEL_ID = "AutoReplyBot.App"
+
+
+def find_app_icon():
+    """アイコンのファイルの場所。見つからなければ None（アイコン無しでも動くようにする）"""
+    for folder in (getattr(sys, "_MEIPASS", None), BASE_DIR):
+        if folder:
+            path = os.path.join(folder, APP_ICON_FILE)
+            if os.path.exists(path):
+                return path
+    return None
+
 # ====================================================
 # 🔄 アップデート設定
 # ====================================================
@@ -6124,10 +6142,17 @@ class GravityTaskWorker(AutoReplyWorker):
 # ====================================================
 class App(ctk.CTk):
     def __init__(self):
+        # ⚠️ 窓を作る前に名札を決める。後から決めても、作った窓はPythonの仲間として並んだまま
+        if sys.platform.startswith("win"):
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+            except Exception:
+                pass
         super().__init__()
         self.title(f"自動返信Bot アプリケーション  (v{APP_VERSION})")
         self.geometry("800x650")
         ctk.set_appearance_mode("Dark")
+        self._apply_window_icon(self)
 
         self.db = DatabaseManager()
         self.worker = AutoReplyWorker(self.db, self.append_log)
@@ -6231,6 +6256,35 @@ class App(ctk.CTk):
         self.build_settings_tab()
 
     # --- メインタブ ---
+    # ダイアログにアイコンを付け直すまでの時間（ミリ秒）。下の _apply_window_icon を参照
+    ICON_REAPPLY_MS = 400
+
+    @staticmethod
+    def _apply_window_icon(window):
+        """
+        窓（本体・ダイアログ）にアプリのアイコンを付ける。ダイアログは作った直後にここを呼ぶこと。
+
+        ⚠️ CustomTkinterは窓を作ってから0.2秒後に、自分の既定のアイコンで上書きする（5.2.2で確認）。
+          ・本体の窓(CTk): 先に iconbitmap を呼んだ窓には上書きしない → すぐ付ければ足りる
+          ・ダイアログ(CTkToplevel): 目印を見ずに無条件で上書きする → 上書きの後にもう一度付ける
+        Tkの「既定のアイコン」の指定も、この上書きに負けるので使えない。
+        """
+        path = find_app_icon()
+        if not path:
+            return
+
+        def apply():
+            try:
+                window.iconbitmap(path)
+            except Exception:
+                pass   # 付け直す前に窓が閉じられた場合など
+
+        apply()
+        try:
+            window.after(App.ICON_REAPPLY_MS, apply)
+        except Exception:
+            pass
+
     def build_main_tab(self):
         btn_frame = ctk.CTkFrame(self.tab_main, fg_color="transparent")
         btn_frame.pack(fill="x", pady=10)
@@ -8399,6 +8453,7 @@ class App(ctk.CTk):
 
         def show_alarm_dialog():
             dialog = ctk.CTkToplevel(self)
+            self._apply_window_icon(dialog)
             dialog.title("タイマー")
             dialog.geometry("320x150")
             dialog.grab_set()
@@ -10810,6 +10865,7 @@ class App(ctk.CTk):
                 threading.Thread(target=play, daemon=True).start()
 
         dialog = ctk.CTkToplevel(self)
+        self._apply_window_icon(dialog)
         dialog.title("GRAVITY")
         dialog.attributes("-topmost", True)
         ctk.CTkLabel(
@@ -10912,6 +10968,7 @@ class App(ctk.CTk):
 
         # バックアップのzip作成に数秒かかるため、固まったように見えないよう一言出しておく
         notice = ctk.CTkToplevel(self)
+        self._apply_window_icon(notice)
         notice.title("アップデート")
         notice.geometry("380x90")
         notice.resizable(False, False)
@@ -10995,6 +11052,7 @@ class App(ctk.CTk):
             release_notes = release_notes[:1500] + "\n...(以下省略)"
 
         dialog = ctk.CTkToplevel(self)
+        self._apply_window_icon(dialog)
         dialog.title("アップデートのお知らせ")
         dialog.geometry("500x400")
         dialog.grab_set()
@@ -11045,6 +11103,7 @@ class App(ctk.CTk):
 
         # 進捗表示用の簡易ダイアログ
         progress_dialog = ctk.CTkToplevel(self)
+        self._apply_window_icon(progress_dialog)
         progress_dialog.title("アップデート中")
         progress_dialog.geometry("400x120")
         progress_dialog.grab_set()
@@ -11113,6 +11172,7 @@ class App(ctk.CTk):
         self.append_log(f"📂 ローカルzipからのアップデートを開始します: {zip_path}")
 
         progress_dialog = ctk.CTkToplevel(self)
+        self._apply_window_icon(progress_dialog)
         progress_dialog.title("アップデート中")
         progress_dialog.geometry("400x120")
         progress_dialog.grab_set()

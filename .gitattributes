@@ -11,3 +11,6 @@
 *.exe binary
 *.db binary
 *.zip binary
+# アプリのアイコン。中身の判定に任せず、改行の変換で壊れないよう明示する
+*.ico binary
+*.png binary
