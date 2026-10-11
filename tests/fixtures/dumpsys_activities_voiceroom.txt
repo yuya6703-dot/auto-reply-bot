@@ -1,0 +1,11 @@
+Display #2 (activities from top to bottom):
+    topResumedActivity=ActivityRecord{14042975 u0 anonymous.sns.community.gravity/com.hiclub.android.gravity.metaverse.voiceroom.VoiceRoomType2Activity t56}
+    Resumed: ActivityRecord{14042975 u0 anonymous.sns.community.gravity/com.hiclub.android.gravity.metaverse.voiceroom.VoiceRoomType2Activity t56}
+Display #0 (activities from top to bottom):
+      topResumedActivity=ActivityRecord{248369604 u0 app.lawnchair/.LawnchairLauncher t2}
+    Resumed: ActivityRecord{248369604 u0 app.lawnchair/.LawnchairLauncher t2}
+Display #3 (activities from top to bottom):
+  ResumedActivity: ActivityRecord{14042975 u0 anonymous.sns.community.gravity/com.hiclub.android.gravity.metaverse.voiceroom.VoiceRoomType2Activity t56}
+  mFocusedApp=ActivityRecord{14042975 u0 anonymous.sns.community.gravity/com.hiclub.android.gravity.metaverse.voiceroom.VoiceRoomType2Activity t56}
+  mFocusedApp=ActivityRecord{248369604 u0 app.lawnchair/.LawnchairLauncher t2}
+  mFocusedApp=null

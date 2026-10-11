@@ -570,6 +570,482 @@ def format_hms(total_seconds):
 
 
 # ====================================================
+# 📋 デイリータスク（タスク画面の読み取り）
+# ====================================================
+# タスク画面(point.TaskCenterActivity)の部品ID。実測(2026-10-11, Android版GRAVITY)。
+# 1行は「行の枠」の中に imgPointTask / llPointTaskInfo / llPointTaskExecute が並ぶ作り。
+# タイトル・回数・ポイントは llPointTaskInfo の中、「クリア」の印は llPointTaskExecute の中にある。
+TASK_ROW_INFO_ID = "llPointTaskInfo"
+TASK_ROW_TITLE_ID = "tvPointTaskTitle"
+TASK_ROW_PROGRESS_ID = "tvPointTaskProgress"
+TASK_ROW_AWARD_ID = "tvPointAward"
+TASK_ROW_EXECUTE_ID = "llPointTaskExecute"
+# 達成済みの行に出る「クリア」の印。
+# ⚠️ 未達成の行の llPointTaskExecute に何が出るかは未確認（調べた日は全部達成済みだった）。
+TASK_ROW_FINISH_MARK_ID = "imgPointFinish"
+
+# 回数の表示「1/1回」「40/40回」を読む式
+RE_TASK_PROGRESS = re.compile(r"(\d+)\s*/\s*(\d+)")
+
+# 1行のタスクをどう扱うか
+TASK_STATE_TODO = "todo"          # まだ回数が残っている → ボットがこなす
+TASK_STATE_DONE = "done"          # 終わっている → 触らない
+TASK_STATE_UNKNOWN = "unknown"    # 判断できない → その行には触らず、最後にまとめて知らせる
+
+# 投稿・コメント・メッセージの文面の既定値（本人の指定「タスクと記入」。設定タブで変えられる）
+DEFAULT_DAILY_TASK_TEXT = "タスク"
+
+
+def _resource_name(node):
+    """resource-id「パッケージ:id/名前」の名前の部分だけを返す"""
+    return (node.get("resource-id") or "").rsplit("/", 1)[-1]
+
+
+def parse_task_progress(text):
+    """
+    「1/1回」→ (1, 1)。読めなければ None。
+    ⚠️ 読めないときに0回扱いなどで推測しない。表示の形が変わった可能性があり、
+    推測で「未達成」とみなすと、終わっているタスクをもう一度こなしてしまう。
+    """
+    m = RE_TASK_PROGRESS.search(unicodedata.normalize("NFKC", text or ""))
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def parse_task_rows(xml_dump, display=None):
+    """
+    タスク画面のダンプから、見えているタスクの行を読み出す。
+    戻り値: [{"title": str, "progress": (済んだ回数, 必要な回数) か None,
+              "award": str, "finish_mark": bool}, ...]（画面の上から順）
+
+    ⚠️ 画面の端で切れて一部が見えない行は返さない。スクロールして全体が見えてから読む。
+      ・タイトルが見えない行: どのタスクか分からないまま回数を拾うと、別のタスクの結果と取り違える
+      ・右側の枠(llPointTaskExecute)が見えない行: 印は枠の中にあり、タイトルより下から始まる
+        （実測 タイトル上端869 / 印上端891）。画面の下端に差しかかると「回数は見えるのに印だけ
+        画面外」になり、クリア済みの行が「達成なのに印が無い」と読めてしまう
+      ・回数が見えない行: 同じく下端で切れた行。読めない表示(None)と区別がつかなくなる
+    display を渡すと、そのディスプレイの部品だけを見る（MuMuのダンプには他の画面も混ざる）。
+    """
+    root = ET.fromstring(xml_dump)
+    rows = []
+    for row in root.iter("node"):
+        # 行の枠 = llPointTaskInfo を直接の子に持つ部品
+        if not any(_resource_name(child) == TASK_ROW_INFO_ID for child in row):
+            continue
+        if display is not None and row.get("display-id") != str(display):
+            continue
+        parts = {}
+        for node in row.iter("node"):
+            parts.setdefault(_resource_name(node), node)
+
+        title_node = parts.get(TASK_ROW_TITLE_ID)
+        title = (title_node.get("text") if title_node is not None else "").strip()
+        if not title:
+            continue
+        if TASK_ROW_EXECUTE_ID not in parts or TASK_ROW_PROGRESS_ID not in parts:
+            continue
+        progress_node = parts.get(TASK_ROW_PROGRESS_ID)
+        award_node = parts.get(TASK_ROW_AWARD_ID)
+        rows.append({
+            "title": title,
+            "progress": parse_task_progress(progress_node.get("text") if progress_node is not None else ""),
+            "award": (award_node.get("text") if award_node is not None else "").strip(),
+            "finish_mark": TASK_ROW_FINISH_MARK_ID in parts,
+        })
+    return rows
+
+
+def classify_task(progress, finish_mark):
+    """
+    1行のタスクを TASK_STATE_TODO / TASK_STATE_DONE / TASK_STATE_UNKNOWN に分ける。
+
+    progress:    (済んだ回数, 必要な回数)。表示が読めなかったときは None
+    finish_mark: 「クリア」の印 (imgPointFinish) が出ているか
+
+    ⚠️ ここで TODO と判定した行は、ボットが実際に投稿・送信などをして回数を増やしに行く。
+    取り違えると、終わっているタスクをもう一度こなす（＝余計な投稿が他の人に届く）。
+    そのため TODO は「回数が途中で、印も無い」ときだけにし、食い違いは止めて知らせる。
+    取り違えたときの害が小さい方（＝こなし損ねるだけの DONE）には、印があれば倒してよい。
+    """
+    if progress is None:
+        # 表示の形が変わったなど。印は済みの強い証拠なので信じる。印も無ければ分からない
+        return TASK_STATE_DONE if finish_mark else TASK_STATE_UNKNOWN
+    done, total = progress
+    if total <= 0:
+        return TASK_STATE_UNKNOWN
+    if done >= total:
+        # 回数は達成なのに印が無い = 報酬の受け取り待ちなど、まだ見たことのない状態。
+        # （画面の端で印だけ切れる場合は parse_task_rows が読み飛ばすので、ここには来ない）
+        return TASK_STATE_DONE if finish_mark else TASK_STATE_UNKNOWN
+    # 回数は途中なのに印がある、は食い違い
+    return TASK_STATE_UNKNOWN if finish_mark else TASK_STATE_TODO
+
+
+# 押してよい画面（2026-10-11 に調べたもの）。これ以外が前面にあるときは、どこも押さずに止めて知らせる。
+# ⚠️ 広告(com.mbridge.msdk.reward.player.MBRewardVideoActivity)はGRAVITYと同じパッケージの中に出るので、
+# パッケージ名では見分けられない。広告の最後の画面には「install」があり、押すと広告のクリックになる。
+# 「押してはいけない画面」を並べる方式では、まだ知らない画面（ポップアップ、更新のお知らせ等）を
+# 止められないため、知っている画面だけを許す方式にしている。
+TASK_KNOWN_ACTIVITIES = frozenset({
+    "com.hiclub.android.gravity.MainActivity",                                  # ホーム・マイページ
+    "com.hiclub.android.gravity.point.TaskCenterActivity",                      # タスク
+    "com.hiclub.android.gravity.addfeed.view.AddFeedActivity",                  # 投稿を作成
+    "com.hiclub.android.gravity.feed.view.NewFeedDetailActivity",               # 投稿の詳細（コメント）
+    "com.hiclub.android.gravity.center.view.profile.CenterActivity",            # 相手のプロフィール
+    "com.hiclub.android.gravity.center.view.profile.RelationshipListActivityV2",  # 友達・フォロー中
+    "com.hiclub.android.gravity.message.view.MessageDetailActivity",            # メッセージ
+    "com.hiclub.android.gravity.web.RewardAdWheelLotteryWebActivity",           # ラッキールーレット
+})
+
+# 押してはいけないボタンの文言（部分一致）。この文言の部品と、それを含む押せる枠には、
+# どんな理由があっても押す操作を送らない。
+#   ポイントを使う（ルーレット）/ 広告 / 有料のギフト / 広告の最後の画面
+# ⚠️ ルーレットの大きいボタンは、回す前は「今日の初回チャンス」（押してよい）、回した後は
+# 「広告を見て再チャレンジ！」（押してはいけない）と、同じ場所のまま文言だけが変わる。
+# 位置で覚えず、押す直前のダンプで毎回判定すること。
+TASK_FORBIDDEN_LABELS = ("200/1回", "2000/10回", "広告を見て", "ギフトを贈る", "install", "Click now")
+
+# 押してはいけない枠の周りに取る余白（px）。2026-10-11、調査中に「2000/10回」の枠の
+# 20px横を誤って押した（画面の取り違え）。押す位置が少しずれても枠に入らないようにする。
+TASK_FORBIDDEN_MARGIN = 10
+
+
+def parse_top_activity(dumpsys_line):
+    """
+    `dumpsys activity activities` の topResumedActivity の行から「パッケージ/クラス」を取り出す。
+    「pkg/.Cls」の省略形は「pkg/pkg.Cls」に直す。読めなければ空文字。
+    """
+    m = re.search(r"([\w.]+)/([\w.$]+)", dumpsys_line or "")
+    if not m:
+        return ""
+    package, cls = m.groups()
+    if cls.startswith("."):
+        cls = package + cls
+    return f"{package}/{cls}"
+
+
+def is_known_task_screen(component, package):
+    """
+    前面の画面が、押してよい画面（調べたことのある GRAVITY の画面）か。
+    ⚠️ パッケージも確かめる。MuMuにはGRAVITYの複製(#N1〜#N7)が入っており、クラス名は同じになりうる。
+    """
+    pkg, _, cls = (component or "").partition("/")
+    return bool(package) and pkg == package and cls in TASK_KNOWN_ACTIVITIES
+
+
+def _node_box(node):
+    """部品の bounds を (左, 上, 右, 下) にする。読めなければ None"""
+    m = RE_BOUNDS_VALUE.fullmatch(node.get("bounds") or "")
+    return tuple(int(v) for v in m.groups()) if m else None
+
+
+def _nearest_clickable(node, parent):
+    """自分か、一番近い祖先のうち押せる部品。無ければ None"""
+    while node is not None and node.get("clickable") != "true":
+        node = parent.get(node)
+    return node
+
+
+def find_forbidden_boxes(xml_dump, display=None):
+    """
+    押してはいけないボタンの枠を返す。[(左, 上, 右, 下), ...]
+    文言の部品そのものの枠に加え、それを含む一番近い押せる枠も返す。
+    ルーレットの「200/1回」は、押せるのが文字の無い親の View で、文言はその子にあるため。
+    """
+    root = ET.fromstring(xml_dump)
+    parent = {child: node for node in root.iter() for child in node}
+    boxes = []
+    for node in root.iter("node"):
+        if display is not None and node.get("display-id") != str(display):
+            continue
+        label = (node.get("text") or "") + " " + (node.get("content-desc") or "")
+        if not any(word in label for word in TASK_FORBIDDEN_LABELS):
+            continue
+        for target in (node, _nearest_clickable(node, parent)):
+            box = _node_box(target) if target is not None else None
+            if box and box not in boxes:
+                boxes.append(box)
+    return boxes
+
+
+def tap_is_safe(x, y, forbidden_boxes, margin=TASK_FORBIDDEN_MARGIN):
+    """押す位置が、押してはいけない枠（と周りの余白）のどれにも入っていないか"""
+    return not any(left - margin <= x <= right + margin and top - margin <= y <= bottom + margin
+                   for left, top, right, bottom in forbidden_boxes)
+
+
+RE_DUMPSYS_DISPLAY = re.compile(r"^\s*Display #(\d+)")
+
+
+def parse_display_activity(dumpsys_text, display):
+    """
+    `dumpsys activity activities` の出力から、指定したディスプレイの前面の画面「パッケージ/クラス」を返す。
+    ⚠️ topResumedActivity の行はディスプレイごとに1行ずつ出る（実測: Display #2 → #0 → #3 の順）。
+    先頭の行がGRAVITYの画面とは限らないので、「Display #番号」の区切りの中から読むこと。
+    display が None なら最初に見つかった行を使う。読めなければ空文字。
+    """
+    current = None
+    for line in (dumpsys_text or "").splitlines():
+        m = RE_DUMPSYS_DISPLAY.match(line)
+        if m:
+            current = m.group(1)
+            continue
+        if display is not None and current != str(display):
+            continue
+        if "topResumedActivity=" in line or line.strip().startswith("Resumed:"):
+            component = parse_top_activity(line)
+            if component:
+                return component
+    return ""
+
+
+# GRAVITYの音声ルーム。タスクの途中では押さない（勝手にルームを出ないため）。止めるときの案内を変えるのに使う
+GRAVITY_VOICE_ROOM_HINT = "voiceroom"
+
+# デイリータスクの名前（Android版の表示そのまま）→ ボットがどう扱うか
+TASK_KIND_POST = "post"
+TASK_KIND_COMMENT = "comment"
+TASK_KIND_MESSAGE = "message"
+TASK_KIND_FOLLOW = "follow"
+TASK_KIND_MANUAL = "manual"      # ボットではこなさず、本人に知らせる
+DAILY_TASK_KINDS = {
+    "投稿する": TASK_KIND_POST,
+    "ユーザーの投稿にコメントする": TASK_KIND_COMMENT,
+    "ユーザーにメッセージを送る": TASK_KIND_MESSAGE,
+    "新規ユーザーを1人フォローする": TASK_KIND_FOLLOW,
+    "広告を最後まで見る": TASK_KIND_MANUAL,
+    "人気投稿をXにシェアする": TASK_KIND_MANUAL,
+    "心のこもった「いいね」をする": TASK_KIND_MANUAL,
+}
+# ボットでこなさない理由（知らせるときに添える）。経緯は開発ログ.md 2026-10-11
+TASK_MANUAL_REASONS = {
+    "広告を最後まで見る": "広告は人が見るものなので、ボットでは見ません",
+    "人気投稿をXにシェアする": "MuMuにXが入っていないため、ご自身でお願いします",
+    "心のこもった「いいね」をする": "普通のいいねとは別の操作で、まだ対応していません",
+}
+
+
+def task_kind(title):
+    """タスクの名前から扱いを返す。知らないタスクは空文字（触らずに知らせる）"""
+    return DAILY_TASK_KINDS.get((title or "").strip(), "")
+
+
+# --- 画面の中から目当ての部品を探す ---
+# どれもダンプ(XML)を受け取って枠を返すだけにしてあり、MuMuを使わずに実物のダンプで試せる。
+
+def _display_nodes(root, display):
+    return [n for n in root.iter("node") if display is None or n.get("display-id") == str(display)]
+
+
+def _has_ancestor(node, parent, resource_name):
+    node = parent.get(node)
+    while node is not None:
+        if _resource_name(node) == resource_name:
+            return True
+        node = parent.get(node)
+    return False
+
+
+def box_center(box):
+    """枠 (左, 上, 右, 下) の中央"""
+    return (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+
+
+def find_by_id(xml_dump, resource_name, display=None, text=None):
+    """resource-id の名前が一致する部品の枠を、画面の上から順に返す。text を渡すと文言も完全一致で絞る"""
+    root = ET.fromstring(xml_dump)
+    boxes = []
+    for node in _display_nodes(root, display):
+        if _resource_name(node) != resource_name:
+            continue
+        if text is not None and (node.get("text") or "").strip() != text:
+            continue
+        box = _node_box(node)
+        if box:
+            boxes.append(box)
+    return boxes
+
+
+def find_by_text(xml_dump, text, display=None, clickable_box=True):
+    """文言が完全一致する部品の枠（既定では、それを含む押せる枠）を返す"""
+    root = ET.fromstring(xml_dump)
+    parent = {child: node for node in root.iter() for child in node}
+    boxes = []
+    for node in _display_nodes(root, display):
+        if (node.get("text") or "").strip() != text:
+            continue
+        target = _nearest_clickable(node, parent) if clickable_box else node
+        box = _node_box(target if target is not None else node)
+        if box and box not in boxes:
+            boxes.append(box)
+    return boxes
+
+
+def text_by_id(xml_dump, resource_name, display=None):
+    """resource-id の名前が一致する最初の部品（画面の上から）の文言。無ければ None"""
+    root = ET.fromstring(xml_dump)
+    for node in _display_nodes(root, display):
+        if _resource_name(node) == resource_name:
+            return node.get("text") or ""
+    return None
+
+
+def has_text(xml_dump, fragment, display=None):
+    """画面のどこかに、fragment を含む文言があるか"""
+    root = ET.fromstring(xml_dump)
+    return any(fragment in (n.get("text") or "") for n in _display_nodes(root, display))
+
+
+def find_tab(xml_dump, labels, display=None):
+    """
+    上のタブのうち、文言が labels のどれかのものを (押せる枠, 選ばれているか) で返す。無ければ (None, False)。
+    labels を複数取るのは、同じタブでも表記が揺れるため（Android版「ディリータスク」/ iPhone版「デイリータスク」）。
+    """
+    root = ET.fromstring(xml_dump)
+    parent = {child: node for node in root.iter() for child in node}
+    for node in _display_nodes(root, display):
+        if (node.get("text") or "").strip() not in labels:
+            continue
+        clickable = _nearest_clickable(node, parent)
+        selected = node.get("selected") == "true" or (clickable is not None and clickable.get("selected") == "true")
+        return _node_box(clickable if clickable is not None else node), selected
+    return None, False
+
+
+def find_feed_add_button(xml_dump, display=None):
+    """
+    ホーム右下の「+」(投稿を作成)の枠。無ければ None。
+    ⚠️ 下タブのホームのアイコンも同じ ivFeed。nav_view 配下のものを除いて見分ける。
+    """
+    root = ET.fromstring(xml_dump)
+    parent = {child: node for node in root.iter() for child in node}
+    for node in _display_nodes(root, display):
+        if _resource_name(node) == "ivFeed" and not _has_ancestor(node, parent, "nav_view"):
+            return _node_box(node)
+    return None
+
+
+def find_function_entry(xml_dump, title, display=None):
+    """マイページの機能の並び(rvFunction)から、名前が title のものの押せる枠。無ければ None"""
+    root = ET.fromstring(xml_dump)
+    parent = {child: node for node in root.iter() for child in node}
+    for node in _display_nodes(root, display):
+        if (_resource_name(node) == "tvTitle" and (node.get("text") or "").strip() == title
+                and _has_ancestor(node, parent, "rvFunction")):
+            target = _nearest_clickable(node, parent)
+            return _node_box(target if target is not None else node)
+    return None
+
+
+# 一覧で名前が長いと末尾が「..」で切れる（実測。10文字ほどの名前が8文字＋「..」になった）
+TRUNCATION_MARKS = ("..", "…")
+
+
+def friend_name_matches(shown, wanted):
+    """
+    一覧に出ている名前 shown が、設定した名前 wanted の人か。
+    ⚠️ 名前は途中で切れて表示されるので、完全一致では見つからない。
+    ⚠️ かといって「一部を含むか」で探すと、似た名前の別人に当たる（実測。送り先の名前の
+    先頭1文字を除いた部分とほぼ同じ名前の人が、同じ友達の一覧にいた）。
+    切れている名前は「wanted の先頭と一致するか」、切れていない名前は完全一致で判定する。
+    半角カナ・全角の違いで外れないよう、両方を NFKC で揃えてから比べる。
+    """
+    shown = unicodedata.normalize("NFKC", (shown or "").strip())
+    wanted = unicodedata.normalize("NFKC", (wanted or "").strip())
+    if not shown or not wanted:
+        return False
+    for mark in TRUNCATION_MARKS:
+        mark = unicodedata.normalize("NFKC", mark)
+        if shown.endswith(mark):
+            head = shown[:-len(mark)].strip()
+            # 切れた残りが短すぎると、別人の名前の先頭とも一致してしまう
+            return len(head) >= 2 and wanted.startswith(head)
+    return shown == wanted
+
+
+def find_friend_in_list(xml_dump, wanted, display=None):
+    """友達・フォロー中の一覧(tv_name)から、設定した名前の人の枠を全部返す（2件以上なら取り違えの恐れ）"""
+    root = ET.fromstring(xml_dump)
+    return [_node_box(n) for n in _display_nodes(root, display)
+            if _resource_name(n) == "tv_name" and friend_name_matches(n.get("text"), wanted)]
+
+
+def _post_cards(root, display):
+    """投稿1件ずつの枠(cvRoot)を、画面の上から順に返す"""
+    return [n for n in _display_nodes(root, display) if _resource_name(n) == "cvRoot"]
+
+
+def find_latest_unpinned_post(xml_dump, display=None):
+    """
+    プロフィールの投稿一覧で、ピン留めでない最初の投稿の「時刻」の枠。見えていなければ None。
+    ⚠️ ピン留めは複数ありうる（実測2件）。時刻は「1時間前」のような相対表示で比べにくいので、
+    ピンの印(iv_top)が無い最初の投稿を直近とみなす。
+    時刻の文字を押すのは、画像を押すと画像の拡大表示が開いてしまうため（文字は投稿の枠ごと反応する）。
+    """
+    root = ET.fromstring(xml_dump)
+    for card in _post_cards(root, display):
+        ids = {_resource_name(n) for n in card.iter("node")}
+        if "iv_top" in ids:
+            continue
+        times = [n for n in card.iter("node") if _resource_name(n) == "tv_time" and (n.get("text") or "").strip()]
+        if times:
+            return _node_box(times[0])
+    return None
+
+
+def find_unfollowed_post(xml_dump, display=None):
+    """
+    タイムラインで、投稿者をまだフォローしていない投稿（「フォロー」ボタンがある投稿）の時刻の枠。無ければ None。
+    フォローはその投稿の詳細画面で行う。タイムラインでフォローするとボタンが消え、その場で外せないため。
+    """
+    root = ET.fromstring(xml_dump)
+    for card in _post_cards(root, display):
+        follow = [n for n in card.iter("node") if _resource_name(n) == "btnFollow"
+                  and (n.get("text") or "").strip() == "フォロー"]
+        times = [n for n in card.iter("node") if _resource_name(n) == "tv_time" and (n.get("text") or "").strip()]
+        if follow and times:
+            return _node_box(times[0])
+    return None
+
+
+ROULETTE_FREE_LABEL = "今日の初回チャンス"
+
+
+def find_roulette_result_close(xml_dump, display=None):
+    """
+    ルーレットの結果のダイアログの × と、景品の表示（例「x300」）を返す。出ていなければ (None, "")。
+    × は文字の無い押せる画像。「広告を見て再チャレンジ」と同じ枠の中にある押せる画像を × とみなす。
+    """
+    root = ET.fromstring(xml_dump)
+    for node in _display_nodes(root, display):
+        children = list(node)
+        texts = [(c.get("text") or "") for c in node.iter("node")]
+        if not any("広告を見て" in t for t in texts):
+            continue
+        closes = [c for c in children if c.get("class", "").endswith("Image")
+                  and c.get("clickable") == "true" and not (c.get("text") or "").strip()]
+        if len(closes) != 1:
+            continue
+        prize = next((t.strip() for t in texts if re.fullmatch(r"x\d+", t.strip())), "")
+        return _node_box(closes[0]), prize
+    return None, ""
+
+
+def find_point_shop_buttons(xml_dump, display=None):
+    """タスク画面「ポイントを使う」のカードの「交換する」を、並び順(0番目から)で返す。カードの名前は画像で読めない"""
+    root = ET.fromstring(xml_dump)
+    parent = {child: node for node in root.iter() for child in node}
+    found = []
+    for node in _display_nodes(root, display):
+        if _resource_name(node) == "btnPointConsume" and _has_ancestor(node, parent, "rvPointConsumeItem"):
+            card = parent.get(node)
+            index = int(card.get("index", "0")) if card is not None else 0
+            found.append((index, _node_box(node)))
+    return [box for _, box in sorted(found)]
+
+
+# ====================================================
 # 🗄️ 1. データ永続化 (SQLite3)
 # ====================================================
 class DatabaseManager:
@@ -5200,6 +5676,450 @@ class AutoReplyWorker:
 
 
 # ====================================================
+# 📋 2b. デイリータスク・ルーレットの実行
+# ====================================================
+class TaskStop(Exception):
+    """想定外のことが起きた。何も押さずに止めて、本人に知らせる（2026-10-11 本人の決定）"""
+
+
+class TaskCancelled(Exception):
+    """中止ボタンが押された"""
+
+
+class GravityTaskWorker(AutoReplyWorker):
+    """
+    GRAVITYのデイリータスクと、ラッキールーレットの無料の1回をこなす（この2つは別の仕事として扱う）。
+    接続・ディスプレイの特定・文字入力は AutoReplyWorker のものをそのまま使う。
+
+    ⚠️ 自動返信の監視と同時に動かしてはいけない（Appの開始ボタンで弾いている）。
+    どちらも同じ画面を操作するので、操作が混ざって狙いと別の場所を押す。
+
+    ⚠️ このクラスの「押す・なぞる・キー・文字入力」は、すべて上書きしてある。毎回その場で画面を読み直し、
+      ・押してよい画面(TASK_KNOWN_ACTIVITIES)でなければ止める（広告の画面・音声ルームもここで止まる）
+      ・押す位置が、押してはいけないボタン(TASK_FORBIDDEN_LABELS)の近くなら止める
+    この守りを各タスクの処理に任せずここに置くのは、手前の処理が画面を取り違えても最後に止めるため
+    （2026-10-11、調査中に画面を取り違えて「2000/10回」の20px横を押した。開発ログ参照）。
+    """
+
+    JOB_TASKS = "tasks"
+    JOB_ROULETTE = "roulette"
+    JOB_NAMES = {JOB_TASKS: "タスク", JOB_ROULETTE: "ルーレット"}
+
+    # 画面が切り替わるのを待つ最長の秒数
+    SCREEN_WAIT_SECONDS = 10.0
+    # ルーレットを押してから結果のダイアログが出るまでの最長（実測は約8秒）
+    ROULETTE_RESULT_WAIT_SECONDS = 20.0
+    # 一覧を探すときのスクロールの上限回数
+    MAX_SCROLLS = 8
+    # ホーム画面まで戻るときの「戻る」の上限回数（入力の後の1回目はキーボードを閉じるだけ）
+    MAX_BACKS = 6
+    # 一覧を少しずつ送るなぞり（画面は 540x960）。⚠️ 大きく送ると行を飛ばす（実測でコメントの行が写らなかった）
+    SCROLL_X, SCROLL_FROM_Y, SCROLL_TO_Y, SCROLL_MS = 270, 760, 520, 500
+
+    MAIN_ACTIVITY = ".gravity.MainActivity"
+    TASK_CENTER_ACTIVITY = ".point.TaskCenterActivity"
+    ADD_FEED_ACTIVITY = ".addfeed.view.AddFeedActivity"
+    FEED_DETAIL_ACTIVITY = ".feed.view.NewFeedDetailActivity"
+    PROFILE_ACTIVITY = ".center.view.profile.CenterActivity"
+    RELATIONSHIP_ACTIVITY = ".center.view.profile.RelationshipListActivityV2"
+    MESSAGE_ACTIVITY = ".message.view.MessageDetailActivity"
+    ROULETTE_ACTIVITY = ".web.RewardAdWheelLotteryWebActivity"
+
+    def __init__(self, db, log_callback, notify_callback=None):
+        super().__init__(db, log_callback)
+        # 止まったとき・本人の番のときに呼ぶ (見出し, 本文)。ワーカースレッドから呼ばれる
+        self.notify_callback = notify_callback or (lambda title, message: None)
+
+    # --- 起動 / 停止 ---
+    def start_job(self, job):
+        """仕事(JOB_TASKS / JOB_ROULETTE)を別スレッドで始める。始められたときだけ True"""
+        if self.is_running or self.is_alive():
+            return False
+        self.is_running = True
+        self.thread = threading.Thread(target=self._job_main, args=(job,), daemon=True)
+        self.thread.start()
+        return True
+
+    def stop(self):
+        self.is_running = False
+        self.log("⚠️ 中止を受け付けました。今の操作が終わり次第止めます...")
+
+    def _job_main(self, job):
+        name = self.JOB_NAMES.get(job, job)
+        # 前回のディスプレイ番号は持ち越さない（AutoReplyWorker._run_monitor と同じ理由）
+        self._target_display = None
+        try:
+            if not self._monitor_target_package():
+                raise TaskStop("対象のアプリが決まっていません。設定タブの「📱 エミュレータ(MuMu)」で"
+                               "GRAVITYを選んでから、もう一度押してください。")
+            d = self._connect_to_emulator()
+            self.log(f"📋 {name}を始めます。")
+            if job == self.JOB_TASKS:
+                notice = self._run_daily_tasks(d)
+            else:
+                notice = self._run_roulette(d)
+            if notice:
+                self.notify_callback(*notice)
+        except TaskCancelled:
+            self.log(f"⏹️ {name}を中止しました。")
+        except TaskStop as e:
+            self.log(f"⏸️ {name}を止めました: {e}")
+            self.notify_callback(f"{name}を止めました", str(e))
+        except Exception as e:
+            first_line = (str(e).splitlines() or [type(e).__name__])[0][:150]
+            write_error_log(f"{name}の実行中のエラー:\n{traceback.format_exc()}")
+            self.log(f"❌ {name}の途中でエラーが起きたため止めました: {first_line}")
+            self.notify_callback(f"{name}を止めました", f"エラーが起きました: {first_line}")
+        finally:
+            self.is_running = False
+
+    # --- 画面を読む ---
+    def _check_cancel(self):
+        if not self.is_running:
+            raise TaskCancelled()
+
+    def _read_screen(self, d):
+        """今の画面のダンプと、GRAVITYのディスプレイの前面の画面「パッケージ/クラス」を読む"""
+        self._check_cancel()
+        xml = d.dump_hierarchy()
+        display = self._update_target_display(xml)
+        result = d.shell("dumpsys activity activities")
+        component = parse_display_activity(getattr(result, "output", result) or "", display)
+        return xml, component
+
+    def _require_known_screen(self, component):
+        """押してよい画面でなければ止める"""
+        if is_known_task_screen(component, self._monitor_target_package()):
+            return
+        cls = component.rsplit("/", 1)[-1] if component else ""
+        if GRAVITY_VOICE_ROOM_HINT in cls.lower():
+            raise TaskStop("GRAVITYが音声ルームの画面のままです。勝手にルームを出ないよう、何も押さずに止めました。"
+                           "ルームから出て（ホームやマイページを開いて）から、もう一度押してください。")
+        raise TaskStop(f"知らない画面が出ています（{cls.rsplit('.', 1)[-1] or '不明'}）。"
+                       f"何も押さずに止めました。MuMuの画面を確かめてください。")
+
+    def _wait_for(self, d, condition, what, timeout=None):
+        """condition(xml, component) が真になるまで読み直す。知らない画面が出たら、その場で止める"""
+        deadline = time.time() + (timeout or self.SCREEN_WAIT_SECONDS)
+        while True:
+            xml, component = self._read_screen(d)
+            self._require_known_screen(component)
+            if condition(xml, component):
+                return xml, component
+            if time.time() >= deadline:
+                raise TaskStop(f"{what}を待ちましたが、画面が変わりませんでした。")
+            time.sleep(0.7)
+
+    def _scroll_until(self, d, finder, what):
+        """finder(xml) が何か返すまで、一覧を少しずつ送りながら探す"""
+        for i in range(self.MAX_SCROLLS + 1):
+            xml, component = self._read_screen(d)
+            self._require_known_screen(component)
+            found = finder(xml)
+            if found:
+                return found
+            if i < self.MAX_SCROLLS:
+                self._scroll_down(d)
+        raise TaskStop(f"{what}が見つかりませんでした。")
+
+    def _scroll_down(self, d):
+        self._swipe(d, self.SCROLL_X, self.SCROLL_FROM_Y, self.SCROLL_X, self.SCROLL_TO_Y, self.SCROLL_MS)
+        time.sleep(0.8)
+
+    # --- 操作（⚠️ すべての操作はこの4つを通る。守りはここにある） ---
+    def _tap(self, d, x, y):
+        xml, component = self._read_screen(d)
+        self._require_known_screen(component)
+        if not tap_is_safe(x, y, find_forbidden_boxes(xml, self._target_display)):
+            raise TaskStop(f"押そうとした位置 ({x},{y}) が、押してはいけないボタン"
+                           f"（ポイント消費・広告・ギフトなど）の近くでした。何も押さずに止めました。")
+        if not super()._tap(d, x, y):
+            raise TaskStop("画面を押す操作を送れませんでした。")
+        return True
+
+    def _swipe(self, d, x1, y1, x2, y2, duration_ms=200):
+        _, component = self._read_screen(d)
+        self._require_known_screen(component)
+        return super()._swipe(d, x1, y1, x2, y2, duration_ms)
+
+    def _keyevent(self, d, keycode):
+        _, component = self._read_screen(d)
+        self._require_known_screen(component)
+        return super()._keyevent(d, keycode)
+
+    def _type_text(self, d, text):
+        _, component = self._read_screen(d)
+        self._require_known_screen(component)
+        return self._type_reply_text(d, text)
+
+    def _tap_box(self, d, box, what):
+        if not box:
+            raise TaskStop(f"{what}が見つかりませんでした。")
+        x, y = box_center(box)
+        self._tap(d, x, y)
+        time.sleep(0.8)
+
+    def _back(self, d):
+        self._keyevent(d, ANDROID_KEYCODE_BACK)
+        time.sleep(1.0)
+
+    def _enter_text(self, d, resource_name, text, what):
+        """入力欄を押して文字を入れ、欄の中身が狙いどおりか確かめる（違えば送らずに止める）"""
+        xml, _ = self._read_screen(d)
+        boxes = find_by_id(xml, resource_name, self._target_display)
+        self._tap_box(d, boxes[0] if boxes else None, what)
+        if not self._type_text(d, text):
+            raise TaskStop(f"{what}に文字を入れられませんでした。")
+        time.sleep(0.5)
+        xml, _ = self._read_screen(d)
+        shown = (text_by_id(xml, resource_name, self._target_display) or "").strip()
+        if shown != text.strip():
+            raise TaskStop(f"{what}に入った文字が狙いと違いました（「{shown[:20]}」）。送らずに止めました。")
+
+    # --- 画面の移動 ---
+    def _go_main(self, d, tab_id):
+        """下のタブ（tab_feed=ホーム / tab_center=マイページ）を開く。ほかの画面にいれば戻るで戻る"""
+        for _ in range(self.MAX_BACKS + 1):
+            xml, component = self._read_screen(d)
+            self._require_known_screen(component)
+            if component.endswith(self.MAIN_ACTIVITY):
+                break
+            self._back(d)
+        else:
+            raise TaskStop("ホーム画面まで戻れませんでした。")
+        boxes = find_by_id(xml, tab_id, self._target_display)
+        self._tap_box(d, boxes[0] if boxes else None, "下のタブ")
+
+    def _open_task_center(self, d):
+        """マイページ →「タスク」→「ディリータスク」タブ。開いた時点のダンプを返す"""
+        self._go_main(d, "tab_center")
+        xml, _ = self._wait_for(
+            d, lambda x, c: find_function_entry(x, "タスク", self._target_display), "マイページの表示")
+        self._tap_box(d, find_function_entry(xml, "タスク", self._target_display), "マイページの「タスク」")
+        xml, _ = self._wait_for(d, lambda x, c: c.endswith(self.TASK_CENTER_ACTIVITY), "タスク画面")
+        box, selected = find_tab(xml, ("ディリータスク", "デイリータスク"), self._target_display)
+        if box and not selected:
+            self._tap_box(d, box, "「ディリータスク」のタブ")
+            xml, _ = self._read_screen(d)
+        return xml
+
+    def _open_friend_profile(self, d, friend):
+        """マイページ →「友達」→「友達」タブ → 送り先 → プロフィール。プロフィールのダンプを返す"""
+        self._go_main(d, "tab_center")
+        xml, _ = self._wait_for(d, lambda x, c: find_by_id(x, "llFriend", self._target_display), "マイページの表示")
+        self._tap_box(d, find_by_id(xml, "llFriend", self._target_display)[0], "マイページの「友達」")
+        xml, _ = self._wait_for(d, lambda x, c: c.endswith(self.RELATIONSHIP_ACTIVITY), "友達の一覧")
+        # ⚠️ 「友達」を押しても、最初は「おすすめ」タブが開く（実測）
+        box, selected = find_tab(xml, ("友達",), self._target_display)
+        if not selected:
+            self._tap_box(d, box, "「友達」のタブ")
+            self._wait_for(d, lambda x, c: find_tab(x, ("友達",), self._target_display)[1], "「友達」のタブ")
+
+        def find_friend(x):
+            boxes = find_friend_in_list(x, friend, self._target_display)
+            if len(boxes) > 1:
+                raise TaskStop(f"友達の一覧に「{friend}」と見分けのつかない名前が{len(boxes)}人います。"
+                               f"送り先を取り違えないよう止めました。設定の名前を確かめてください。")
+            return boxes[0] if boxes else None
+
+        self._tap_box(d, self._scroll_until(d, find_friend, f"友達の一覧の「{friend}」"), "送り先の名前")
+        xml, _ = self._wait_for(d, lambda x, c: c.endswith(self.PROFILE_ACTIVITY), "送り先のプロフィール")
+        name = text_by_id(xml, "shimmerTextView", self._target_display)
+        if not friend_name_matches(name, friend):
+            raise TaskStop(f"開いたプロフィールの名前（「{name}」）が送り先と違いました。何も送らずに止めました。")
+        return xml
+
+    # --- デイリータスク ---
+    def _read_daily_tasks(self, d):
+        """タスク画面の行を、少しずつスクロールしながら全部読む（画面の上から順）"""
+        rows, order, unchanged = {}, [], 0
+        for _ in range(self.MAX_SCROLLS + 1):
+            xml, component = self._read_screen(d)
+            self._require_known_screen(component)
+            new = 0
+            for row in parse_task_rows(xml, self._target_display):
+                if row["title"] not in rows:
+                    order.append(row["title"])
+                    new += 1
+                rows[row["title"]] = row
+            # 下の「ポイントを使う」のカードまで来たら、タスクの一覧は読み終わっている
+            if find_point_shop_buttons(xml, self._target_display):
+                break
+            unchanged = unchanged + 1 if new == 0 else 0
+            if unchanged >= 2:
+                break
+            self._scroll_down(d)
+        return [rows[title] for title in order]
+
+    def _run_daily_tasks(self, d):
+        """タスクを読み、ボットがこなせるものをこなし、最後にまとめて知らせる。知らせる内容 (見出し, 本文) か None を返す"""
+        friend = (self.db.get_setting("daily_task_friend_name", "") or "").strip()
+        text = (self.db.get_setting("daily_task_text", DEFAULT_DAILY_TASK_TEXT) or "").strip()
+
+        self._open_task_center(d)
+        rows = self._read_daily_tasks(d)
+        if not rows:
+            raise TaskStop("タスク画面からタスクを読み取れませんでした。")
+
+        todo, notes = [], []
+        for row in rows:
+            state = classify_task(row["progress"], row["finish_mark"])
+            kind = task_kind(row["title"])
+            progress = f"{row['progress'][0]}/{row['progress'][1]}回" if row["progress"] else "回数不明"
+            if state == TASK_STATE_DONE:
+                self.log(f"   ✔ 済み: {row['title']}（{progress}）")
+            elif state == TASK_STATE_UNKNOWN:
+                mark = "クリアの印あり" if row["finish_mark"] else "クリアの印なし"
+                self.log(f"   ? 判断できない: {row['title']}（{progress}・{mark}）")
+                notes.append(f"・{row['title']}: 状態を判断できませんでした（{progress}・{mark}）。画面を確かめてください")
+            elif kind == TASK_KIND_MANUAL:
+                self.log(f"   ✋ ご自身で: {row['title']}（{progress}）")
+                notes.append(f"・{row['title']}（{progress}）: {TASK_MANUAL_REASONS.get(row['title'], 'ご自身でお願いします')}")
+            elif not kind:
+                self.log(f"   ? 知らないタスク: {row['title']}（{progress}）")
+                notes.append(f"・{row['title']}: 知らないタスクなので触っていません")
+            else:
+                self.log(f"   ▶ こなす: {row['title']}（{progress}）")
+                todo.append((row, kind))
+
+        done_titles = []
+        for row, kind in todo:
+            if kind in (TASK_KIND_COMMENT, TASK_KIND_MESSAGE) and not friend:
+                notes.append(f"・{row['title']}: 送り先が決まっていないので飛ばしました（設定タブで名前を入れてください）")
+                continue
+            if kind != TASK_KIND_FOLLOW and not text:
+                notes.append(f"・{row['title']}: 文面が空なので飛ばしました（設定タブで入れてください）")
+                continue
+            self.log(f"▶ {row['title']}")
+            if kind == TASK_KIND_POST:
+                self._do_post(d, text)
+            elif kind == TASK_KIND_COMMENT:
+                self._do_comment(d, friend, text)
+            elif kind == TASK_KIND_MESSAGE:
+                self._do_message(d, friend, text)
+            elif kind == TASK_KIND_FOLLOW:
+                self._do_follow(d)
+            done_titles.append(row["title"])
+
+        if done_titles:
+            # こなしたタスクの回数が本当に増えたかを、タスク画面で確かめる
+            self._open_task_center(d)
+            after = {row["title"]: row for row in self._read_daily_tasks(d)}
+            for title in done_titles:
+                row = after.get(title)
+                if row and classify_task(row["progress"], row["finish_mark"]) == TASK_STATE_DONE:
+                    self.log(f"   ✅ {title}: 済みになりました")
+                else:
+                    shown = f"{row['progress'][0]}/{row['progress'][1]}回" if row and row["progress"] else "読めず"
+                    self.log(f"   ⚠️ {title}: こなしましたが、まだ済みになっていません（{shown}）")
+                    notes.append(f"・{title}: こなしましたが、回数が増えていません（{shown}）")
+
+        if notes:
+            self.log("✋ ご自身で見ていただきたいこと:\n" + "\n".join(notes))
+            return "タスク: ご自身の番です", "\n".join(notes)
+        self.log("🎉 今日のタスクは、ボットでこなせるものは全部済みです。")
+        return None
+
+    def _do_post(self, d, text):
+        self._go_main(d, "tab_feed")
+        xml, _ = self._wait_for(d, lambda x, c: find_feed_add_button(x, self._target_display), "ホームの「+」")
+        self._tap_box(d, find_feed_add_button(xml, self._target_display), "ホームの「+」")
+        self._wait_for(d, lambda x, c: c.endswith(self.ADD_FEED_ACTIVITY), "投稿の作成画面")
+        self._enter_text(d, "etContent", text, "投稿の本文欄")
+        xml, _ = self._read_screen(d)
+        boxes = find_by_id(xml, "btnAddFeedSubmit", self._target_display)
+        self._tap_box(d, boxes[0] if boxes else None, "「投稿」ボタン")
+        self._wait_for(d, lambda x, c: not c.endswith(self.ADD_FEED_ACTIVITY), "投稿の完了（作成画面が閉じる）", timeout=15)
+        self.log("   ✅ 投稿しました。")
+
+    def _do_comment(self, d, friend, text):
+        self._open_friend_profile(d, friend)
+        post = self._scroll_until(
+            d, lambda x: find_latest_unpinned_post(x, self._target_display), "送り先のピン留めでない投稿")
+        self._tap_box(d, post, "送り先の直近の投稿")
+        xml, _ = self._wait_for(d, lambda x, c: c.endswith(self.FEED_DETAIL_ACTIVITY), "投稿の詳細画面")
+        author = text_by_id(xml, "shimmerTextView", self._target_display)
+        if not friend_name_matches(author, friend):
+            raise TaskStop(f"開いた投稿の投稿者（「{author}」）が送り先と違いました。何も送らずに止めました。")
+        self._enter_text(d, "etContent", text, "コメント欄")
+        xml, _ = self._read_screen(d)
+        boxes = find_by_id(xml, "btnSend", self._target_display, text="送る")
+        self._tap_box(d, boxes[0] if boxes else None, "コメントの「送る」")
+        self._wait_for(d, lambda x, c: (text_by_id(x, "etContent", self._target_display) or "").strip() != text,
+                       "コメントの送信（欄が空に戻る）")
+        self.log("   ✅ コメントしました。")
+
+    def _do_message(self, d, friend, text):
+        xml = self._open_friend_profile(d, friend)
+        boxes = find_by_id(xml, "tvIm", self._target_display, text="メッセージ")
+        self._tap_box(d, boxes[0] if boxes else None, "プロフィールの「メッセージ」")
+        self._wait_for(d, lambda x, c: c.endswith(self.MESSAGE_ACTIVITY), "メッセージ画面")
+        self._enter_text(d, "msg_detail_et", text, "メッセージの入力欄")
+        xml, _ = self._read_screen(d)
+        boxes = find_by_id(xml, "ivSendText", self._target_display)
+        self._tap_box(d, boxes[0] if boxes else None, "メッセージの送信ボタン")
+        self._wait_for(d, lambda x, c: (text_by_id(x, "msg_detail_et", self._target_display) or "").strip() != text,
+                       "メッセージの送信（欄が空に戻る）")
+        self.log("   ✅ メッセージを送りました。")
+
+    def _do_follow(self, d):
+        """タイムラインの、まだフォローしていない人を詳細画面でフォローし、すぐ外す（本人の希望）"""
+        self._go_main(d, "tab_feed")
+        post = self._scroll_until(
+            d, lambda x: find_unfollowed_post(x, self._target_display), "フォローしていない人の投稿")
+        self._tap_box(d, post, "その人の投稿")
+        xml, _ = self._wait_for(
+            d, lambda x, c: c.endswith(self.FEED_DETAIL_ACTIVITY) and find_by_id(x, "btnFollow", self._target_display),
+            "投稿の詳細画面")
+        boxes = find_by_id(xml, "btnFollow", self._target_display, text="フォロー")
+        self._tap_box(d, boxes[0] if boxes else None, "詳細画面の「フォロー」")
+        xml, _ = self._wait_for(
+            d, lambda x, c: find_by_id(x, "btnFollow", self._target_display, text="フォロー中"), "「フォロー中」の表示")
+        self.log("   ✅ フォローしました。すぐに外します。")
+        self._tap_box(d, find_by_id(xml, "btnFollow", self._target_display, text="フォロー中")[0], "「フォロー中」")
+        xml, _ = self._wait_for(
+            d, lambda x, c: has_text(x, "フォローを外しますか", self._target_display), "解除の確認")
+        boxes = find_by_text(xml, "確認", self._target_display)
+        self._tap_box(d, boxes[0] if boxes else None, "解除の「確認」")
+        self._wait_for(d, lambda x, c: find_by_id(x, "btnFollow", self._target_display, text="フォロー"), "フォローの解除")
+        self.log("   ✅ フォローを外しました。")
+
+    # --- ラッキールーレット（タスクとは別） ---
+    def _run_roulette(self, d):
+        """無料の1回だけを回す。ポイントで回す・広告で回すボタンは、上の守りで押せないようにしてある"""
+        xml = self._open_task_center(d)
+        before = text_by_id(xml, "tvPoint", self._target_display)
+        buttons = self._scroll_until(
+            d, lambda x: find_point_shop_buttons(x, self._target_display), "「ポイントを使う」のカード")
+        # ⚠️ カードの名前は画像で読めないので並び順（0番目）で開き、開いた画面で本当にルーレットか確かめる
+        self._tap_box(d, buttons[0], "ルーレットのカード")
+        self._wait_for(d, lambda x, c: c.endswith(self.ROULETTE_ACTIVITY)
+                       and has_text(x, "ラッキールーレット", self._target_display), "ルーレットの画面")
+        xml, _ = self._wait_for(
+            d, lambda x, c: find_by_text(x, ROULETTE_FREE_LABEL, self._target_display)
+            or has_text(x, "再チャレンジ", self._target_display), "ルーレットのボタンの表示")
+        free = find_by_text(xml, ROULETTE_FREE_LABEL, self._target_display)
+        if not free:
+            self.log("ℹ️ 今日の無料の1回は、もう回してあります。")
+            self._back(d)
+            return None
+        self._tap_box(d, free[0], "「今日の初回チャンス」")
+        xml, _ = self._wait_for(
+            d, lambda x, c: find_roulette_result_close(x, self._target_display)[0], "ルーレットの結果",
+            timeout=self.ROULETTE_RESULT_WAIT_SECONDS)
+        close, prize = find_roulette_result_close(xml, self._target_display)
+        self.log(f"🎡 ルーレットの結果: {prize or '（景品の表示を読めませんでした）'}")
+        self._tap_box(d, close, "結果の ×")
+        self._wait_for(d, lambda x, c: not find_roulette_result_close(x, self._target_display)[0], "結果を閉じる")
+        self._back(d)
+        xml, _ = self._wait_for(d, lambda x, c: c.endswith(self.TASK_CENTER_ACTIVITY), "タスク画面に戻る")
+        after = text_by_id(xml, "tvPoint", self._target_display)
+        if before is not None and after is not None:
+            self.log(f"   マイポイント: {before} → {after}")
+        return None
+
+
+# ====================================================
 # 🖥️ 3. GUI (CustomTkinter)
 # ====================================================
 class App(ctk.CTk):
@@ -5211,6 +6131,8 @@ class App(ctk.CTk):
 
         self.db = DatabaseManager()
         self.worker = AutoReplyWorker(self.db, self.append_log)
+        # GRAVITYのタスク・ルーレット。⚠️ 監視(self.worker)と同時に動かさない（start_* の両方で弾く）
+        self.task_worker = GravityTaskWorker(self.db, self.append_log, self._notify_gravity_job)
         self.updater = UpdateManager(self.db, self.append_log)
 
         # 自動アップデート用の状態。ダウンロードは1度に1つだけ走らせる
@@ -5331,6 +6253,28 @@ class App(ctk.CTk):
             command=self.stop_monitoring, state="disabled"
         )
         self.stop_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        # GRAVITYのタスク・ルーレット。タスクとルーレットは別の仕事なのでボタンも分ける（本人の指定）
+        job_frame = ctk.CTkFrame(self.tab_main, fg_color="transparent")
+        job_frame.pack(fill="x", pady=(0, 10))
+
+        self.daily_task_btn = ctk.CTkButton(
+            job_frame, text="📋 タスクをこなす", fg_color="#8a6418", hover_color="#644810",
+            command=lambda: self.start_gravity_job(GravityTaskWorker.JOB_TASKS)
+        )
+        self.daily_task_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        self.roulette_btn = ctk.CTkButton(
+            job_frame, text="🎡 ルーレットを回す（無料の1回）", fg_color="#6a3f8a", hover_color="#4b2c63",
+            command=lambda: self.start_gravity_job(GravityTaskWorker.JOB_ROULETTE)
+        )
+        self.roulette_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        self.gravity_job_stop_btn = ctk.CTkButton(
+            job_frame, text="■ 中止", fg_color="red", hover_color="darkred",
+            command=self.stop_gravity_job, state="disabled"
+        )
+        self.gravity_job_stop_btn.pack(side="left", padx=5, expand=True, fill="x")
 
         # スクロール系オプション（ログ表示欄／エミュレータ本体、それぞれ独立）
         scroll_opts_frame = ctk.CTkFrame(self.tab_main, fg_color="transparent")
@@ -7486,6 +8430,7 @@ class App(ctk.CTk):
 
         self.build_emulator_section(self.settings_scroll)
         self.build_auto_ok_section(self.settings_scroll)
+        self.build_daily_task_section(self.settings_scroll)
 
         frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         frame.pack(fill="x", padx=20, pady=(10, 20))
@@ -9211,6 +10156,95 @@ class App(ctk.CTk):
         self.auto_ok_keywords_entry.insert(0, DEFAULT_AUTO_OK_KEYWORDS)
         self.append_log(f"⚙️ 自動OKの目印を既定「{DEFAULT_AUTO_OK_KEYWORDS}」に戻しました。")
 
+    # --- GRAVITYのタスク・ルーレット ---
+    def build_daily_task_section(self, parent):
+        section = ctk.CTkFrame(parent)
+        section.pack(fill="x", padx=20, pady=(10, 0))
+
+        ctk.CTkLabel(
+            section, text="📋 GRAVITYのタスク・ルーレット",
+            font=ctk.CTkFont(weight="bold")
+        ).pack(anchor="w", padx=12, pady=(10, 3))
+
+        ctk.CTkLabel(
+            section,
+            text="メインタブの「📋 タスクをこなす」で、デイリータスクのうち次の4つをこなします:\n"
+                 "　投稿する / ユーザーの投稿にコメントする / ユーザーにメッセージを送る /\n"
+                 "　新規ユーザーを1人フォローする（フォローしたらすぐ外します）\n"
+                 "広告・Xへのシェア・心のこもったいいねは、ボットではこなさず、ご自身の番としてお知らせします。\n"
+                 "「🎡 ルーレットを回す」は、無料の1回（今日の初回チャンス）だけを回します。\n"
+                 "⚠️ ポイントで回す・広告で回すボタン、ギフト、広告の画面には、ボットは触りません。\n"
+                 "⚠️ 知らない画面が出たら、何も押さずに止めてお知らせします。\n"
+                 "　 自動返信の監視中は実行できません（同じ画面を操作して混ざるため）。",
+            justify="left", text_color="gray70"
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        name_frame = ctk.CTkFrame(section, fg_color="transparent")
+        name_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(name_frame, text="送り先の名前:", width=110, anchor="w").pack(side="left", padx=(0, 8))
+        self.daily_task_friend_entry = ctk.CTkEntry(name_frame, width=260)
+        self.daily_task_friend_entry.insert(0, self.db.get_setting("daily_task_friend_name", "") or "")
+        self.daily_task_friend_entry.pack(side="left", padx=(0, 5))
+        self.daily_task_friend_entry.bind("<Button-3>", self._show_entry_context_menu)
+        self.daily_task_friend_entry.bind("<Return>", lambda e: self.save_daily_task_friend())
+        ctk.CTkButton(name_frame, text="💾 保存", width=70,
+                      command=self.save_daily_task_friend).pack(side="left")
+
+        ctk.CTkLabel(
+            section,
+            text="メッセージとコメントを送る相手です（あらかじめ了解をとった人にしてください）。\n"
+                 "マイページの「友達」の一覧から探し、コメントはその人のピン留めでない一番新しい投稿に付けます。\n"
+                 "一覧では長い名前が「..」で切れて出るため、名前の先頭が一致する人を選びます。",
+            justify="left", text_color="gray70"
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        text_frame = ctk.CTkFrame(section, fg_color="transparent")
+        text_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(text_frame, text="文面:", width=110, anchor="w").pack(side="left", padx=(0, 8))
+        self.daily_task_text_entry = ctk.CTkEntry(text_frame, width=260)
+        self.daily_task_text_entry.insert(
+            0, self.db.get_setting("daily_task_text", DEFAULT_DAILY_TASK_TEXT) or DEFAULT_DAILY_TASK_TEXT)
+        self.daily_task_text_entry.pack(side="left", padx=(0, 5))
+        self.daily_task_text_entry.bind("<Button-3>", self._show_entry_context_menu)
+        self.daily_task_text_entry.bind("<Return>", lambda e: self.save_daily_task_text())
+        ctk.CTkButton(text_frame, text="💾 保存", width=70,
+                      command=self.save_daily_task_text).pack(side="left")
+
+        ctk.CTkLabel(
+            section, text="投稿・コメント・メッセージの3つとも、この文を使います。",
+            justify="left", text_color="gray70"
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        self.daily_task_notify_var = ctk.BooleanVar(
+            value=self.db.get_setting("daily_task_notify_sound", "1") == "1"
+        )
+        ctk.CTkCheckBox(
+            section, text="止まったとき・ご自身の番のときに音で知らせる（タイマータブのアラーム音を使います）",
+            variable=self.daily_task_notify_var,
+            command=self.on_daily_task_notify_toggle
+        ).pack(anchor="w", padx=12, pady=(0, 12))
+
+    def save_daily_task_friend(self):
+        name = self.daily_task_friend_entry.get().strip()
+        self.db.save_setting("daily_task_friend_name", name)
+        if name:
+            self.append_log(f"⚙️ タスクの送り先を「{name}」に設定しました。")
+        else:
+            self.append_log("⚙️ タスクの送り先を空にしました。メッセージとコメントは飛ばします。")
+
+    def save_daily_task_text(self):
+        text = self.daily_task_text_entry.get().strip()
+        if not text:
+            messagebox.showwarning("入力エラー", "文面を入れてください。\n空のままでは投稿・コメント・メッセージを送れません。")
+            return
+        self.db.save_setting("daily_task_text", text)
+        self.append_log(f"⚙️ タスクの文面を「{text}」に設定しました。")
+
+    def on_daily_task_notify_toggle(self):
+        enabled = self.daily_task_notify_var.get()
+        self.db.save_setting("daily_task_notify_sound", "1" if enabled else "0")
+        self.append_log(f"⚙️ タスクのお知らせの音を {'ON' if enabled else 'OFF'} にしました。")
+
     # --- エミュレータ(MuMu) ---
     def build_emulator_section(self, parent):
         """MuMuの場所・対象アプリ・自動起動の設定エリア"""
@@ -9650,6 +10684,11 @@ class App(ctk.CTk):
         if self.worker.is_running or self.worker.is_alive():
             self.append_log("⚠️ 前回の監視がまだ終了していません。数秒待ってからもう一度お試しください。")
             return
+        # ⚠️ タスク・ルーレットの実行中に監視を始めると、2つの処理が同じ画面を操作して混ざる
+        if self.task_worker.is_running or self.task_worker.is_alive():
+            self.append_log("⚠️ GRAVITYのタスク・ルーレットを実行中のため、監視を始められません。"
+                            "終わるのを待つか「■ 中止」を押してください。")
+            return
 
         if use_last and self.last_coords:
             self.append_log("\n--- 前回と同じ範囲で開始 ---")
@@ -9712,6 +10751,74 @@ class App(ctk.CTk):
             self.start_prev_btn.configure(state="normal" if self.last_coords else "disabled")
             self.stop_btn.configure(state="disabled")
             self._set_manual_send_enabled(False)
+
+    # ====================================================
+    # 📋 GRAVITYのタスク・ルーレット
+    # ====================================================
+    def start_gravity_job(self, job):
+        # ⚠️ 監視中に始めると、2つの処理が同じ画面を操作して混ざる（AutoReplyWorker の注意書き参照）
+        if self.worker.is_running or self.worker.is_alive():
+            self.append_log("⚠️ 自動返信の監視中は実行できません。「■ 停止」で監視を止めてから押してください。")
+            return
+        if self.task_worker.is_running or self.task_worker.is_alive():
+            self.append_log("⚠️ まだ前の実行が終わっていません。数秒待ってからもう一度お試しください。")
+            return
+        name = GravityTaskWorker.JOB_NAMES.get(job, job)
+        self.append_log(f"\n--- GRAVITYの{name} ---")
+        if not self.task_worker.start_job(job):
+            self.append_log("⚠️ 前の実行がまだ終わっていないため、始められませんでした。")
+            return
+        self._set_gravity_job_buttons(running=True)
+        self._watch_gravity_job()
+
+    def stop_gravity_job(self):
+        self.task_worker.stop()
+        self.gravity_job_stop_btn.configure(state="disabled")
+
+    def _set_gravity_job_buttons(self, running):
+        state = "disabled" if running else "normal"
+        self.daily_task_btn.configure(state=state)
+        self.roulette_btn.configure(state=state)
+        self.gravity_job_stop_btn.configure(state="normal" if running else "disabled")
+
+    def _watch_gravity_job(self):
+        # スレッドの終了まで待ってからボタンを戻す（後片付け中に次を始めさせない）
+        if not self.winfo_exists():
+            return
+        if self.task_worker.is_running or self.task_worker.is_alive():
+            self.after(500, self._watch_gravity_job)
+        else:
+            self._set_gravity_job_buttons(running=False)
+
+    def _notify_gravity_job(self, title, message):
+        """
+        タスク・ルーレットの実行役が、止まったとき・本人の番のときに呼ぶ。
+        ⚠️ ワーカースレッドから呼ばれるので、Tkには直接触れず伝言板に回す。
+        """
+        self._post_to_ui(lambda: self._show_gravity_notice(title, message))
+
+    def _show_gravity_notice(self, title, message):
+        # 音は設定でON/OFF。鳴らす音はタイマータブで選んでいるアラーム音を使う（本人の指定「設定次第」）
+        if self.db.get_setting("daily_task_notify_sound", "1") == "1":
+            volume = self.get_alarm_volume()
+            if volume > 0:
+                def play():
+                    wav_data, error = self._prepare_alarm_wav()
+                    if error:
+                        self.append_log(f"⚠️ {error}")
+                    self._play_alarm_once(wav_data, volume)
+                threading.Thread(target=play, daemon=True).start()
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("GRAVITY")
+        dialog.attributes("-topmost", True)
+        ctk.CTkLabel(
+            dialog, text=f"📋 {title}", font=ctk.CTkFont(size=15, weight="bold")
+        ).pack(padx=20, pady=(18, 8), anchor="w")
+        ctk.CTkLabel(
+            dialog, text=message, justify="left", wraplength=460
+        ).pack(padx=20, pady=(0, 12), anchor="w")
+        ctk.CTkButton(dialog, text="OK", width=100, command=dialog.destroy).pack(pady=(0, 15))
 
     # ====================================================
     # 🔄 アップデート機能
@@ -10083,10 +11190,13 @@ class App(ctk.CTk):
         messagebox.showerror("アップデート失敗", message)
 
     def on_closing(self):
-        if self.worker.is_running:
+        if self.worker.is_running or self.task_worker.is_running:
             if not messagebox.askokcancel("確認", "現在ツールが実行中です。\n終了してもよろしいですか？"):
                 return
-            self.worker.stop()
+            if self.worker.is_running:
+                self.worker.stop()
+            if self.task_worker.is_running:
+                self.task_worker.stop()
         # 待ち受けポートを掴んだままにしないよう、確実に閉じる
         self.phone_bridge.stop()
         # マイクの転送も止める。開いたままだと音声デバイスを掴み続けてしまう
@@ -10111,7 +11221,7 @@ class App(ctk.CTk):
             setattr(self, attr, None)
 
     def _check_thread_and_destroy(self):
-        if self.worker.is_alive():
+        if self.worker.is_alive() or self.task_worker.is_alive():
             self.after(100, self._check_thread_and_destroy)
             return
         # 監視スレッドが完全に止まってから更新を適用する。
