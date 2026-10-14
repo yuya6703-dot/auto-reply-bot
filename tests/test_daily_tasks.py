@@ -137,6 +137,45 @@ check("丸の真ん中は押さない", not A.tap_is_safe(476, 714, boxes))
 check("下のタブ（マイページ）は押してよい", A.tap_is_safe(486, 925, boxes))
 check("丸があっても、GRAVITYの画面は画面2と読める", A.find_by_id(minimized, "tab_center", display=2) == [(432, 890, 540, 960)])
 
+print("■ タスクの行の右のボタン（2026-10-12 リセット後の実物）")
+top = fixture("task_center_todo_top.xml")
+rows = {r["title"]: r for r in A.parse_task_rows(top, display=2)}
+check("投稿する 1/1回 は「クリア」（受け取り待ち）", rows["投稿する"]["button"] == A.TASK_BUTTON_RECEIVE
+      and rows["投稿する"]["progress"] == (1, 1) and not rows["投稿する"]["finish_mark"], rows["投稿する"])
+check("心のこもった「いいね」 0/40回 は「チャレンジ」",
+      rows["心のこもった「いいね」をする"]["button"] == A.TASK_BUTTON_CHALLENGE, rows["心のこもった「いいね」をする"])
+check("「クリア」の行は受け取り待ち", A.GravityTaskWorker._looks_unclaimed(rows["投稿する"]))
+check("「チャレンジ」の行はこなす", A.classify_task((0, 40), False) == A.TASK_STATE_TODO)
+boxes = A.find_forbidden_boxes(top, display=2)
+check("「クリア」は押してはいけない（受け取りは本人が選ぶ）", rows["投稿する"]["button_box"] in boxes, boxes)
+check("いいねの「チャレンジ」は押してよい",
+      A.tap_is_safe(*A.box_center(rows["心のこもった「いいね」をする"]["button_box"]), boxes))
+check("いいねの行の「チャレンジ」を探せる",
+      A.find_task_challenge(top, "心のこもった「いいね」をする", display=2) == (386, 886, 488, 924))
+check("「クリア」の行の「チャレンジ」は無い", A.find_task_challenge(top, "投稿する", display=2) is None)
+
+todo = fixture("task_center_todo.xml")
+rows = {r["title"]: r for r in A.parse_task_rows(todo, display=2)}
+boxes = A.find_forbidden_boxes(todo, display=2)
+check("⚠️ 広告の行の「チャレンジ」は押してはいけない（広告が始まる）",
+      not A.tap_is_safe(*A.box_center(rows["広告を最後まで見る"]["button_box"]), boxes), boxes)
+for title in ("ユーザーの投稿にコメントする", "ユーザーにメッセージを送る"):
+    check(f"{title} の「チャレンジ」は押してよい（同じ部品・同じ文言でも行で見分ける）",
+          A.tap_is_safe(*A.box_center(rows[title]["button_box"]), boxes))
+
+print("■ 心のこもった「いいね」の一覧（FeedListActivity）")
+heart = fixture("feed_heart_list.xml")
+targets = A.find_feed_like_targets(heart, display=2)
+check("ハートを押せる投稿が2件（3件目はハートが画面の下で切れている）", len(targets) == 2, targets)
+check("いいね数を読める", [t["count"] for t in targets] == [18, 54], targets)
+check("投稿の目印は名前と時刻の組", targets[0]["key"][1] == "10/08 04:36", targets[0])
+check("押すのは操作バーのハート", targets[0]["like_box"] == (357, 292, 454, 323), targets[0])
+check("いいね数「1.1K」は読めない扱い", A.parse_like_count("1.1K") is None)
+check("いいね数「912」", A.parse_like_count("912") == 912)
+check("いいね数が空なら読めない扱い", A.parse_like_count("") is None)
+check("一覧の画面は押してよい画面", A.is_known_task_screen(
+      GRAVITY + "/com.hiclub.android.gravity.feed.view.FeedListActivity", GRAVITY))
+
 print("■ タスクの報酬の受け取りの画面（⚠️ 実物は未確認。本人の話から組んだ仮の画面）")
 def reward_screen(*buttons, extra=()):
     nodes = "".join(
@@ -182,13 +221,33 @@ check("無い画面番号は空", A.parse_display_activity(dumpsys, 7) == "")
 check("音声ルームは押してよい画面ではない（勝手にルームを出ない）",
       not A.is_known_task_screen(A.parse_display_activity(dumpsys, 2), GRAVITY))
 
+print("■ GRAVITYが開いている画面とアカウント（MuMuの「アプリ複製」。2026-10-14 実物: 複製=ユーザー10が画面16）")
+clone_dumpsys = fixture("dumpsys_activities_clone.txt")
+windows = A.parse_app_windows(clone_dumpsys, GRAVITY)
+check("複製のGRAVITYを、画面16・ユーザー10として読む", [(w["display"], w["user"]) for w in windows] == [("16", "10")], windows)
+check("後半の並べ直しの区切り（Display #19）は数えない", all(w["display"] != "19" for w in windows), windows)
+check("ランチャーの画面は入らない", A.parse_app_windows(clone_dumpsys, "app.lawnchair")[0]["user"] == "0")
+check("本体の音声ルーム（ユーザー0）", [(w["display"], w["user"]) for w in A.parse_app_windows(dumpsys, GRAVITY)]
+      == [("2", "0")], A.parse_app_windows(dumpsys, GRAVITY))
+check("GRAVITYが開いていなければ空", A.parse_app_windows("Display #0 (activities from top to bottom):\n"
+      "  topResumedActivity=ActivityRecord{1 u0 app.lawnchair/.LawnchairLauncher t2}\n", GRAVITY) == [])
+check("呼び名: 本体", A.gravity_account_label("0") == "本体のGRAVITY")
+check("呼び名: 複製（名前つき）", A.gravity_account_label("10", "なまえ") == "複製のGRAVITY（u10）「なまえ」")
+
+print("■ マイページの自分の名前とID")
+check("名前とIDを読む", A.parse_my_account(fixture("mypage.xml"), display=2) == ("伏せ字1", "伏せ字3"),
+      A.parse_my_account(fixture("mypage.xml"), display=2))
+check("マイページでなければ空", A.parse_my_account(fixture("task_center_top.xml"), display=2) == ("", ""))
+
 print("■ タスクの扱い")
 check("投稿はボットがこなす", A.task_kind("投稿する") == A.TASK_KIND_POST)
 check("コメント", A.task_kind("ユーザーの投稿にコメントする") == A.TASK_KIND_COMMENT)
 check("メッセージ", A.task_kind("ユーザーにメッセージを送る") == A.TASK_KIND_MESSAGE)
 check("フォロー", A.task_kind("新規ユーザーを1人フォローする") == A.TASK_KIND_FOLLOW)
-for title in ("広告を最後まで見る", "人気投稿をXにシェアする", "心のこもった「いいね」をする"):
+for title in ("広告を最後まで見る", "人気投稿をXにシェアする"):
     check(f"{title} はご自身で", A.task_kind(title) == A.TASK_KIND_MANUAL and title in A.TASK_MANUAL_REASONS)
+check("心のこもった「いいね」はボットがこなす（本人の指示 2026-10-12）",
+      A.task_kind("心のこもった「いいね」をする") == A.TASK_KIND_LIKE)
 check("知らないタスクは空", A.task_kind("新しいタスク") == "")
 
 print("■ 画面の中から目当ての部品を探す")

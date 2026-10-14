@@ -30,6 +30,7 @@ class FakeWorker:
         self.alive = running
         self.started = []
         self.stopped = False
+        self.forgotten = 0
 
     def is_alive(self):
         return self.alive
@@ -43,6 +44,9 @@ class FakeWorker:
         self.stopped = True
         self.is_running = False
 
+    def forget_today(self):
+        self.forgotten += 1
+
 
 class Harness(ctk.CTk):
     """UIの組み立てだけを見るための器。検証したいメソッドは本物を借りる"""
@@ -52,6 +56,7 @@ class Harness(ctk.CTk):
     save_daily_task_friend = A.App.save_daily_task_friend
     save_daily_task_text = A.App.save_daily_task_text
     on_daily_task_notify_toggle = A.App.on_daily_task_notify_toggle
+    forget_daily_task_today = A.App.forget_daily_task_today
     start_gravity_job = A.App.start_gravity_job
     stop_gravity_job = A.App.stop_gravity_job
     _set_gravity_job_buttons = A.App._set_gravity_job_buttons
@@ -162,6 +167,16 @@ check("文面を保存", db.get_setting("daily_task_text") == "おはよう")
 h.daily_task_notify_var.set(False)
 h.on_daily_task_notify_toggle()
 check("お知らせの音をOFFにできる", db.get_setting("daily_task_notify_sound") == "0")
+
+print("■ 今日の「済み」の記録を消すボタン")
+check("ボタンがある", h.daily_task_forget_btn.cget("text") == "🔄 今日の「済み」の記録を消す")
+h.task_worker = FakeWorker(running=True)
+h.forget_daily_task_today()
+check("実行中は消さない", h.task_worker.forgotten == 0 and any("実行中は" in m for m in h.logs), h.logs[-1:])
+h.task_worker = FakeWorker()
+h.forget_daily_task_today()
+check("止まっているときは消す", h.task_worker.forgotten == 1 and any("記録を消しました" in m for m in h.logs),
+      h.logs[-1:])
 
 print("■ アプリのアイコン（窓・ダイアログ）")
 icon = A.find_app_icon()

@@ -1,0 +1,18 @@
+Display #16 (activities from top to bottom):
+  * Task{4d13bc3 #107 type=standard A=1010053:anonymous.sns.community.gravity U=10 visible=true visibleRequested=true mode=fullscreen translucent=false sz=3}
+    topResumedActivity=ActivityRecord{109143272 u10 anonymous.sns.community.gravity/com.mbridge.msdk.reward.player.MBRewardVideoActivity t107}
+Display #0 (activities from top to bottom):
+  * Task{2708e81 #1 type=home U=0 visible=true visibleRequested=true mode=fullscreen translucent=false sz=1}
+    * Task{eeccca #2 type=home I=app.lawnchair/.LawnchairLauncher U=0 rootTaskId=1 visible=true visibleRequested=true mode=fullscreen translucent=false sz=1}
+      topResumedActivity=ActivityRecord{148085080 u0 app.lawnchair/.LawnchairLauncher t2}
+  * Task{a69d320 #3 type=undefined U=0 visible=false visibleRequested=false mode=fullscreen translucent=true sz=2}
+    * Task{9e9014c #5 type=undefined U=0 rootTaskId=3 visible=false visibleRequested=false mode=multi-window translucent=true sz=0}
+    * Task{822d4d9 #4 type=undefined U=0 rootTaskId=3 visible=false visibleRequested=false mode=multi-window translucent=true sz=0}
+Display #19 (activities from top to bottom):
+  ResumedActivity: ActivityRecord{109143272 u10 anonymous.sns.community.gravity/com.mbridge.msdk.reward.player.MBRewardVideoActivity t107}
+      * Task{4d13bc3 #107 type=standard A=1010053:anonymous.sns.community.gravity U=10 visible=true visibleRequested=true mode=fullscreen translucent=false sz=3}
+      * Task{2708e81 #1 type=home U=0 visible=true visibleRequested=true mode=fullscreen translucent=false sz=1}
+        * Task{eeccca #2 type=home I=app.lawnchair/.LawnchairLauncher U=0 rootTaskId=1 visible=true visibleRequested=true mode=fullscreen translucent=false sz=1}
+      * Task{a69d320 #3 type=undefined U=0 visible=false visibleRequested=false mode=fullscreen translucent=true sz=2}
+        * Task{9e9014c #5 type=undefined U=0 rootTaskId=3 visible=false visibleRequested=false mode=multi-window translucent=true sz=0}
+        * Task{822d4d9 #4 type=undefined U=0 rootTaskId=3 visible=false visibleRequested=false mode=multi-window translucent=true sz=0}

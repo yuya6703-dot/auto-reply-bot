@@ -1,0 +1,360 @@
+<?xml version='1.0' encoding='utf-8'?>
+<hierarchy rotation="0">
+
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,0][540,960]" drawing-order="0" hint="" display-id="2">
+
+    <node index="0" text="" resource-id="" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,0][540,960]" drawing-order="1" hint="" display-id="2">
+
+      <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,0][540,960]" drawing-order="2" hint="" display-id="2">
+
+        <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/action_bar_root" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,0][540,960]" drawing-order="1" hint="" display-id="2">
+
+          <node index="0" text="" resource-id="android:id/content" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,0][540,960]" drawing-order="2" hint="" display-id="2">
+
+            <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,0][540,960]" drawing-order="1" hint="" display-id="2">
+
+              <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/titleBar" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,0][540,57]" drawing-order="1" hint="" display-id="2">
+
+                <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/ivLeft" class="android.widget.ImageView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,12][52,45]" drawing-order="1" hint="" display-id="2" />
+
+                <node index="1" text="心のこもった「いいね」をする" resource-id="anonymous.sns.community.gravity:id/tvTitle" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[68,12][472,45]" drawing-order="2" hint="" display-id="2" />
+
+              </node>
+
+              <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/container" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,57][540,960]" drawing-order="2" hint="" display-id="2">
+
+                <node index="0" text="" resource-id="" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,57][540,960]" drawing-order="1" hint="" display-id="2">
+
+                  <node index="0" text="" resource-id="" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,57][540,960]" drawing-order="2" hint="" display-id="2">
+
+                    <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/refreshLayout" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,57][540,960]" drawing-order="2" hint="" display-id="2">
+
+                      <node index="0" text="" resource-id="" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,57][540,960]" drawing-order="2" hint="" display-id="2" />
+
+                      <node index="1" text="" resource-id="" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,57][540,960]" drawing-order="3" hint="" display-id="2" />
+
+                      <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/feedNewList" class="androidx.recyclerview.widget.RecyclerView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="true" focused="false" scrollable="true" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[0,57][540,960]" drawing-order="1" hint="" display-id="2">
+
+                        <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/cvRoot" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,67][519,352]" drawing-order="1" hint="" display-id="2">
+
+                          <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/include" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,67][519,352]" drawing-order="1" hint="" display-id="2">
+
+                            <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/llFeedItem" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,67][519,352]" drawing-order="2" hint="" display-id="2">
+
+                              <node index="0" text="" resource-id="" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,67][519,169]" drawing-order="4" hint="" display-id="2">
+
+                                <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/feedUserProfile" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,67][498,169]" drawing-order="1" hint="" display-id="2">
+
+                                  <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/iv_profile" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,80][123,169]" drawing-order="1" hint="" display-id="2">
+
+                                    <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,80][123,169]" drawing-order="1" hint="" display-id="2">
+
+                                      <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/portraitView" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,86][117,163]" drawing-order="3" hint="" display-id="2">
+
+                                        <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,86][117,163]" drawing-order="1" hint="" display-id="2">
+
+                                          <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/portrait2D" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,86][117,163]" drawing-order="1" hint="" display-id="2">
+
+                                            <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,86][117,163]" drawing-order="1" hint="" display-id="2">
+
+                                              <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/ivPortraitFrame" class="android.widget.ImageView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,86][117,163]" drawing-order="2" hint="" display-id="2" />
+
+                                              <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/ivPortrait" class="android.widget.ImageView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[48,94][109,155]" drawing-order="1" hint="" display-id="2" />
+
+                                            </node>
+
+                                          </node>
+
+                                        </node>
+
+                                      </node>
+
+                                    </node>
+
+                                  </node>
+
+                                  <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/flName" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,88][459,118]" drawing-order="2" hint="" display-id="2">
+
+                                    <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/tv_name" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,88][199,118]" drawing-order="1" hint="" display-id="2">
+
+                                      <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,88][199,118]" drawing-order="1" hint="" display-id="2">
+
+                                        <node index="0" text="伏せ字1" resource-id="anonymous.sns.community.gravity:id/shimmerTextView" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,88][199,118]" drawing-order="1" hint="" display-id="2" />
+
+                                      </node>
+
+                                    </node>
+
+                                  </node>
+
+                                  <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/llTimeWithTag" class="androidx.appcompat.widget.LinearLayoutCompat" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,123][266,148]" drawing-order="4" hint="" display-id="2">
+
+                                    <node index="0" text="10/08 04:36" resource-id="anonymous.sns.community.gravity:id/tv_time" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,123][238,148]" drawing-order="1" hint="" display-id="2" />
+
+                                    <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/tvActiveStatus" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[246,124][266,147]" drawing-order="3" hint="" display-id="2" />
+
+                                  </node>
+
+                                  <node index="4" text="" resource-id="anonymous.sns.community.gravity:id/llRightContent" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[459,80][498,130]" drawing-order="8" hint="" display-id="2">
+
+                                    <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/btnMore" class="android.widget.ImageButton" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[467,88][498,130]" drawing-order="3" hint="" display-id="2" />
+
+                                  </node>
+
+                                </node>
+
+                              </node>
+
+                              <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/tvDesc" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[54,192][502,253]" drawing-order="9" hint="" display-id="2">
+
+                                <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[54,192][502,253]" drawing-order="1" hint="" display-id="2">
+
+                                  <node index="0" text="伏せ字2" resource-id="anonymous.sns.community.gravity:id/tvContent" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="true" password="false" selected="false" visible-to-user="true" bounds="[54,192][361,253]" drawing-order="1" hint="" display-id="2" />
+
+                                </node>
+
+                              </node>
+
+                              <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/includeFeedActionBar" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[50,284][498,331]" drawing-order="28" hint="" display-id="2">
+
+                                <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/btnCollect" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[50,284][105,331]" drawing-order="1" hint="" display-id="2" />
+
+                                <node index="1" text="0" resource-id="anonymous.sns.community.gravity:id/tvComment" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[247,284][344,331]" drawing-order="4" hint="" display-id="2" />
+
+                                <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/clLike" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[357,292][454,323]" drawing-order="3" hint="" display-id="2">
+
+                                  <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/ivLike" class="android.widget.ImageView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[357,292][388,323]" drawing-order="1" hint="" display-id="2" />
+
+                                  <node index="1" text="18" resource-id="anonymous.sns.community.gravity:id/tvLike" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[396,292][422,323]" drawing-order="2" hint="" display-id="2" />
+
+                                </node>
+
+                                <node index="3" text="" resource-id="anonymous.sns.community.gravity:id/clShare" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[467,292][498,323]" drawing-order="2" hint="" display-id="2">
+
+                                  <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/btn_share" class="android.widget.ImageButton" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[467,292][498,323]" drawing-order="1" hint="" display-id="2" />
+
+                                </node>
+
+                              </node>
+
+                            </node>
+
+                          </node>
+
+                        </node>
+
+                        <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/cvRoot" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,372][519,777]" drawing-order="2" hint="" display-id="2">
+
+                          <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/include" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,372][519,777]" drawing-order="1" hint="" display-id="2">
+
+                            <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/llFeedItem" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,372][519,777]" drawing-order="2" hint="" display-id="2">
+
+                              <node index="0" text="" resource-id="" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,372][519,474]" drawing-order="4" hint="" display-id="2">
+
+                                <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/feedUserProfile" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,372][498,474]" drawing-order="1" hint="" display-id="2">
+
+                                  <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/iv_profile" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,385][123,474]" drawing-order="1" hint="" display-id="2">
+
+                                    <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,385][123,474]" drawing-order="1" hint="" display-id="2">
+
+                                      <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/portraitView" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,391][117,468]" drawing-order="3" hint="" display-id="2">
+
+                                        <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,391][117,468]" drawing-order="1" hint="" display-id="2">
+
+                                          <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/portrait2D" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,391][117,468]" drawing-order="1" hint="" display-id="2">
+
+                                            <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,391][117,468]" drawing-order="1" hint="" display-id="2">
+
+                                              <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/ivPortrait" class="android.widget.ImageView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[48,399][109,460]" drawing-order="1" hint="" display-id="2" />
+
+                                            </node>
+
+                                          </node>
+
+                                        </node>
+
+                                      </node>
+
+                                    </node>
+
+                                  </node>
+
+                                  <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/flName" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,393][459,423]" drawing-order="2" hint="" display-id="2">
+
+                                    <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/tv_name" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,393][215,423]" drawing-order="1" hint="" display-id="2">
+
+                                      <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,393][215,423]" drawing-order="1" hint="" display-id="2">
+
+                                        <node index="0" text="伏せ字3" resource-id="anonymous.sns.community.gravity:id/shimmerTextView" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,393][215,423]" drawing-order="1" hint="" display-id="2" />
+
+                                      </node>
+
+                                    </node>
+
+                                  </node>
+
+                                  <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/llTimeWithTag" class="androidx.appcompat.widget.LinearLayoutCompat" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,428][266,453]" drawing-order="4" hint="" display-id="2">
+
+                                    <node index="0" text="09/26 22:49" resource-id="anonymous.sns.community.gravity:id/tv_time" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,428][238,453]" drawing-order="1" hint="" display-id="2" />
+
+                                    <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/tvActiveStatus" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[246,429][266,452]" drawing-order="3" hint="" display-id="2" />
+
+                                  </node>
+
+                                  <node index="4" text="" resource-id="anonymous.sns.community.gravity:id/llRightContent" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[459,385][498,435]" drawing-order="8" hint="" display-id="2">
+
+                                    <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/btnMore" class="android.widget.ImageButton" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[467,393][498,435]" drawing-order="3" hint="" display-id="2" />
+
+                                  </node>
+
+                                </node>
+
+                              </node>
+
+                              <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/tvDesc" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[54,497][502,678]" drawing-order="9" hint="" display-id="2">
+
+                                <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[54,497][502,678]" drawing-order="1" hint="" display-id="2">
+
+                                  <node index="0" text="伏せ字4" resource-id="anonymous.sns.community.gravity:id/tvContent" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="true" password="false" selected="false" visible-to-user="true" bounds="[54,497][502,647]" drawing-order="1" hint="" display-id="2" />
+
+                                  <node index="1" text="もっとみる" resource-id="anonymous.sns.community.gravity:id/tvFold" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[54,647][159,678]" drawing-order="3" hint="" display-id="2" />
+
+                                </node>
+
+                              </node>
+
+                              <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/includeFeedActionBar" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[50,709][498,756]" drawing-order="28" hint="" display-id="2">
+
+                                <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/btnCollect" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[50,709][105,756]" drawing-order="1" hint="" display-id="2" />
+
+                                <node index="1" text="0" resource-id="anonymous.sns.community.gravity:id/tvComment" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[247,709][344,756]" drawing-order="4" hint="" display-id="2" />
+
+                                <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/clLike" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[357,717][454,748]" drawing-order="3" hint="" display-id="2">
+
+                                  <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/ivLike" class="android.widget.ImageView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[357,717][388,748]" drawing-order="1" hint="" display-id="2" />
+
+                                  <node index="1" text="54" resource-id="anonymous.sns.community.gravity:id/tvLike" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[396,717][422,748]" drawing-order="2" hint="" display-id="2" />
+
+                                </node>
+
+                                <node index="3" text="" resource-id="anonymous.sns.community.gravity:id/clShare" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[467,717][498,748]" drawing-order="2" hint="" display-id="2">
+
+                                  <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/btn_share" class="android.widget.ImageButton" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[467,717][498,748]" drawing-order="1" hint="" display-id="2" />
+
+                                </node>
+
+                              </node>
+
+                            </node>
+
+                          </node>
+
+                        </node>
+
+                        <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/cvRoot" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,797][519,960]" drawing-order="3" hint="" display-id="2">
+
+                          <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/include" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,797][519,960]" drawing-order="1" hint="" display-id="2">
+
+                            <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/llFeedItem" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,797][519,960]" drawing-order="2" hint="" display-id="2">
+
+                              <node index="0" text="" resource-id="" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[21,797][519,899]" drawing-order="4" hint="" display-id="2">
+
+                                <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/feedUserProfile" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,797][498,899]" drawing-order="1" hint="" display-id="2">
+
+                                  <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/iv_profile" class="android.widget.RelativeLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,810][123,899]" drawing-order="1" hint="" display-id="2">
+
+                                    <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[34,810][123,899]" drawing-order="1" hint="" display-id="2">
+
+                                      <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/portraitView" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,816][117,893]" drawing-order="3" hint="" display-id="2">
+
+                                        <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,816][117,893]" drawing-order="1" hint="" display-id="2">
+
+                                          <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/portrait2D" class="android.widget.FrameLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,816][117,893]" drawing-order="1" hint="" display-id="2">
+
+                                            <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[40,816][117,893]" drawing-order="1" hint="" display-id="2">
+
+                                              <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/ivPortrait" class="android.widget.ImageView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[48,824][109,885]" drawing-order="1" hint="" display-id="2" />
+
+                                            </node>
+
+                                          </node>
+
+                                        </node>
+
+                                      </node>
+
+                                    </node>
+
+                                  </node>
+
+                                  <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/flName" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,818][459,848]" drawing-order="2" hint="" display-id="2">
+
+                                    <node index="0" text="" resource-id="anonymous.sns.community.gravity:id/tv_name" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,818][257,848]" drawing-order="1" hint="" display-id="2">
+
+                                      <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,818][257,848]" drawing-order="1" hint="" display-id="2">
+
+                                        <node index="0" text="伏せ字5" resource-id="anonymous.sns.community.gravity:id/shimmerTextView" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,818][257,848]" drawing-order="1" hint="" display-id="2" />
+
+                                      </node>
+
+                                    </node>
+
+                                  </node>
+
+                                  <node index="2" text="" resource-id="anonymous.sns.community.gravity:id/llTimeWithTag" class="androidx.appcompat.widget.LinearLayoutCompat" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,853][266,878]" drawing-order="4" hint="" display-id="2">
+
+                                    <node index="0" text="10/11 19:53" resource-id="anonymous.sns.community.gravity:id/tv_time" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[131,853][238,878]" drawing-order="1" hint="" display-id="2" />
+
+                                    <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/tvActiveStatus" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[246,854][266,877]" drawing-order="3" hint="" display-id="2" />
+
+                                  </node>
+
+                                  <node index="4" text="" resource-id="anonymous.sns.community.gravity:id/llRightContent" class="android.widget.LinearLayout" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[459,810][498,860]" drawing-order="8" hint="" display-id="2">
+
+                                    <node NAF="true" index="0" text="" resource-id="anonymous.sns.community.gravity:id/btnMore" class="android.widget.ImageButton" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[467,818][498,860]" drawing-order="3" hint="" display-id="2" />
+
+                                  </node>
+
+                                </node>
+
+                              </node>
+
+                              <node index="1" text="" resource-id="anonymous.sns.community.gravity:id/tvDesc" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[54,922][502,960]" drawing-order="9" hint="" display-id="2">
+
+                                <node index="0" text="" resource-id="" class="android.view.ViewGroup" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" visible-to-user="true" bounds="[54,922][502,960]" drawing-order="1" hint="" display-id="2">
+
+                                  <node index="0" text="伏せ字6" resource-id="anonymous.sns.community.gravity:id/tvContent" class="android.widget.TextView" package="anonymous.sns.community.gravity" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="true" password="false" selected="false" visible-to-user="true" bounds="[54,922][502,960]" drawing-order="1" hint="" display-id="2" />
+
+                                </node>
+
+                              </node>
+
+                            </node>
+
+                          </node>
+
+                        </node>
+
+                      </node>
+
+                    </node>
+
+                  </node>
+
+                </node>
+
+              </node>
+
+            </node>
+
+          </node>
+
+        </node>
+
+      </node>
+
+    </node>
+
+  </node>
+
+</hierarchy>

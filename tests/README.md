@@ -7,7 +7,7 @@
 |---|---|---|
 | `test_manual_send.py` | 不要 | キーワード自動返信のON/OFF、手入力の送信待ち、自分の発言への誤返信防止、改行の比較 |
 | `test_gui_widgets.py` | 不要 | キーワード設定タブが本物のコードのまま組み立つか。スイッチ・手入力送信欄の位置、説明文の出し分け、Ctrl+Enterの発火（画面が一瞬出る） |
-| `test_live_newline.py` | **必要** | GRAVITYの実際の入力欄で改行が保たれるか（**送信ボタンは押さない**） |
+| `test_live_newline.py` | **必要** | GRAVITYの実際の入力欄で改行が保たれるか（**送信ボタンは押さない**）。`--live` を付けたときだけ動く |
 | `test_daily_tasks.py` | 不要 | GRAVITYのタスク・ルーレットの「画面を読む」関数。タスクの行と回数、こなすかの判定、押してよい画面か、押してはいけないボタン、目当ての部品の探し方。`fixtures/` の実機ダンプを使う |
 | `test_daily_task_worker.py` | 不要 | タスク・ルーレットの実行役 `GravityTaskWorker` を「にせのMuMu」で通しで動かす。守り（広告・音声ルーム・ポイント消費ボタンの近くでは何も送らない）と、各タスクの流れ |
 | `test_chat_rows.py` | 不要 | 音声ルームのチャット欄を「意味で読む」関数（`parse_chat_rows`）。発言・お知らせ・アナウンスの見分け方。⚠️ 今の自動返信はまだ使っていない |
@@ -46,8 +46,12 @@ python tests/make_fixture.py 取ったダンプ.xml 保存する名前.xml
 実機テストは MuMu を起動し、GRAVITY の音声ルームを表示してから:
 
 ```bash
-python tests/test_live_newline.py
+python tests/test_live_newline.py --live
 ```
+
+⚠️ `--live` が無いと何もせずに終わる。`tests/test_*.py` をまとめて流したときに、本人がMuMuを操作している
+最中の入力欄へ文字を入れてしまったことがあるため（2026-10-13）。しかもMuMuは uiautomator2 の文字入力への
+切り替えを止めるので、後片付けの `clear_text` が失敗して、入れた文字が残る。動かした後は入力欄を目で確かめること。
 
 ## 文字化けする場合
 

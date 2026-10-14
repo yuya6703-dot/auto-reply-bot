@@ -7,9 +7,17 @@ GRAVITYの実際の入力欄で、改行入りの文字がどう入るかを確�
    IMEに commitText させる方式で、KEYCODE_ENTER を打たないため改行では送信されない。
 
 前提: MuMuが起動していて、GRAVITYの音声ルームが表示されていること。
-実行: python tests/test_live_newline.py
+実行: python tests/test_live_newline.py --live
+
+⚠️ --live を付けたときだけ動く。tests/test_*.py をまとめて流したときに、本人がMuMuを操作している最中の
+   入力欄へ文字を入れてしまったことがある（2026-10-13）。さらにMuMuは uiautomator2 の文字入力への切り替えを
+   止めるので、後片付けの clear_text が失敗し、入れた文字が残った。
 """
 import os, re, sys, html, time
+
+if "--live" not in sys.argv:
+    print("実機（MuMuのGRAVITY）を操作するテストです。動かすときは --live を付けてください。今回は飛ばします。")
+    sys.exit(0)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "files"))

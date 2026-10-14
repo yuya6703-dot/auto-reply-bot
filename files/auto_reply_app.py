@@ -598,9 +598,15 @@ TASK_ROW_TITLE_ID = "tvPointTaskTitle"
 TASK_ROW_PROGRESS_ID = "tvPointTaskProgress"
 TASK_ROW_AWARD_ID = "tvPointAward"
 TASK_ROW_EXECUTE_ID = "llPointTaskExecute"
-# 達成済みの行に出る「クリア」の印。
-# ⚠️ 未達成の行の llPointTaskExecute に何が出るかは未確認（調べた日は全部達成済みだった）。
+# 行の右側（llPointTaskExecute の中）は、状態で部品が変わる（2026-10-12 リセット後に実測）:
+#   未達成               → btnPointTaskExecute「チャレンジ」（押すとそのタスクの画面へ。広告の行は広告が始まる）
+#   報酬の受け取り待ち   → btnPointReceive「クリア」（押すと「そのまま受け取る / 広告を見て2倍」を選ぶ画面とみられる）
+#   済み                 → imgPointFinish（クリアの印）
 TASK_ROW_FINISH_MARK_ID = "imgPointFinish"
+TASK_ROW_CHALLENGE_ID = "btnPointTaskExecute"
+TASK_ROW_RECEIVE_ID = "btnPointReceive"
+TASK_BUTTON_CHALLENGE = "challenge"
+TASK_BUTTON_RECEIVE = "receive"
 
 # 回数の表示「1/1回」「40/40回」を読む式
 RE_TASK_PROGRESS = re.compile(r"(\d+)\s*/\s*(\d+)")
@@ -635,7 +641,9 @@ def parse_task_rows(xml_dump, display=None):
     """
     タスク画面のダンプから、見えているタスクの行を読み出す。
     戻り値: [{"title": str, "progress": (済んだ回数, 必要な回数) か None,
-              "award": str, "finish_mark": bool}, ...]（画面の上から順）
+              "award": str, "finish_mark": bool,
+              "button": TASK_BUTTON_CHALLENGE / TASK_BUTTON_RECEIVE / ""（右のボタン）,
+              "button_box": ボタンの枠か None}, ...]（画面の上から順）
 
     ⚠️ 画面の端で切れて一部が見えない行は返さない。スクロールして全体が見えてから読む。
       ・タイトルが見えない行: どのタスクか分からないまま回数を拾うと、別のタスクの結果と取り違える
@@ -665,11 +673,17 @@ def parse_task_rows(xml_dump, display=None):
             continue
         progress_node = parts.get(TASK_ROW_PROGRESS_ID)
         award_node = parts.get(TASK_ROW_AWARD_ID)
+        button, button_box = "", None
+        for rid, kind in ((TASK_ROW_CHALLENGE_ID, TASK_BUTTON_CHALLENGE), (TASK_ROW_RECEIVE_ID, TASK_BUTTON_RECEIVE)):
+            if rid in parts:
+                button, button_box = kind, _node_box(parts[rid])
         rows.append({
             "title": title,
             "progress": parse_task_progress(progress_node.get("text") if progress_node is not None else ""),
             "award": (award_node.get("text") if award_node is not None else "").strip(),
             "finish_mark": TASK_ROW_FINISH_MARK_ID in parts,
+            "button": button,
+            "button_box": button_box,
         })
     return rows
 
@@ -714,6 +728,7 @@ TASK_KNOWN_ACTIVITIES = frozenset({
     "com.hiclub.android.gravity.center.view.profile.RelationshipListActivityV2",  # 友達・フォロー中
     "com.hiclub.android.gravity.message.view.MessageDetailActivity",            # メッセージ
     "com.hiclub.android.gravity.web.RewardAdWheelLotteryWebActivity",           # ラッキールーレット
+    "com.hiclub.android.gravity.feed.view.FeedListActivity",                    # 心のこもった「いいね」の一覧
 })
 
 # 押してはいけないボタンの文言（部分一致）。この文言の部品と、それを含む押せる枠には、
@@ -740,7 +755,13 @@ REWARD_CHOICE_DOUBLE_HINTS = ("2倍", "２倍", "×2")
 #                 押すとルームが開いてタスクの途中で知らない画面になる（2026-10-11 実測 [412,650][540,778]）。
 #                 丸は動かせる作りとみられるので、位置を決め打ちにせず毎回この部品を探して避ける
 #   ivExit:       音声ルームの退出。「小さくする」(ivZoomout)のすぐ右隣にある
-TASK_FORBIDDEN_IDS = ("bpvVoiceRoom", "ivExit")
+#   btnPointReceive: タスクの行の「クリア」（報酬の受け取り）。受け取り方は本人が選ぶ（2026-10-11 本人の決定）
+TASK_FORBIDDEN_IDS = ("bpvVoiceRoom", "ivExit", "btnPointReceive")
+
+# 「チャレンジ」を押してはいけないタスク。⚠️ どの行の「チャレンジ」も同じ部品・同じ文言なので、行のタイトルで見分ける
+#   広告を最後まで見る:     押すと広告が始まる（広告は人が見るもの）
+#   人気投稿をXにシェアする: 本人が手でやる（MuMuにXが無い）
+TASK_CHALLENGE_FORBIDDEN_TITLES = ("広告を最後まで見る", "人気投稿をXにシェアする")
 
 # 押してはいけない枠の周りに取る余白（px）。2026-10-11、調査中に「2000/10回」の枠の
 # 20px横を誤って押した（画面の取り違え）。押す位置が少しずれても枠に入らないようにする。
@@ -783,6 +804,19 @@ def _nearest_clickable(node, parent):
     return node
 
 
+def _task_row_title(node, parent):
+    """タスクの行の中の部品から、その行のタイトルを返す（行の外なら空文字）"""
+    row = parent.get(node)
+    while row is not None:
+        if any(_resource_name(child) == TASK_ROW_INFO_ID for child in row):
+            for n in row.iter("node"):
+                if _resource_name(n) == TASK_ROW_TITLE_ID:
+                    return (n.get("text") or "").strip()
+            return ""
+        row = parent.get(row)
+    return ""
+
+
 def find_forbidden_boxes(xml_dump, display=None):
     """
     押してはいけないボタンの枠を返す。[(左, 上, 右, 下), ...]
@@ -797,7 +831,9 @@ def find_forbidden_boxes(xml_dump, display=None):
             continue
         label = (node.get("text") or "") + " " + (node.get("content-desc") or "")
         if (not any(word in label for word in TASK_FORBIDDEN_LABELS)
-                and _resource_name(node) not in TASK_FORBIDDEN_IDS):
+                and _resource_name(node) not in TASK_FORBIDDEN_IDS
+                and not (_resource_name(node) == TASK_ROW_CHALLENGE_ID
+                         and _task_row_title(node, parent) in TASK_CHALLENGE_FORBIDDEN_TITLES)):
             continue
         for target in (node, _nearest_clickable(node, parent)):
             box = _node_box(target) if target is not None else None
@@ -848,6 +884,57 @@ def parse_display_activity(dumpsys_text, display):
     return ""
 
 
+# ActivityRecord の「u10」= Android のユーザー番号
+RE_ACTIVITY_RECORD_USER = re.compile(r"ActivityRecord\{\S+ u(\d+) ")
+
+
+def parse_app_windows(dumpsys_text, package):
+    """
+    `dumpsys activity activities` から、前面に package の画面が出ているディスプレイを、出てきた順に返す。
+    戻り値: [{"display": "16", "user": "10", "component": "パッケージ/クラス"}, ...]
+
+    ⚠️ MuMuの「アプリ複製」は、Android のユーザーを分けて同じパッケージを動かす（本体=ユーザー0、複製=10〜16）。
+       パッケージ名では見分けられないので、ActivityRecord の「u10」で見分ける（2026-10-14 実測）。
+    ⚠️ 出力の後半に、同じ画面を別の番号の「Display #」で並べ直した区切りがある（中の行は「ResumedActivity:」）。
+       topResumedActivity の行だけを読む。
+    """
+    windows, current, seen = [], None, set()
+    for line in (dumpsys_text or "").splitlines():
+        m = RE_DUMPSYS_DISPLAY.match(line)
+        if m:
+            current = m.group(1)
+            continue
+        if current is None or current in seen or "topResumedActivity=" not in line:
+            continue
+        component = parse_top_activity(line)
+        if component.partition("/")[0] != package:
+            continue
+        user = RE_ACTIVITY_RECORD_USER.search(line)
+        seen.add(current)
+        windows.append({"display": current, "user": user.group(1) if user else "0", "component": component})
+    return windows
+
+
+def gravity_account_label(user, name=""):
+    """アカウントの呼び名。本体のGRAVITY（ユーザー0）と、MuMuの「アプリ複製」のGRAVITY（ユーザー10〜）"""
+    base = "本体のGRAVITY" if str(user) == "0" else f"複製のGRAVITY（u{user}）"
+    return f"{base}「{name}」" if name else base
+
+
+def parse_my_account(xml_dump, display=None):
+    """マイページに出ている、自分の名前とID（tvCustomId）を (名前, ID) で返す。読めなければ空文字"""
+    root = ET.fromstring(xml_dump)
+    name = custom_id = ""
+    for node in _display_nodes(root, display):
+        rid = _resource_name(node)
+        if rid == "tvName" and not name:
+            names = [n for n in node.iter("node") if _resource_name(n) == "shimmerTextView"]
+            name = (names[0].get("text") or "").strip() if names else ""
+        elif rid == "tvCustomId" and not custom_id:
+            custom_id = (node.get("text") or "").strip()
+    return name, custom_id
+
+
 # GRAVITYの音声ルーム。タスクの途中では押さない（勝手にルームを出ないため）。止めるときの案内を変えるのに使う
 GRAVITY_VOICE_ROOM_HINT = "voiceroom"
 
@@ -856,21 +943,21 @@ TASK_KIND_POST = "post"
 TASK_KIND_COMMENT = "comment"
 TASK_KIND_MESSAGE = "message"
 TASK_KIND_FOLLOW = "follow"
+TASK_KIND_LIKE = "like"          # 心のこもった「いいね」（行の「チャレンジ」→ 専用の一覧でハートを押す）
 TASK_KIND_MANUAL = "manual"      # ボットではこなさず、本人に知らせる
 DAILY_TASK_KINDS = {
     "投稿する": TASK_KIND_POST,
     "ユーザーの投稿にコメントする": TASK_KIND_COMMENT,
     "ユーザーにメッセージを送る": TASK_KIND_MESSAGE,
     "新規ユーザーを1人フォローする": TASK_KIND_FOLLOW,
+    "心のこもった「いいね」をする": TASK_KIND_LIKE,
     "広告を最後まで見る": TASK_KIND_MANUAL,
     "人気投稿をXにシェアする": TASK_KIND_MANUAL,
-    "心のこもった「いいね」をする": TASK_KIND_MANUAL,
 }
 # ボットでこなさない理由（知らせるときに添える）。経緯は開発ログ.md 2026-10-11
 TASK_MANUAL_REASONS = {
     "広告を最後まで見る": "広告は人が見るものなので、ボットでは見ません",
     "人気投稿をXにシェアする": "MuMuにXが入っていないため、ご自身でお願いします",
-    "心のこもった「いいね」をする": "普通のいいねとは別の操作で、まだ対応していません",
 }
 
 
@@ -1045,7 +1132,9 @@ def find_latest_unpinned_post(xml_dump, display=None):
 def find_unfollowed_post(xml_dump, display=None):
     """
     タイムラインで、投稿者をまだフォローしていない投稿（「フォロー」ボタンがある投稿）の時刻の枠。無ければ None。
-    フォローはその投稿の詳細画面で行う。タイムラインでフォローするとボタンが消え、その場で外せないため。
+    ⚠️ タスクの「新規ユーザーを1人フォローする」には使わない。タイムラインからのフォローは数えられなかった
+       （2026-10-12 実機の通しで 0/1回 のまま。行の「チャレンジ」から入る必要がある → GravityTaskWorker._do_follow）。
+       タイムラインの部品の作りを残すために置いてある（タイムラインでフォローするとボタンが消え、その場で外せない）。
     """
     root = ET.fromstring(xml_dump)
     for card in _post_cards(root, display):
@@ -1054,6 +1143,73 @@ def find_unfollowed_post(xml_dump, display=None):
         times = [n for n in card.iter("node") if _resource_name(n) == "tv_time" and (n.get("text") or "").strip()]
         if follow and times:
             return _node_box(times[0])
+    return None
+
+
+def parse_like_count(text):
+    """いいね数の表示を数にする。「1.1K」のような丸めた表示や空は None（増減を比べられないため）"""
+    text = unicodedata.normalize("NFKC", text or "").strip()
+    return int(text) if text.isdigit() else None
+
+
+def find_feed_like_targets(xml_dump, display=None):
+    """
+    投稿の一覧（ホームのタイムラインや、心のこもった「いいね」の一覧）で、ハートを押せる投稿を上から順に返す。
+    戻り値: [{"key": (名前, 時刻), "like_box": ハートの枠, "count": いいね数 か None}, ...]
+
+    ⚠️ 押す前後で「同じ投稿」を見つけ直すため、名前と時刻の組を目印にする（押すと一覧の位置がずれる。実測31px）。
+       名前か時刻が画面の外にある投稿は返さない。
+    ⚠️ 押してよいのは投稿の操作バー(includeFeedActionBar)の中のハートだけ。コメントにもハートがある。
+    ⚠️ ハートの部品は押す前後で属性が変わらない。いいね済みかどうかは画面から分からないので、
+       呼び出し側は押す前後のいいね数の増減で確かめること。
+    """
+    root = ET.fromstring(xml_dump)
+    parent = {child: node for node in root.iter() for child in node}
+    lists = [n for n in _display_nodes(root, display) if _resource_name(n) == "feedNewList"]
+    bottom = _node_box(lists[0])[3] if lists else None
+    targets = []
+    for card in _post_cards(root, display):
+        name = time_text = None
+        like = count = None
+        for node in card.iter("node"):
+            rid = _resource_name(node)
+            if rid == "shimmerTextView" and name is None:
+                name = (node.get("text") or "").strip()
+            elif rid == "tv_time" and time_text is None:
+                time_text = (node.get("text") or "").strip()
+            elif rid == "clLike" and parent.get(node) is not None \
+                    and _resource_name(parent[node]) == "includeFeedActionBar":
+                like = node
+        if not (name and time_text and like is not None):
+            continue
+        box = _node_box(like)
+        # ハートが一覧の下端で切れている投稿は、スクロールしてから押す
+        if box is None or (bottom is not None and box[3] > bottom):
+            continue
+        counts = [c for c in like.iter("node") if _resource_name(c) == "tvLike"]
+        count = parse_like_count(counts[0].get("text")) if counts else None
+        targets.append({"key": (name, time_text), "like_box": box, "count": count})
+    return targets
+
+
+def feed_list_signature(xml_dump, display=None):
+    """
+    投稿の一覧の見た目の目印（各投稿の枠の位置と時刻）。送る前後で同じなら、一覧が動いていない（下まで来た）。
+    ⚠️ いいね数は入れない。押すたびに変わるので、動いていないのに動いたと誤る
+    """
+    root = ET.fromstring(xml_dump)
+    signature = []
+    for card in _post_cards(root, display):
+        times = tuple((n.get("text") or "").strip() for n in card.iter("node") if _resource_name(n) == "tv_time")
+        signature.append((_node_box(card), times))
+    return tuple(signature)
+
+
+def find_task_challenge(xml_dump, title, display=None):
+    """タスク画面で、タイトルが title の行の「チャレンジ」の枠。無ければ None（済み・受け取り待ち・画面の外）"""
+    for row in parse_task_rows(xml_dump, display):
+        if row["title"] == title and row["button"] == TASK_BUTTON_CHALLENGE:
+            return row["button_box"]
     return None
 
 
@@ -4231,17 +4387,18 @@ class AutoReplyWorker:
         return any(text and text in chat_line for text in recent)
 
     # --- エミュレータ接続 ---
-    def _prepare_mumu(self):
+    def _prepare_mumu(self, launch_app=True):
         """
         設定に応じてMuMu本体と対象アプリを起動し、接続すべき 'host:port' を返す。
         MuMuを使っていない環境では何もせずNoneを返す（従来の探索に任せる）。
+        launch_app=False なら、起動するのはMuMu本体だけ（アプリは起動しない）。
         """
         if not self.mumu.is_available():
             return None
 
         # 番号は決め打ちしない。保存値が無ければ resolve_index が自動検出する
         index = self.db.get_setting("mumu_instance_index", "") or None
-        package = (self.db.get_setting("mumu_target_package", "") or "").strip()
+        package = (self.db.get_setting("mumu_target_package", "") or "").strip() if launch_app else ""
         auto_launch = self.db.get_setting("mumu_auto_launch", "0") == "1"
 
         if auto_launch:
@@ -5852,6 +6009,12 @@ class GravityTaskWorker(AutoReplyWorker):
     RELATIONSHIP_ACTIVITY = ".center.view.profile.RelationshipListActivityV2"
     MESSAGE_ACTIVITY = ".message.view.MessageDetailActivity"
     ROULETTE_ACTIVITY = ".web.RewardAdWheelLotteryWebActivity"
+    HEART_LIST_ACTIVITY = ".feed.view.FeedListActivity"
+
+    # アカウントごとの「今日の分が済んだ日」を覚える設定の名前（JSON: {ユーザー番号: {...}}）
+    ACCOUNTS_SETTING = "gravity_task_accounts"
+    # 仕事ごとの、済んだ日を入れる欄
+    JOB_DONE_FIELDS = {JOB_TASKS: "tasks_date", JOB_ROULETTE: "roulette_date"}
 
     def __init__(self, db, log_callback, notify_callback=None):
         super().__init__(db, log_callback)
@@ -5859,6 +6022,14 @@ class GravityTaskWorker(AutoReplyWorker):
         self.notify_callback = notify_callback or (lambda title, message: None)
         # 音声ルームを小さくしてから始めたか（終わったときに、戻り方を知らせるため）
         self._minimized_room = False
+        # 音声ルームを小さくしたアカウントの呼び名（複数のアカウントをこなしたとき、どれのルームかを知らせるため）
+        self._minimized_room_accounts = []
+        # 今こなしているアカウントの画面。決めたら、部品の数で選び直さない（別のアカウントの画面へ移らないため）
+        self._account_display = None
+        # 今こなしているアカウントの、マイページで読んだ名前とID
+        self._account_seen = {}
+        # 最後にこなしたタスクで、ボットの番のものが全部済んだか（済んだ日を覚えるかの判断に使う）
+        self._bot_part_complete = False
 
     # --- 起動 / 停止 ---
     def start_job(self, job):
@@ -5878,16 +6049,15 @@ class GravityTaskWorker(AutoReplyWorker):
         name = self.JOB_NAMES.get(job, job)
         # 前回のディスプレイ番号は持ち越さない（AutoReplyWorker._run_monitor と同じ理由）
         self._target_display = None
+        self._account_display = None
+        self._minimized_room_accounts = []
         try:
             if not self._monitor_target_package():
                 raise TaskStop("対象のアプリが決まっていません。設定タブの「📱 エミュレータ(MuMu)」で"
                                "GRAVITYを選んでから、もう一度押してください。")
             d = self._connect_to_emulator()
             self.log(f"📋 {name}を始めます。")
-            if job == self.JOB_TASKS:
-                notice = self._run_daily_tasks(d)
-            else:
-                notice = self._run_roulette(d)
+            notice = self._run_on_accounts(d, job)
             if notice:
                 self.notify_callback(*notice)
         except TaskCancelled:
@@ -5901,10 +6071,135 @@ class GravityTaskWorker(AutoReplyWorker):
             self.log(f"❌ {name}の途中でエラーが起きたため止めました: {first_line}")
             self.notify_callback(f"{name}を止めました", f"エラーが起きました: {first_line}")
         finally:
-            if self._minimized_room:
+            if self._minimized_room_accounts:
                 # 終わってもルームには戻らない（本人の決定）。戻り方だけ伝える
-                self.log("ℹ️ 音声ルームは小さくしたままです。画面の右の丸を押すとルームに戻れます。")
+                which = "、".join(self._minimized_room_accounts)
+                self.log(f"ℹ️ 音声ルームは小さくしたままです（{which}）。画面の右の丸を押すとルームに戻れます。")
+            self._account_display = None
             self.is_running = False
+
+    # --- アカウントごと（MuMuの「アプリ複製」で、GRAVITYを複数開いていることがある） ---
+    def _prepare_mumu(self, launch_app=True):
+        """
+        タスク・ルーレットでは、GRAVITYのアプリは起動しない（自動起動がONでも、起動するのはMuMu本体だけ）。
+        ⚠️ アプリを起動すると、必ず本体のGRAVITY（ユーザー0）が開く。2026-10-14 本人: 本体を閉じて複製のアカウントで
+           始めたら、タスクの済んだ本体をわざわざ起動して、そちらをこなそうとした（複製には触れなかった）。
+           どのアカウントをこなすかは、開いているGRAVITYの画面から選ぶ（_run_on_accounts）
+        """
+        return super()._prepare_mumu(launch_app=False)
+
+    def _update_target_display(self, xml_dump):
+        """こなすアカウントの画面を決めたら、そこから動かない（部品の数で選び直すと、別のアカウントの画面へ移りうる）"""
+        if self._account_display is not None:
+            self._target_display = self._account_display
+            return self._account_display
+        return super()._update_target_display(xml_dump)
+
+    @staticmethod
+    def _today():
+        """タスクは毎日0時にリセットされる（タスク画面の表示「毎日深夜0時にリセット」）。PCの日付で数える"""
+        return datetime.date.today().isoformat()
+
+    def _load_accounts(self):
+        try:
+            data = json.loads(self.db.get_setting(self.ACCOUNTS_SETTING, "") or "{}")
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_accounts(self, accounts):
+        self.db.save_setting(self.ACCOUNTS_SETTING, json.dumps(accounts, ensure_ascii=False))
+
+    def forget_today(self):
+        """今日の「済み」の記録を消す（ボットが済みと思い込んで飛ばすアカウントを、こなし直させたいとき）"""
+        today = self._today()
+        accounts = self._load_accounts()
+        for record in accounts.values():
+            for field in self.JOB_DONE_FIELDS.values():
+                if record.get(field) == today:
+                    record.pop(field)
+        self._save_accounts(accounts)
+
+    def _open_windows(self, d):
+        result = d.shell("dumpsys activity activities")
+        return parse_app_windows(getattr(result, "output", result) or "", self._monitor_target_package())
+
+    def _run_on_accounts(self, d, job):
+        """
+        開いているGRAVITYを、画面ごと（=アカウントごと）に順にこなす。知らせる内容 (見出し, 本文) か None を返す。
+        ・今日の分が済んだと覚えているアカウントは触らずに飛ばす（毎日0時にリセットされるので、日付で覚える）
+        ・閉じているアカウントは起動しない（_prepare_mumu）
+        ・途中で止まったら（知らない画面・報酬の受け取りの画面など）、残りのアカウントもそこで止める（本人の方針）。
+          済んだアカウントは覚えているので、もう一度押すと残りから続く
+        """
+        name = self.JOB_NAMES.get(job, job)
+        field = self.JOB_DONE_FIELDS[job]
+        today = self._today()
+        windows = self._open_windows(d)
+        if not windows:
+            raise TaskStop("GRAVITYの画面が開いていません。こなしたいアカウントのGRAVITYを開いてから、もう一度押してください"
+                           "（閉じているアカウントは、ボットからは起動しません）。")
+        accounts = self._load_accounts()
+        listed = "、".join(f"{gravity_account_label(w['user'], accounts.get(w['user'], {}).get('name', ''))}"
+                          f"{'（今日の分は済み）' if accounts.get(w['user'], {}).get(field) == today else ''}"
+                          for w in windows)
+        self.log(f"👥 開いているGRAVITY: {listed}")
+
+        notices, worked = [], 0
+        for window in windows:
+            user = window["user"]
+            record = accounts.setdefault(user, {})
+            label = gravity_account_label(user, record.get("name", ""))
+            if record.get(field) == today:
+                self.log(f"⏭️ {label}: 今日の{name}は済んでいます（0時にリセット）。触らずに飛ばします。")
+                continue
+            worked += 1
+            self._account_display = window["display"]
+            self._target_display = window["display"]
+            self._account_seen = {}
+            self._minimized_room = False
+            self.log(f"👤 {label}（画面 {window['display']}）の{name}を始めます。")
+            try:
+                if job == self.JOB_TASKS:
+                    notice = self._run_daily_tasks(d)
+                    complete = self._bot_part_complete
+                else:
+                    notice = self._run_roulette(d)
+                    complete = True
+            except TaskStop as e:
+                raise TaskStop(f"【{self._account_label(user, {**record, **self._account_seen})}】{e}") from e
+            finally:
+                # マイページで読んだ名前は、途中で止まっても覚えておく（次からの知らせで名前で呼ぶため）
+                if self._account_seen:
+                    seen_id = self._account_seen.get("custom_id")
+                    if seen_id and record.get("custom_id") not in (None, seen_id):
+                        # 同じ枠に別のアカウントでログインし直している。前のアカウントの「済み」は当てはまらない
+                        for done_field in self.JOB_DONE_FIELDS.values():
+                            record.pop(done_field, None)
+                    record.update(self._account_seen)
+                    self._save_accounts(accounts)
+                if self._minimized_room:
+                    self._minimized_room_accounts.append(self._account_label(user, record))
+            if complete:
+                record[field] = today
+                self._save_accounts(accounts)
+            if notice:
+                notices.append((self._account_label(user, record), notice))
+
+        if not worked:
+            message = "開いているGRAVITYは、どれも今日の分が済んでいます。0時のリセットの後に、また押してください。"
+            self.log(f"ℹ️ {message}")
+            return f"{name}: 今日の分は済んでいます", message
+        if not notices:
+            return None
+        if len(notices) == 1 and len(windows) == 1:
+            return notices[0][1]
+        title = notices[0][1][0] if len(notices) == 1 else f"{name}: ご自身の番です（{len(notices)}アカウント）"
+        return title, "\n\n".join(f"【{label}】\n{message}" for label, (_, message) in notices)
+
+    @staticmethod
+    def _account_label(user, record):
+        return gravity_account_label(user, record.get("name", ""))
 
     # --- 画面を読む ---
     def _check_cancel(self):
@@ -6069,6 +6364,9 @@ class GravityTaskWorker(AutoReplyWorker):
         self._go_main(d, "tab_center")
         xml, _ = self._wait_for(
             d, lambda x, c: find_function_entry(x, "タスク", self._target_display), "マイページの表示")
+        # どのアカウントかを、知らせの中で名前で呼ぶために覚える
+        my_name, my_id = parse_my_account(xml, self._target_display)
+        self._account_seen.update({k: v for k, v in (("name", my_name), ("custom_id", my_id)) if v})
         self._tap_box(d, find_function_entry(xml, "タスク", self._target_display), "マイページの「タスク」")
         xml, _ = self._wait_for(d, lambda x, c: c.endswith(self.TASK_CENTER_ACTIVITY), "タスク画面")
         box, selected = find_tab(xml, ("ディリータスク", "デイリータスク"), self._target_display)
@@ -6127,7 +6425,12 @@ class GravityTaskWorker(AutoReplyWorker):
 
     @staticmethod
     def _looks_unclaimed(row):
-        """回数は達成しているのにクリアの印が無い行か（報酬の受け取り待ちとみられる）"""
+        """
+        報酬の受け取り待ちの行か。右に「クリア」(btnPointReceive)があれば確実（2026-10-12 実測）。
+        ボタンが読めないときは、回数は達成しているのにクリアの印が無いことで判断する
+        """
+        if row.get("button") == TASK_BUTTON_RECEIVE:
+            return True
         progress = row["progress"]
         return bool(progress) and progress[1] > 0 and progress[0] >= progress[1] and not row["finish_mark"]
 
@@ -6142,6 +6445,9 @@ class GravityTaskWorker(AutoReplyWorker):
         if not rows:
             raise TaskStop("タスク画面からタスクを読み取れませんでした。")
 
+        # ボットの番なのに済んでいないタスク。無ければ「今日の分は済み」と覚え、0時まではこのアカウントを飛ばす
+        self._bot_part_complete = False
+        unfinished = []
         todo, notes = [], []
         for row in rows:
             state = classify_task(row["progress"], row["finish_mark"])
@@ -6159,6 +6465,8 @@ class GravityTaskWorker(AutoReplyWorker):
                 mark = "クリアの印あり" if row["finish_mark"] else "クリアの印なし"
                 self.log(f"   ? 判断できない: {row['title']}（{progress}・{mark}）")
                 notes.append(f"・{row['title']}: 状態を判断できませんでした（{progress}・{mark}）。画面を確かめてください")
+                if kind and kind != TASK_KIND_MANUAL:
+                    unfinished.append(row["title"])
             elif kind == TASK_KIND_MANUAL:
                 self.log(f"   ✋ ご自身で: {row['title']}（{progress}）")
                 notes.append(f"・{row['title']}（{progress}）: {TASK_MANUAL_REASONS.get(row['title'], 'ご自身でお願いします')}")
@@ -6170,12 +6478,16 @@ class GravityTaskWorker(AutoReplyWorker):
                 todo.append((row, kind))
 
         done_titles = []
+        start_progress = {}      # こなす前の回数（確かめるときに「前 → 後」で知らせるため）
+        self._follow_left_on = False
         for row, kind in todo:
             if kind in (TASK_KIND_COMMENT, TASK_KIND_MESSAGE) and not friend:
                 notes.append(f"・{row['title']}: 送り先が決まっていないので飛ばしました（設定タブで名前を入れてください）")
+                unfinished.append(row["title"])
                 continue
-            if kind != TASK_KIND_FOLLOW and not text:
+            if kind not in (TASK_KIND_FOLLOW, TASK_KIND_LIKE) and not text:
                 notes.append(f"・{row['title']}: 文面が空なので飛ばしました（設定タブで入れてください）")
+                unfinished.append(row["title"])
                 continue
             self.log(f"▶ {row['title']}")
             if kind == TASK_KIND_POST:
@@ -6185,8 +6497,13 @@ class GravityTaskWorker(AutoReplyWorker):
             elif kind == TASK_KIND_MESSAGE:
                 self._do_message(d, friend, text)
             elif kind == TASK_KIND_FOLLOW:
-                self._do_follow(d)
+                self._do_follow(d, row)
+                if self._follow_left_on:
+                    notes.append(f"・{row['title']}: フォローを外すボタンが出ない画面だったので、フォローしたままです")
+            elif kind == TASK_KIND_LIKE:
+                self._do_like(d, row)
             done_titles.append(row["title"])
+            start_progress[row["title"]] = row["progress"]
 
         if done_titles:
             # こなしたタスクの回数が本当に増えたかを、タスク画面で確かめる
@@ -6202,10 +6519,22 @@ class GravityTaskWorker(AutoReplyWorker):
                     notes.append(f"・{title}: こなしました。報酬の受け取り待ちです。"
                                  f"そのまま受け取るか、広告を見て2倍にするかを、ご自身で選んでください")
                 else:
-                    shown = f"{row['progress'][0]}/{row['progress'][1]}回" if row and row["progress"] else "読めず"
-                    self.log(f"   ⚠️ {title}: こなしましたが、まだ済みになっていません（{shown}）")
-                    notes.append(f"・{title}: こなしましたが、回数が増えていません（{shown}）")
+                    # ⚠️ 「前 → 後」を並べて知らせる。2026-10-12 の実機の通しで、いいねが 0 → 20/40回 と増えていたのに
+                    #    「回数が増えていません（20/40回）」と知らせてしまった
+                    def shown(progress):
+                        return f"{progress[0]}/{progress[1]}回" if progress else "読めず"
+                    before = start_progress.get(title)
+                    now = row["progress"] if row else None
+                    change = f"{shown(before)} → {shown(now)}"
+                    unfinished.append(title)
+                    if before and now and now[0] > before[0]:
+                        self.log(f"   ⚠️ {title}: 増えましたが、まだ済みになっていません（{change}）")
+                        notes.append(f"・{title}: こなしましたが、まだ済みになっていません（{change}）")
+                    else:
+                        self.log(f"   ⚠️ {title}: こなしましたが、回数が増えていません（{change}）")
+                        notes.append(f"・{title}: こなしましたが、回数が増えていません（{change}）")
 
+        self._bot_part_complete = not unfinished
         if notes:
             self.log("✋ ご自身で見ていただきたいこと:\n" + "\n".join(notes))
             return "タスク: ご自身の番です", "\n".join(notes)
@@ -6254,26 +6583,164 @@ class GravityTaskWorker(AutoReplyWorker):
                        "メッセージの送信（欄が空に戻る）")
         self.log("   ✅ メッセージを送りました。")
 
-    def _do_follow(self, d):
-        """タイムラインの、まだフォローしていない人を詳細画面でフォローし、すぐ外す（本人の希望）"""
-        self._go_main(d, "tab_feed")
-        post = self._scroll_until(
-            d, lambda x: find_unfollowed_post(x, self._target_display), "フォローしていない人の投稿")
-        self._tap_box(d, post, "その人の投稿")
+    # 心のこもった「いいね」: 1件押すごとに空ける秒数（短い間に大量に押すと、機械的な操作とみなされやすい）
+    LIKE_INTERVAL_SECONDS = 1.5
+    # いいねする投稿を探して一覧を送る回数の上限（1回開くごと）。
+    # 下まで来たかは一覧が動かないことで見分けるので、これは止まらなくなったときの保険。
+    # 1回の送りは240pxで投稿1件（約425px）より短く、40件を探すには60回以上送ることもある
+    MAX_LIKE_SCROLLS = 80
+    # 送っても一覧が動かないことが、この回数続いたら下まで来たとみなす（下で続きを読み込む間は動かないことがある）
+    LIKE_LIST_STUCK_SCROLLS = 2
+    # 一覧の投稿が尽きたら、開き直す回数の上限。
+    # 2026-10-12 実測: 1回目は20件で投稿が尽きた（0/40 → 20/40）。開き直すと新しい投稿が出て、残り20件をいいねできた
+    MAX_LIKE_ROUNDS = 4
+
+    def _do_like(self, d, row):
+        """
+        心のこもった「いいね」（本人の指示: タスクの「チャレンジ」を押し、出てきた一覧で普通のハートを押す）。
+        ⚠️ ハートは押すと「いいね」と「取り消し」が入れ替わり、いいね済みかは画面から分からない。
+           押すたびに、いいね数が1増えたかを確かめる。減ったら（いいね済みだった）もう一度押して元に戻し、数えない。
+           いいね数が読めない投稿（1000以上で「1.1K」になる等）は、確かめられないので押さない。
+        """
+        title = row["title"]
+        done, total = row["progress"] or (0, 0)
+        needed = total - done
+        if needed <= 0:
+            return
+        state = {"liked": 0, "attempts": 0, "tried": set()}
+        for round_no in range(self.MAX_LIKE_ROUNDS):
+            if state["liked"] >= needed:
+                break
+            if round_no > 0:
+                self.log("   🔄 一覧の投稿が尽きたので、一覧を開き直します")
+            if not self._open_like_list(d, title):
+                break
+            self._like_in_list(d, needed, state)
+        liked = state["liked"]
+        if liked < needed:
+            self.log(f"   ⚠️ いいねできたのは {liked}/{needed} 件でした（押せる投稿が見つかりませんでした）")
+        else:
+            self.log(f"   ✅ いいねを {liked} 件しました。")
+
+    def _open_task_challenge(self, d, title):
+        """
+        タスク画面の、タイトルが title の行の「チャレンジ」を押す。行に「チャレンジ」が無ければ（済み・受け取り待ち）False。
+        ⚠️ どの行の「チャレンジ」も同じ部品・同じ文言。必ず行の中のボタンを押す（広告の行は守りが止める）。
+        ⚠️ 心のこもった「いいね」と新規ユーザーのフォローは、ここから入った先でこなさないと数えられない（2026-10-12 本人）
+        """
+        self._open_task_center(d)
+
+        def find_row(x):
+            rows = [r for r in parse_task_rows(x, self._target_display) if r["title"] == title]
+            return rows[0] if rows else None
+
+        row = self._scroll_until(d, find_row, f"「{title}」の行")
+        if row["button"] != TASK_BUTTON_CHALLENGE:
+            return False
+        self._tap_box(d, row["button_box"], f"「{title}」の「チャレンジ」")
+        return True
+
+    def _open_like_list(self, d, title):
+        """心のこもった「いいね」の一覧を開く。行に「チャレンジ」が無ければ False"""
+        if not self._open_task_challenge(d, title):
+            return False
+        # ⚠️ 題名は投稿より先に出る。投稿が出る前に読むと、空の一覧を送って「下まで来た」と誤る
+        self._wait_for(d, lambda x, c: c.endswith(self.HEART_LIST_ACTIVITY)
+                       and text_by_id(x, "tvTitle", self._target_display) == title
+                       and find_by_id(x, "cvRoot", self._target_display), "心のこもった「いいね」の一覧の投稿")
+        return True
+
+    def _like_in_list(self, d, needed, state):
+        """
+        開いている一覧で、いいねできる投稿がなくなるまで押す。一覧の下まで来たら戻る（開き直しは呼び出し側）。
+        ⚠️ 下まで来たかは、送っても一覧が動かないことで見分ける。「送っても新しい投稿が出ない」で見分けると、
+           画像付きの縦に長い投稿の途中でも下まで来たと誤る（1回の送りは投稿1件より短い）。
+           2026-10-13 本人: ほとんど送っていないのに「いいねできたのは…件」と出た
+           （前の作りは、その数え方に加えて、いいねした後に数え直していなかった）
+        """
+        stuck, scrolls, before_scroll = 0, 0, None
+        while state["liked"] < needed and state["attempts"] < needed + 20:
+            xml, _ = self._read_screen(d)
+            if before_scroll is not None:
+                # 送った直後の画面。送る前と同じなら、一覧が動いていない
+                same = feed_list_signature(xml, self._target_display) == before_scroll
+                stuck = stuck + 1 if same else 0
+                before_scroll = None
+            targets = find_feed_like_targets(xml, self._target_display)
+            candidates = [t for t in targets if t["key"] not in state["tried"] and t["count"] is not None]
+            if not candidates:
+                if stuck >= self.LIKE_LIST_STUCK_SCROLLS or scrolls >= self.MAX_LIKE_SCROLLS:
+                    return
+                before_scroll = feed_list_signature(xml, self._target_display)
+                self._scroll_down(d)
+                scrolls += 1
+                continue
+            target = candidates[0]
+            state["tried"].add(target["key"])
+            state["attempts"] += 1
+            self._tap_box(d, target["like_box"], "ハート")
+            after = self._find_like_target(d, target["key"])
+            if after is not None and after["count"] == target["count"] + 1:
+                state["liked"] += 1
+                self.log(f"   ❤️ いいね {state['liked']}/{needed}")
+            elif after is not None and after["count"] == target["count"] - 1:
+                # いいね済みの投稿だった。押したことで取り消したので、もう一度押して元に戻す
+                self._tap_box(d, after["like_box"], "ハート（元に戻す）")
+                again = self._find_like_target(d, target["key"])
+                if again is None or again["count"] != target["count"]:
+                    raise TaskStop("いいね済みの投稿のいいねを取り消してしまい、元に戻せたか確かめられませんでした。"
+                                   "一覧を確かめてください。")
+                self.log("   ↩️ いいね済みの投稿だったので、元に戻しました（数えません）")
+            else:
+                self.log("   ? いいね数の変わり方を確かめられなかった投稿がありました（数えません）")
+            time.sleep(self.LIKE_INTERVAL_SECONDS)
+
+    def _find_like_target(self, d, key):
+        """押した直後の画面で、同じ投稿（名前と時刻の組）を探し直す。位置がずれるため"""
+        xml, _ = self._read_screen(d)
+        for target in find_feed_like_targets(xml, self._target_display):
+            if target["key"] == key:
+                return target
+        return None
+
+    def _do_follow(self, d, row):
+        """
+        新規ユーザーを1人フォローする。⚠️ 行の「チャレンジ」から入った先でフォローしないと数えられない
+        （2026-10-12 本人。実機の通しで、ホームのタイムラインからのフォローは 0/1回 のままだった）。
+        フォローしたらすぐ外す（本人の希望）。外せない画面なら、フォローしたままにして知らせる。
+
+        ⚠️ 「チャレンジ」の先の画面はまだ見ていない（調べた日はもう受け取り待ちで「チャレンジ」が無かった）。
+           特定の画面に決め打ちせず、開いた画面の「フォロー」(btnFollow) を探す。押してよい画面の一覧に無い画面なら、
+           守りが何も押さずに止めて、画面の名前を知らせる（その名前を TASK_KNOWN_ACTIVITIES に足せば動く）。
+        """
+        title = row["title"]
+        if not self._open_task_challenge(d, title):
+            return
+        disp = lambda: self._target_display
+        xml, _ = self._wait_for(d, lambda x, c: find_by_id(x, "btnFollow", disp(), text="フォロー"),
+                                "「フォロー」ボタンのある画面")
+        following_before = len(find_by_id(xml, "btnFollow", disp(), text="フォロー中"))
+        target = find_by_id(xml, "btnFollow", disp(), text="フォロー")[0]
+        self._tap_box(d, target, "「フォロー」")
+        # フォローできたか: 「フォロー中」が増えるか、押した「フォロー」が消える（ホームのタイムラインでは消えた）
         xml, _ = self._wait_for(
-            d, lambda x, c: c.endswith(self.FEED_DETAIL_ACTIVITY) and find_by_id(x, "btnFollow", self._target_display),
-            "投稿の詳細画面")
-        boxes = find_by_id(xml, "btnFollow", self._target_display, text="フォロー")
-        self._tap_box(d, boxes[0] if boxes else None, "詳細画面の「フォロー」")
-        xml, _ = self._wait_for(
-            d, lambda x, c: find_by_id(x, "btnFollow", self._target_display, text="フォロー中"), "「フォロー中」の表示")
+            d, lambda x, c: len(find_by_id(x, "btnFollow", disp(), text="フォロー中")) > following_before
+            or target not in find_by_id(x, "btnFollow", disp(), text="フォロー"), "フォローの反映")
         self.log("   ✅ フォローしました。すぐに外します。")
-        self._tap_box(d, find_by_id(xml, "btnFollow", self._target_display, text="フォロー中")[0], "「フォロー中」")
-        xml, _ = self._wait_for(
-            d, lambda x, c: has_text(x, "フォローを外しますか", self._target_display), "解除の確認")
-        boxes = find_by_text(xml, "確認", self._target_display)
+
+        following = find_by_id(xml, "btnFollow", disp(), text="フォロー中")
+        if len(following) <= following_before:
+            self.log("   ⚠️ この画面ではフォローを外すボタンが出ないため、フォローしたままにしました")
+            self._follow_left_on = True
+            return
+        # 押した「フォロー」に一番近い「フォロー中」が、いまフォローした人
+        nearest = min(following, key=lambda b: abs(b[1] - target[1]) + abs(b[0] - target[0]))
+        self._tap_box(d, nearest, "「フォロー中」")
+        xml, _ = self._wait_for(d, lambda x, c: has_text(x, "フォローを外しますか", disp()), "解除の確認")
+        boxes = find_by_text(xml, "確認", disp())
         self._tap_box(d, boxes[0] if boxes else None, "解除の「確認」")
-        self._wait_for(d, lambda x, c: find_by_id(x, "btnFollow", self._target_display, text="フォロー"), "フォローの解除")
+        self._wait_for(d, lambda x, c: len(find_by_id(x, "btnFollow", disp(), text="フォロー中")) <= following_before,
+                       "フォローの解除")
         self.log("   ✅ フォローを外しました。")
 
     # --- ラッキールーレット（タスクとは別） ---
@@ -10398,19 +10865,32 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             section,
-            text="メインタブの「📋 タスクをこなす」で、デイリータスクのうち次の4つをこなします:\n"
+            text="メインタブの「📋 タスクをこなす」で、デイリータスクのうち次の5つをこなします:\n"
                  "　投稿する / ユーザーの投稿にコメントする / ユーザーにメッセージを送る /\n"
-                 "　新規ユーザーを1人フォローする（フォローしたらすぐ外します）\n"
-                 "広告・Xへのシェア・心のこもったいいねは、ボットではこなさず、ご自身の番としてお知らせします。\n"
+                 "　新規ユーザーを1人フォローする（フォローしたらすぐ外します）/\n"
+                 "　心のこもった「いいね」をする（「チャレンジ」の一覧でハートを押します。いいね済みの投稿は元に戻します）\n"
+                 "広告・Xへのシェアは、ボットではこなさず、ご自身の番としてお知らせします。\n"
                  "タスクの報酬は受け取りません（そのまま受け取るか、広告を見て2倍にするかは、ご自身で選んでください）。\n"
                  "「🎡 ルーレットを回す」は、無料の1回（今日の初回チャンス）だけを回します。\n"
                  "⚠️ ポイントで回す・広告で回すボタン、ギフト、広告の画面には、ボットは触りません。\n"
                  "⚠️ 知らない画面が出たら、何も押さずに止めてお知らせします。\n"
                  "　 自動返信の監視中は実行できません（同じ画面を操作して混ざるため）。\n"
                  "音声ルームの画面から始めたときは、退出せずに「小さくする」を押してから始めます。\n"
-                 "　 終わってもルームには戻りません（画面の右の丸を押すと戻れます）。",
+                 "　 終わってもルームには戻りません（画面の右の丸を押すと戻れます）。\n"
+                 "MuMuの「アプリ複製」でGRAVITYを複数開いているときは、開いているものを順にこなします。\n"
+                 "　 閉じているアカウントは起動しません。こなしたいアカウントのGRAVITYを開いてから押してください。\n"
+                 "　 今日の分が済んだアカウントは覚えておき、0時のリセットまでは触らずに飛ばします。",
             justify="left", text_color="gray70"
         ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        forget_frame = ctk.CTkFrame(section, fg_color="transparent")
+        forget_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 8))
+        self.daily_task_forget_btn = ctk.CTkButton(
+            forget_frame, text="🔄 今日の「済み」の記録を消す", width=200,
+            fg_color="#555555", hover_color="#3a3a3a", command=self.forget_daily_task_today)
+        self.daily_task_forget_btn.pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(forget_frame, text="済みとして飛ばしたアカウントを、こなし直させたいときに",
+                     text_color="gray70").pack(side="left")
 
         name_frame = ctk.CTkFrame(section, fg_color="transparent")
         name_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
@@ -10456,6 +10936,13 @@ class App(ctk.CTk):
             variable=self.daily_task_notify_var,
             command=self.on_daily_task_notify_toggle
         ).pack(anchor="w", padx=12, pady=(0, 12))
+
+    def forget_daily_task_today(self):
+        if self.task_worker.is_running or self.task_worker.is_alive():
+            self.append_log("⚠️ タスク・ルーレットの実行中は、記録を消せません。終わってからもう一度押してください。")
+            return
+        self.task_worker.forget_today()
+        self.append_log("⚙️ 今日の「済み」の記録を消しました。次に押すと、開いているアカウントをすべてこなし直します。")
 
     def save_daily_task_friend(self):
         name = self.daily_task_friend_entry.get().strip()
