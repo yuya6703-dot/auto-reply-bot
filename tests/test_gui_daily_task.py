@@ -44,6 +44,12 @@ class FakeWorker:
         self.stopped = True
         self.is_running = False
 
+    def start(self, *coords):
+        # 監視の開始（範囲の座標。範囲を選ばずに開始したときは全部 None）
+        self.started.append(("monitor",) + coords)
+        self.is_running = self.alive = True
+        return True
+
     def forget_today(self):
         self.forgotten += 1
 
@@ -62,6 +68,7 @@ class Harness(ctk.CTk):
     _set_gravity_job_buttons = A.App._set_gravity_job_buttons
     _watch_gravity_job = A.App._watch_gravity_job
     start_monitoring = A.App.start_monitoring
+    _begin_monitoring = A.App._begin_monitoring
 
     def __init__(self, db):
         super().__init__()
@@ -90,6 +97,9 @@ class Harness(ctk.CTk):
     def on_emulator_auto_scroll_toggle(self): pass
     # start_monitoring が範囲選択に進んだら呼ばれる。ここまで来たら「止められなかった」
     def withdraw(self): self.logs.append("WITHDRAW")
+    # _begin_monitoring が開始後に呼ぶもの。今回の検証には関係しない
+    def _set_manual_send_enabled(self, enabled): pass
+    def _watch_worker_state(self): pass
 
 
 def state(button):
@@ -144,6 +154,16 @@ h.start_gravity_job(A.GravityTaskWorker.JOB_ROULETTE)
 check("ルーレットとして始めた", h.task_worker.started == [A.GravityTaskWorker.JOB_ROULETTE], h.task_worker.started)
 h.task_worker.is_running = h.task_worker.alive = False
 h._watch_gravity_job()
+
+print("■ 「チャット欄で自動開始」は範囲を選ばずに監視を始める（2026-10-15）")
+check("ボタンがある", h.start_auto_btn.cget("text") == "▶ チャット欄で自動開始")
+h.worker = FakeWorker()
+h.logs.clear()
+h.start_monitoring(auto=True)
+check("範囲の座標なし（全部 None）で始める", h.worker.started == [("monitor", None, None, None, None)], h.worker.started)
+check("範囲選択の画面に進まない", "WITHDRAW" not in h.logs, h.logs)
+check("開始のボタンは押せなくなる", state(h.start_auto_btn) == "disabled" and state(h.start_btn) == "disabled")
+h.worker = FakeWorker()
 
 print("■ 設定タブの区画")
 check("送り先は保存した値が入っている", h.daily_task_friend_entry.get() == "テストの相手さんです")

@@ -121,9 +121,15 @@ class FakeRoom:
             self.worker.is_running = False
         return self.xml
 
+    def window_size(self):
+        return 540, 960
 
-def run_monitor(pairs, rounds=3, xml=GUEST):
-    """pairs: [(検知ワード, 返信ワード, 対象)]。送った文の一覧とログを返す"""
+
+def run_monitor(pairs, rounds=3, xml=GUEST, auto=False):
+    """
+    pairs: [(検知ワード, 返信ワード, 対象)]。送った文の一覧とログを返す。
+    auto=True なら範囲を選ばずに開始する（チャット欄の枠を監視範囲にする）
+    """
     db = A.DatabaseManager(os.path.join(tempfile.mkdtemp(), "t.db"))
     db.save_setting("mumu_target_package", GRAVITY)
     db.save_setting("cooldown_enabled", "0")
@@ -148,7 +154,10 @@ def run_monitor(pairs, rounds=3, xml=GUEST):
         sent.append(text)
         return fc, True
     w._execute_reply = fake_execute
-    w._run_monitor(0, 0, 100, 100)
+    if auto:
+        w._run_monitor(None, None, None, None)
+    else:
+        w._run_monitor(0, 0, 100, 100)
     return sent, logs, w
 
 
@@ -180,6 +189,45 @@ check("読んでいない", calls == [], len(calls))
 run_monitor([("［参加したとき］", "いらっしゃい", "join")])
 check("対象を選んだペアがあれば読む", len(calls) > 0)
 A.parse_chat_rows = real_parse
+
+# ----------------------------------------------------------------------
+# 範囲を選ばずに開始（2026-10-15 本人「箱と値そのものを検知するなら範囲選択は要らないのでは」）
+print("■ チャット欄の枠を見つける")
+# ⚠️ 上端は画面で変わる（この画面は248、2026-10-14 の実物は159）。決め打ちせず毎回探す理由
+check("ゲストの画面のチャット欄", A.find_chat_list_bounds(GUEST, 2) == (0, 248, 423, 877), A.find_chat_list_bounds(GUEST, 2))
+check("ルームを小さくしたホーム画面には無い", A.find_chat_list_bounds(fixture("voiceroom_minimized.xml"), 2) is None)
+
+print("■ 範囲を選ばずに開始: チャット欄の枠の中だけを見る")
+sent, logs, w = run_monitor([("［参加したとき］", "{名前}さん、いらっしゃい！", "join")], auto=True)
+check("参加した人に返す", sent == ["伏せ字5さん、いらっしゃい！"], sent)
+check("チャット欄を見つけたとログに出す", any("チャット欄を見つけました" in m for m in logs), logs[:6])
+check("範囲を選ばずに始めたことになっている", w._auto_range is True)
+# 「ゲスト（1人）」はチャット欄と同じ高さの右側（x=441〜527）にある。上下だけで絞ると拾ってしまう
+sent, logs, w = run_monitor([("ゲスト", "x", A.KEYWORD_TARGET_ANY)], auto=True)
+check("チャット欄の右の「ゲスト（N人）」には反応しない（左右でも絞る）", sent == [], sent)
+check("範囲の外で見つけても「範囲を選び直して」とは言わない", not any("範囲外" in m for m in logs), logs[-4:])
+sent, logs, w = run_monitor([("ゲスト", "x", A.KEYWORD_TARGET_ANY)])
+check("（比べ: 範囲を選んだときは今まで通り上下だけで絞るので反応する）", sent == ["x"], sent)
+
+print("■ 範囲を選ばずに開始: チャット欄が無い画面では、何も検知せずに待つ")
+sent, logs, w = run_monitor([("伏せ字", "x", A.KEYWORD_TARGET_ANY)], xml=fixture("voiceroom_minimized.xml"), auto=True)
+check("何も送らない（前の枠のまま、ホーム画面の文字に反応しない）", sent == [], sent)
+check("待っていることを1回だけログに出す", sum("チャット欄が見つかりません" in m for m in logs) == 1,
+      [m for m in logs if "チャット欄" in m])
+
+print("■ 入力欄は部品の名前(etText)で探す（チャット欄の発言を押さない）")
+# チャット欄のいちばん下の発言を「メッセージください」にする。以前の探し方（下半分で『メッセージ』を含むもの）は、
+# チャット欄の部品が入力欄より先に並ぶので、この発言を押していた
+tricky = GUEST.replace('text="伏せ字6"', 'text="メッセージください"')
+w = A.AutoReplyWorker(A.DatabaseManager(os.path.join(tempfile.mkdtemp(), "t.db")), lambda m: None)
+w.db.save_setting("mumu_target_package", GRAVITY)
+w._update_target_display(tricky)
+_, _, nodes, all_nodes = w._extract_chat_texts(tricky, 0, 960)
+taps = []
+w._tap = lambda d, x, y: taps.append((x, y)) or True
+w._check_after_action = lambda d, what: None
+w._find_and_tap_input(FakeRoom(w, tricky, 99), nodes, 480, all_nodes=all_nodes)
+check("入力欄(etText [21,884][238,931])の中央を押す", taps == [(129.5, 907.5)], taps)
 
 print()
 if FAILS:

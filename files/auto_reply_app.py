@@ -1444,6 +1444,20 @@ def name_in_text(text):
     return subject if kind in NOTICE_KINDS_WITH_PERSON else ""
 
 
+# GRAVITYの音声ルームのチャット欄と入力欄の部品（GRAVITY画面部品.md。ゲストの画面で実測）
+CHAT_LIST_ID = "rvMessages"     # チャット欄の一覧。⚠️ 上端は画面で変わる（実測 159 と 248）。決め打ちせず毎回探す
+ROOM_INPUT_ID = "etText"        # 入力欄。空のときは案内文「メッセージを送信」が文字として入っている
+
+
+def find_chat_list_bounds(xml_dump, display=None):
+    """
+    音声ルームのチャット欄（rvMessages）の枠 (左, 上, 右, 下)。無ければ None（ルームの画面でない・小さくしている）。
+    「範囲を選ばずに開始」では、これを監視範囲の代わりにする（2026-10-15 本人「範囲選択する必要がなくなるかも」）
+    """
+    boxes = find_by_id(xml_dump, CHAT_LIST_ID, display)
+    return boxes[0] if boxes else None
+
+
 # ====================================================
 # 🗄️ 1. データ永続化 (SQLite3)
 # ====================================================
@@ -4442,6 +4456,8 @@ class AutoReplyWorker:
         self.re_clickable = re.compile(r'clickable="true"')
         # どのアプリの部品かを見分ける（uiautomator2の入力補助バーを除外するのに使う）
         self.re_package = re.compile(r'package="([^"]+)"')
+        # 部品の名前（入力欄を etText で探すのに使う）
+        self.re_resource = re.compile(r'resource-id="([^"]*)"')
 
         self._last_seen_any_chat = ""
 
@@ -4467,6 +4483,10 @@ class AutoReplyWorker:
         self._keyword_targets = {}
         # 自動返信で送った文（{名前} を差し込んだもの）。自分の発言の見分けに使う（_remember_own_text）
         self._recent_reply_texts = []
+        # 範囲を選ばずに開始したか（チャット欄の枠を監視範囲にする）。_run_monitor が決める
+        self._auto_range = False
+        # 範囲を選ばずに開始したとき、始めた時点でチャット欄が見つかったか
+        self._auto_chat_found = False
 
     def log(self, message):
         # 画面には実際の内容を表示し、DBに保存する分だけ第三者の名前を伏せる
@@ -4725,6 +4745,25 @@ class AutoReplyWorker:
 
         self.log(f"🤖 Android内部の監視範囲確定: Y軸 {y_min}px 〜 {y_max}px")
         return y_min, y_max, w_height
+
+    def _auto_chat_bounds(self, d):
+        """
+        範囲を選ばずに開始したときの、最初の監視範囲。音声ルームのチャット欄(rvMessages)の上下を返す。
+        見つからなければ画面全体を返す（監視ループは、チャット欄が見つかるまで何も検知せずに待つ）。
+        戻り値: (上, 下, 画面の高さ)
+        """
+        _, w_height = d.window_size()
+        if not w_height or w_height <= 0:
+            raise Exception("エミュレータの画面サイズを取得できませんでした。")
+        xml = d.dump_hierarchy(compressed=True)
+        self._update_target_display(xml)
+        box = find_chat_list_bounds(xml, self._target_display)
+        self._auto_chat_found = bool(box)
+        if box:
+            self.log(f"💬 音声ルームのチャット欄を見つけました。この中を見ます（Y {box[1]}〜{box[3]}px。範囲の選択は要りません）。")
+            return box[1], box[3], w_height
+        self.log("⏳ 音声ルームのチャット欄が見つかりません。ルームを開くと読み始めます。")
+        return 0, w_height, w_height
 
     def _log_active_keywords(self):
         """
@@ -5348,7 +5387,9 @@ class AutoReplyWorker:
         self._target_package_cache = (value, now)
         return value
 
-    def _extract_chat_texts(self, xml_dump, y_min, y_max):
+    def _extract_chat_texts(self, xml_dump, y_min, y_max, x_range=None):
+        # x_range=(左, 右) を渡すと左右でも絞る（範囲を選ばずに開始したとき、チャット欄の枠の左右。
+        # 上下だけだと、同じ高さにある右の席の番号や「ゲスト（N人）」まで拾う）。範囲を選んだときは上下だけ（今まで通り）
         # ⚠️ まず「対象アプリと同じディスプレイ」だけに絞る。
         # MuMuは複数画面を同時に動かし、ダンプには全部が入ってくる。
         # どれも同じ大きさなので座標が偶然重なり、絞らないと
@@ -5393,7 +5434,8 @@ class AutoReplyWorker:
                     continue
 
                 center_y = (top + bottom) / 2
-                if y_min <= center_y <= y_max:
+                in_x = x_range is None or x_range[0] <= (left + right) / 2 <= x_range[1]
+                if y_min <= center_y <= y_max and in_x:
                     chat_texts.append((t, center_y))
                 else:
                     out_of_bounds_texts.append(t)
@@ -5453,7 +5495,19 @@ class AutoReplyWorker:
             screen_width = 0
         min_width = screen_width * self.MIN_INPUT_WIDTH_RATIO
 
+        # GRAVITYの音声ルームの入力欄は、部品の名前(etText)で直接探す（2026-10-15）。
+        # ⚠️ 下の「下半分で『メッセージ』などの文字を含むもの」は、チャット欄の発言も拾う。チャット欄の部品は
+        #    入力欄より先に並ぶので、下の方に「メッセージください」のような発言があると、入力欄ではなくその発言を押していた
         for node in nodes:
+            r_match = self.re_resource.search(node)
+            b_match = self.re_bounds.search(node)
+            if r_match and b_match and r_match.group(1).endswith(f":id/{ROOM_INPUT_ID}"):
+                left, top, right, bottom = map(int, b_match.groups())
+                target_x, target_y = (left + right) / 2, (top + bottom) / 2
+                self.log(f"👆 音声ルームの入力欄({ROOM_INPUT_ID})をタップしました。")
+                break
+
+        for node in ([] if target_x else nodes):
             t_match = self.re_text.search(node)
             d_match = self.re_desc.search(node)
             b_match = self.re_bounds.search(node)
@@ -5925,12 +5979,19 @@ class AutoReplyWorker:
             self.log(f"❌ エミュレータ接続エラー: {e}")
             return
 
+        # 範囲を渡されなければ、GRAVITYの音声ルームのチャット欄の枠を監視範囲にする（範囲を選ばずに開始）
+        self._auto_range = screen_y1 is None
         try:
-            y_min_internal, y_max_internal, w_height = self._calculate_y_bounds(d, screen_y1, screen_y2)
+            if self._auto_range:
+                y_min_internal, y_max_internal, w_height = self._auto_chat_bounds(d)
+            else:
+                y_min_internal, y_max_internal, w_height = self._calculate_y_bounds(d, screen_y1, screen_y2)
         except Exception as e:
             self.log(f"❌ 監視範囲の計算に失敗しました: {e}")
             self.log("💡 エミュレータのウインドウが最小化・非表示になっていないか確認してください。")
             return
+        # 開始のときに「チャット欄が見つかりません」と出していれば、周回の中では繰り返さない
+        chat_missing_logged = self._auto_range and not self._auto_chat_found
 
         half_y = w_height / 2
 
@@ -5989,14 +6050,36 @@ class AutoReplyWorker:
                 # MuMuは複数画面を同時に動かすため、ここを間違えると
                 # 読み取りはできるのに操作だけ別の画面へ届く。
                 self._update_target_display(xml_dump)
+                # 範囲を選ばずに開始したときは、毎回チャット欄の枠を監視範囲にする（キーボードなどで位置が変わりうる）
+                chat_missing = False
+                x_range = None
+                if self._auto_range:
+                    chat_box = find_chat_list_bounds(xml_dump, self._target_display)
+                    if chat_box:
+                        y_min_internal, y_max_internal = chat_box[1], chat_box[3]
+                        x_range = (chat_box[0], chat_box[2])
+                    else:
+                        chat_missing = True
                 chat_texts, out_of_bounds_texts, nodes, all_nodes = self._extract_chat_texts(
-                    xml_dump, y_min_internal, y_max_internal)
+                    xml_dump, y_min_internal, y_max_internal, x_range)
 
                 # ダイアログはチャットを覆い隠すので、検知より先に片付ける。
                 # 押したら画面が変わるため、次の周回で取り直す。
                 if self._auto_dismiss_dialog(d, all_nodes, xml_dump):
                     time.sleep(0.6)
                     continue
+
+                # チャット欄が無い（ルームの画面でない・小さくしている）間は、何も検知せずに待つ。
+                # ⚠️ 前の枠のまま読むと、ホーム画面などの文字に反応してしまう
+                if chat_missing:
+                    if not chat_missing_logged:
+                        self.log("⏳ 音声ルームのチャット欄が見つかりません。ルームを開くと読み始めます。")
+                        chat_missing_logged = True
+                    time.sleep(0.5)
+                    continue
+                if chat_missing_logged:
+                    self.log(f"💬 チャット欄が見つかったので、読み始めます（Y {y_min_internal}〜{y_max_internal}px）。")
+                    chat_missing_logged = False
 
                 # 手入力送信の待ちがあれば、キーワード判定より先に送る。
                 # 人がいま送ろうとしている文を後回しにすると、会話の順序が入れ替わる。
@@ -6099,7 +6182,8 @@ class AutoReplyWorker:
 
                         if not matched_elements:
                             out_of_bounds_matched = [t for t in out_of_bounds_texts if trigger_word in t]
-                            if out_of_bounds_matched:
+                            # 範囲を選ばずに開始したときは、範囲の外＝チャット欄の外（席・名前・広告）。選び直す範囲は無い
+                            if out_of_bounds_matched and not self._auto_range:
                                 latest_out = out_of_bounds_matched[-1]
                                 if out_of_bounds_warned.get(trigger_word) != latest_out:
                                     self.log(f"⚠️ 【範囲外】で文字を検知しました:「{latest_out}」")
@@ -7193,6 +7277,13 @@ class App(ctk.CTk):
             command=self.start_monitoring
         )
         self.start_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        # GRAVITYの音声ルームなら、チャット欄の枠(rvMessages)を自動で監視範囲にする（2026-10-15）
+        self.start_auto_btn = ctk.CTkButton(
+            btn_frame, text="▶ チャット欄で自動開始", fg_color="#7a4fb5", hover_color="#5a3a86",
+            command=lambda: self.start_monitoring(auto=True)
+        )
+        self.start_auto_btn.pack(side="left", padx=5, expand=True, fill="x")
 
         self.start_prev_btn = ctk.CTkButton(
             btn_frame, text="▶ 前回の範囲で開始", fg_color="green", hover_color="darkgreen",
@@ -11710,7 +11801,7 @@ class App(ctk.CTk):
         self.append_log("🧹 ログの表示を消去しました。")
 
     # --- 監視制御 ---
-    def start_monitoring(self, use_last=False):
+    def start_monitoring(self, use_last=False, auto=False):
         # 停止直後はスレッドがまだ後片付け中のことがある。その状態で開始すると
         # 監視が二重に走って同じ返信が2回送られてしまうため、ここで弾く。
         if self.worker.is_running or self.worker.is_alive():
@@ -11720,6 +11811,11 @@ class App(ctk.CTk):
         if self.task_worker.is_running or self.task_worker.is_alive():
             self.append_log("⚠️ GRAVITYのタスク・ルーレットを実行中のため、監視を始められません。"
                             "終わるのを待つか「■ 中止」を押してください。")
+            return
+
+        if auto:
+            self.append_log("\n--- チャット欄で自動開始（範囲の選択なし） ---")
+            self._begin_monitoring(None)
             return
 
         if use_last and self.last_coords:
@@ -11754,14 +11850,20 @@ class App(ctk.CTk):
         self._begin_monitoring(coords)
 
     def _begin_monitoring(self, coords):
-        screen_x1, screen_y1, screen_x2, screen_y2 = coords
-        self.append_log(f"✅ 選択された画面座標: 左上({screen_x1}, {screen_y1}) -> 右下({screen_x2}, {screen_y2})")
+        """coords が None なら範囲を選ばずに開始する（GRAVITYの音声ルームのチャット欄の枠を監視範囲にする）"""
+        if coords is None:
+            screen_x1 = screen_y1 = screen_x2 = screen_y2 = None
+            self.append_log("✅ GRAVITYの音声ルームのチャット欄を自動で見つけて監視します。")
+        else:
+            screen_x1, screen_y1, screen_x2, screen_y2 = coords
+            self.append_log(f"✅ 選択された画面座標: 左上({screen_x1}, {screen_y1}) -> 右下({screen_x2}, {screen_y2})")
 
         if not self.worker.start(screen_x1, screen_y1, screen_x2, screen_y2):
             self.append_log("⚠️ 前回の監視がまだ終了していないため、開始できませんでした。")
             return
 
         self.start_btn.configure(state="disabled")
+        self.start_auto_btn.configure(state="disabled")
         self.start_prev_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self._set_manual_send_enabled(True)
@@ -11780,6 +11882,7 @@ class App(ctk.CTk):
             self.after(500, self._watch_worker_state)
         else:
             self.start_btn.configure(state="normal")
+            self.start_auto_btn.configure(state="normal")
             self.start_prev_btn.configure(state="normal" if self.last_coords else "disabled")
             self.stop_btn.configure(state="disabled")
             self._set_manual_send_enabled(False)
