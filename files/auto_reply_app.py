@@ -87,6 +87,11 @@ APP_ICON_FILE = "app_icon.ico"
 # タスクバーでの、このアプリの名札。⚠️ これを決めないと、.py で動かしたときに
 # タスクバーが「Python」の仲間として扱い、窓のアイコンではなく Python のアイコンを出す。
 APP_USER_MODEL_ID = "AutoReplyBot.App"
+# 画面に出るアプリの名前（2026-10-15 本人「自動返信ボットからグラ補助ツールに変更」）。
+# ⚠️ exe のファイル名（自動送信ボット.exe）は変えない。自動アップデートは「今動いている exe と同じ名前の exe」を
+#    zip の中から探して差し替えるので、変えると配布済みの古い版が更新できなくなる（本人と決定。RELEASE_README.md）。
+#    APP_USER_MODEL_ID も変えない（タスクバーに固定したものとの結び付きが切れる）
+APP_DISPLAY_NAME = "グラ補助ツール"
 
 
 def find_app_icon():
@@ -7132,7 +7137,7 @@ class App(ctk.CTk):
             except Exception:
                 pass
         super().__init__()
-        self.title(f"自動返信Bot アプリケーション  (v{APP_VERSION})")
+        self.title(f"{APP_DISPLAY_NAME}  (v{APP_VERSION})")
         self.geometry("800x650")
         ctk.set_appearance_mode("Dark")
         self._apply_window_icon(self)
