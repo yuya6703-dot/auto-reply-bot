@@ -8,10 +8,12 @@
    作った後に「残った文言」を必ず目で見ること。
 
 使い方:
-    python tests/make_fixture.py 元のダンプ.xml 保存する名前.xml [--name 元の名前=仮の名前 ...]
+    python tests/make_fixture.py 元のダンプ.xml 保存する名前.xml [--name 元の名前=仮の名前 ...] [--display 番号]
 
   --name は、名前で探す処理を試すために、特定の名前だけ仮の名前に置き換えて残すときに使う
   （例: 送り先と、それによく似た名前の関係を保ったまま、本当の名前は出さない）。
+  --display は、GRAVITYが画面2以外に出ていたときのダンプに使う。その画面の部品だけを残し、番号を2に付け替える
+  （テストのにせのMuMuは画面2の部品を読む。ディスプレイ番号は毎回変わる: 2 → 4 → 16 → 20 を実測）。
 """
 import os, re, sys
 import xml.etree.ElementTree as ET
@@ -55,11 +57,13 @@ NOTICE_TEMPLATES = [
 ]
 
 
-def make(src, dst, names):
+def make(src, dst, names, display=DISPLAY):
     root = ET.parse(src).getroot()
     for top in list(root):
-        if not (top.get("display-id") == DISPLAY and top.get("package") == PACKAGE):
+        if not (top.get("display-id") == display and top.get("package") == PACKAGE):
             root.remove(top)
+    for node in root.iter("node"):
+        node.set("display-id", DISPLAY)
     parent = {c: p for p in root.iter() for c in p}
     for node in list(root.iter("node")):
         # 当選表示は「〇〇が 永久フレーム たこはさみ をGET！」の形。
@@ -114,13 +118,17 @@ if __name__ == "__main__":
         print(__doc__)
         sys.exit(1)
     names = {}
+    display = DISPLAY
     rest = args[2:]
     while rest:
         if rest[0] == "--name" and len(rest) > 1 and "=" in rest[1]:
             original, replacement = rest[1].split("=", 1)
             names[original] = replacement
             rest = rest[2:]
+        elif rest[0] == "--display" and len(rest) > 1 and rest[1].isdigit():
+            display = rest[1]
+            rest = rest[2:]
         else:
             print(f"読めない引数: {rest[0]}")
             sys.exit(1)
-    make(args[0], args[1], names)
+    make(args[0], args[1], names, display)

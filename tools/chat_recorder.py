@@ -77,7 +77,7 @@ def main():
             xml = d.dump_hierarchy()
             display = reader._update_target_display(xml)
             component = A.parse_display_activity(dev.shell("dumpsys activity activities"), display)
-            if A.GRAVITY_VOICE_ROOM_HINT not in component.lower():
+            if not A.is_voice_room_screen(component):
                 if not waiting_shown:
                     print("⏸️ 音声ルームの画面ではないので、開くまで待っています...")
                     waiting_shown = True

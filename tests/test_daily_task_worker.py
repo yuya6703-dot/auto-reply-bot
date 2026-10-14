@@ -491,6 +491,76 @@ except A.TaskStop as e:
     check("止まる", "押してはいけない" in str(e), str(e))
 check("何も押していない", mu.inputs == [], mu.inputs)
 
+# ⚠️ 2026-10-14 実測: ルームを小さくすると、ホームではなくルームに入る前の画面に戻る
+#    （グループチャットの案内から入っていたので、グループチャットに戻った）
+SEARCH_SCREEN = (f'<hierarchy rotation="0"><node index="0" text="" resource-id="" class="android.widget.FrameLayout" '
+                 f'package="{GRAVITY}" content-desc="" clickable="false" bounds="[0,0][540,960]" display-id="2" />'
+                 '</hierarchy>')
+
+
+def room_entered_from(entry_screens, entry):
+    """ルームに entry から入っていた端末。小さくすると entry に戻る"""
+    screens = base_screens()
+    screens.update(entry_screens)
+    mu = FakeMuMu(screens, "room_guest")
+    wire_navigation(mu)
+    room_tap = mu.on_tap["room_guest"]
+    mu.on_tap["room_guest"] = lambda x, y: entry if room_tap(x, y) == "room_minimized" else room_tap(x, y)
+    return mu
+
+
+print("■ グループチャットから入ったルームで始めたら、小さくした後、戻るでホームへ移ってからこなす")
+w, db, logs = new_worker()
+mu = room_entered_from({"group_chat": [f"{CLS}.message.view.MsgDetailGroupActivity", fixture("group_chat.xml")]},
+                       "group_chat")
+mu.on_back["group_chat"] = "room_minimized"
+w._connect_to_emulator = lambda: mu
+notices = []
+w.notify_callback = lambda title, message: notices.append((title, message))
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("止まらずにルーレットまで回した", any("x300" in m for m in logs) and notices == [], (notices, logs[-4:]))
+check("グループチャットでは何も押していない（ルームの案内を押すと入室する）",
+      not any(s == "group_chat" for s, _, _ in mu.taps), mu.taps)
+check("グループチャットで押したのは戻るだけ",
+      any("keyevent 4" in c for c in mu.inputs), [c for c in mu.inputs if "keyevent" in c])
+check("ルームに入る前の画面に戻ったことをログに出す", any("ルームに入る前の画面" in m for m in logs), logs[:6])
+check("退出は押していない", not mu.exited_room)
+
+print("■ ルームの検索から入ったルーム: 1回目の戻るはキーボードを閉じるだけでも、続けて戻る")
+w, db, logs = new_worker()
+search_cls = f"{CLS}.metaverse.voiceroom.VoiceRoomSearchActivity"
+mu = room_entered_from({"room_search_kb": [search_cls, SEARCH_SCREEN], "room_search": [search_cls, SEARCH_SCREEN]},
+                       "room_search_kb")
+mu.on_back.update({"room_search_kb": "room_search", "room_search": "room_minimized"})
+w._connect_to_emulator = lambda: mu
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("ホームまで戻ってルーレットを回した", any("x300" in m for m in logs), logs[-4:])
+check("ルームの検索では何も押していない（ルームが並んでいる）",
+      not any(s.startswith("room_search") for s, _, _ in mu.taps), mu.taps)
+
+print("■ グループチャットの画面から始めても、戻るでホームへ移ってからこなす")
+w, db, logs = new_worker()
+screens = base_screens()
+screens["group_chat"] = [f"{CLS}.message.view.MsgDetailGroupActivity", fixture("group_chat.xml")]
+mu = FakeMuMu(screens, "group_chat")
+wire_navigation(mu)
+mu.on_back["group_chat"] = "mypage"
+w._connect_to_emulator = lambda: mu
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("ルーレットを回した", any("x300" in m for m in logs), logs[-4:])
+check("グループチャットでは何も押していない", not any(s == "group_chat" for s, _, _ in mu.taps), mu.taps)
+
+print("■ 小さくした後に知らない画面が出たら、戻るも押さずに止める")
+w, db, logs = new_worker()
+mu = room_entered_from({}, "ad")
+try:
+    w._minimize_voice_room_if_needed(mu)
+    w._go_main(mu, "tab_center")
+    check("止まる", False)
+except A.TaskStop as e:
+    check("止まる", "知らない画面" in str(e), str(e))
+check("押したのは「小さくする」だけ（広告の画面では戻るも押さない）", mu.inputs == ["input -d 2 tap 449 28"], mu.inputs)
+
 # ----------------------------------------------------------------------
 # 心のこもった「いいね」（本人の指示: 行の「チャレンジ」→ 一覧で普通のハートを押す）
 HEART_TITLE = "心のこもった「いいね」をする"

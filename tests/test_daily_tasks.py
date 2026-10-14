@@ -234,6 +234,22 @@ check("GRAVITYが開いていなければ空", A.parse_app_windows("Display #0 (
 check("呼び名: 本体", A.gravity_account_label("0") == "本体のGRAVITY")
 check("呼び名: 複製（名前つき）", A.gravity_account_label("10", "なまえ") == "複製のGRAVITY（u10）「なまえ」")
 
+print("■ 音声ルームの画面そのものか（「voiceroom」を含む別の画面と見分ける。2026-10-14 GRAVITY画面部品.md）")
+VR = "com.hiclub.android.gravity.metaverse.voiceroom"
+for cls in ("VoiceRoomActivity", "VoiceRoomType2Activity"):
+    check(f"{cls} はルーム", A.is_voice_room_screen(f"{GRAVITY}/{VR}.{cls}"))
+for cls in ("VoiceRoomSearchActivity", "VoiceRoomActivityActivity", "rank.VoiceRoomRankListActivity",
+            "VoiceRoomLotteryActivity", "VoiceRoomInfoActivity", "VoiceRoomNoticeActivity"):
+    check(f"{cls} はルームではない", not A.is_voice_room_screen(f"{GRAVITY}/{VR}.{cls}"))
+check("グループチャットは戻るだけしてよい",
+      A.is_back_only_screen(f"{GRAVITY}/com.hiclub.android.gravity.message.view.MsgDetailGroupActivity", GRAVITY))
+check("戻るだけの画面は、押してよい画面ではない", not A.is_known_task_screen(
+      f"{GRAVITY}/com.hiclub.android.gravity.message.view.MsgDetailGroupActivity", GRAVITY))
+check("ホームは戻るだけの画面ではない（押してよい画面）",
+      not A.is_back_only_screen(f"{GRAVITY}/com.hiclub.android.gravity.MainActivity", GRAVITY))
+check("別のアプリは戻るだけの画面ではない",
+      not A.is_back_only_screen("other.app/com.hiclub.android.gravity.message.view.MsgDetailGroupActivity", GRAVITY))
+
 print("■ マイページの自分の名前とID")
 check("名前とIDを読む", A.parse_my_account(fixture("mypage.xml"), display=2) == ("伏せ字1", "伏せ字3"),
       A.parse_my_account(fixture("mypage.xml"), display=2))

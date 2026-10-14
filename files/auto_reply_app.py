@@ -935,8 +935,34 @@ def parse_my_account(xml_dump, display=None):
     return name, custom_id
 
 
-# GRAVITYの音声ルーム。タスクの途中では押さない（勝手にルームを出ないため）。止めるときの案内を変えるのに使う
-GRAVITY_VOICE_ROOM_HINT = "voiceroom"
+# GRAVITYの音声ルームの画面そのもの（実測: ゲストの画面 VoiceRoomActivity、VoiceRoomType2Activity）。
+# タスクの途中では押さない（勝手にルームを出ないため）。止めるときの案内を変えるのに使う。
+# ⚠️ 「voiceroom」を含むかで見分けてはいけない。ルームの検索・ランキング・イベント・ガチャも
+#    metaverse.voiceroom の下にある（2026-10-14 GRAVITY画面部品.md）
+RE_VOICE_ROOM_SCREEN = re.compile(r"\.VoiceRoom(Type\d+)?Activity$")
+
+
+def is_voice_room_screen(component):
+    """前面の画面「パッケージ/クラス」が、音声ルームの画面そのものか"""
+    return bool(RE_VOICE_ROOM_SCREEN.search(component or ""))
+
+
+# 「戻る」を押すだけならしてよい画面（押してよい画面 TASK_KNOWN_ACTIVITIES とは別）。
+# ⚠️ 音声ルームを小さくすると、ホームではなく**ルームに入る前の画面**に戻る（2026-10-14 実測:
+#    グループチャットの案内から入ったので MsgDetailGroupActivity に戻った）。ルームに入れる画面のうち、実物を見たものを並べる。
+#    グループチャットにはルームの案内（押すと入室）があり、検索やランキングにもルームが並ぶので、押してよい画面には入れない
+TASK_BACK_ONLY_ACTIVITIES = frozenset({
+    "com.hiclub.android.gravity.message.view.MsgDetailGroupActivity",
+    "com.hiclub.android.gravity.metaverse.voiceroom.VoiceRoomSearchActivity",
+    "com.hiclub.android.gravity.metaverse.voiceroom.VoiceRoomActivityActivity",
+    "com.hiclub.android.gravity.metaverse.voiceroom.rank.VoiceRoomRankListActivity",
+})
+
+
+def is_back_only_screen(component, package):
+    """前面の画面が、戻るだけを押してよい画面か"""
+    pkg, _, cls = (component or "").partition("/")
+    return bool(package) and pkg == package and cls in TASK_BACK_ONLY_ACTIVITIES
 
 # デイリータスクの名前（Android版の表示そのまま）→ ボットがどう扱うか
 TASK_KIND_POST = "post"
@@ -6223,7 +6249,7 @@ class GravityTaskWorker(AutoReplyWorker):
         if is_known_task_screen(component, self._monitor_target_package()):
             return
         cls = component.rsplit("/", 1)[-1] if component else ""
-        if GRAVITY_VOICE_ROOM_HINT in cls.lower():
+        if is_voice_room_screen(component):
             # 始めるときの音声ルームは _minimize_voice_room_if_needed が小さくする。ここに来るのは途中で開いたとき
             raise TaskStop("途中でGRAVITYが音声ルームの画面になりました。勝手にルームを触らないよう、"
                            "何も押さずに止めました。")
@@ -6238,11 +6264,14 @@ class GravityTaskWorker(AutoReplyWorker):
         ⚠️ 「小さくする」のすぐ右隣が退出(ivExit)。押す位置が退出の枠（と余白）に入るなら押さずに止める。
         ⚠️ 音声ルームは押してよい画面に入れていない（タスクの途中で勝手にルームを触らないため）。
            この1回だけは _tap を通さず、ここで個別に確かめてから押す。
+        ⚠️ 小さくすると、ルームに入る前の画面に戻る（ホームとは限らない。2026-10-14 実測: グループチャット）。
+           その画面が戻るだけ押してよい画面(TASK_BACK_ONLY_ACTIVITIES)なら、ここでは待つのをやめ、
+           ホームへは続く _go_main が戻るで移る。
         """
         self._minimized_room = False
         xml, component = self._read_screen(d)
         package, _, cls = component.partition("/")
-        if GRAVITY_VOICE_ROOM_HINT not in cls.lower() or package != self._monitor_target_package():
+        if not is_voice_room_screen(component) or package != self._monitor_target_package():
             return
         boxes = find_by_id(xml, "ivZoomout", self._target_display)
         if len(boxes) != 1:
@@ -6262,10 +6291,15 @@ class GravityTaskWorker(AutoReplyWorker):
             _, component = self._read_screen(d)
             if component.endswith(self.MAIN_ACTIVITY):
                 return
-            if GRAVITY_VOICE_ROOM_HINT not in component.lower():
+            if not is_voice_room_screen(component):
+                if is_back_only_screen(component, self._monitor_target_package()):
+                    self.log(f"   ↩️ ルームに入る前の画面（{component.rsplit('.', 1)[-1]}）に戻りました。"
+                             f"戻るでホーム画面へ移ります。")
+                    return
                 self._require_known_screen(component)
+                return
             if time.time() >= deadline:
-                raise TaskStop("音声ルームを小さくしても、ホーム画面に移りませんでした。")
+                raise TaskStop("音声ルームを小さくしても、ルームの画面のままでした。")
 
     def _wait_for(self, d, condition, what, timeout=None):
         """condition(xml, component) が真になるまで読み直す。知らない画面が出たら、その場で止める"""
@@ -6350,6 +6384,13 @@ class GravityTaskWorker(AutoReplyWorker):
         """下のタブ（tab_feed=ホーム / tab_center=マイページ）を開く。ほかの画面にいれば戻るで戻る"""
         for _ in range(self.MAX_BACKS + 1):
             xml, component = self._read_screen(d)
+            if is_back_only_screen(component, self._monitor_target_package()):
+                # 戻るだけを押してよい画面（グループチャットなど）。⚠️ 押してよい画面ではないので、
+                # 守りのある _keyevent ではなく、ここで確かめた上で戻るだけを送る
+                if not AutoReplyWorker._keyevent(self, d, ANDROID_KEYCODE_BACK):
+                    raise TaskStop("戻る操作を送れませんでした。")
+                time.sleep(1.0)
+                continue
             self._require_known_screen(component)
             if component.endswith(self.MAIN_ACTIVITY):
                 break
