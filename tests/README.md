@@ -16,6 +16,7 @@
 | `test_gui_keyword_target.py` | 不要 | キーワード設定タブの「対象」の欄（選ぶと検知ワードの欄がどう変わるか、保存・選択・一覧の印）。画面が一瞬出る |
 | `test_agent_api_keys.py` | 不要 | AI API のキーの保存（DPAPI の暗号文だけが残る、DB・WAL・ログ・error_log.txt にキーが出ない、壊れた暗号文で止まらない、環境変数の優先、伏せ字、提供元の一覧、模擬の接続確認） |
 | `test_gui_ai_api.py` | 不要 | 設定タブの「🤖 AI API」区画（隠す・👁・保存・削除・接続確認・提供元の切り替え）。ボットがキーをログへ渡していないことも確かめる。画面が一瞬出る |
+| `test_agent_speech.py` | 不要 | 音声（出す方。`files/agent/speech/`）: AivisSpeech・VOICEVOX のアダプター（にせの HTTP）、途中で止められる再生（にせの sounddevice。10秒の音を0.2秒以内に止める）、読み上げの待ち行列（順番・失敗しても次へ・同時に鳴らない・優先度・上限・終了）、App の読み上げ・「⏹ 止める」・スマホの解析・アラーム。**音は鳴らない** |
 
 ## 実行
 
@@ -30,6 +31,7 @@ python tests/test_keyword_targets.py
 python tests/test_gui_keyword_target.py
 python tests/test_agent_api_keys.py
 python tests/test_gui_ai_api.py
+python tests/test_agent_speech.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方

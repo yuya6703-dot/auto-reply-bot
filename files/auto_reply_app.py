@@ -73,6 +73,14 @@ from adbutils import adb
 from agent.api_keys import (ApiKeyStore, SecretStoreError, validate_api_key, redact_secrets,
                             STATUS_SAVED, STATUS_ENV, STATUS_UNREADABLE)
 from agent.llm import PROVIDERS, DEFAULT_PROVIDER_ID, provider_by_label, provider_by_id, PingResult
+# 音声（出す方）。段階2で、合成・再生・読み上げの待ち行列をここへ移した（設計書/09 の S2）
+from agent.cancel import CancelToken, NEVER
+from agent.speech.audio import apply_volume
+from agent.speech.voicevox_compat import VoicevoxCompatibleEngine
+from agent.speech.playback import AudioPlayer
+from agent.speech.service import (SpeechService, SpeechJob,
+                                  EVENT_FAILED as SPEECH_EVENT_FAILED,
+                                  EVENT_QUEUE_CHANGED as SPEECH_EVENT_QUEUE_CHANGED)
 
 # ====================================================
 # 📁 パス設定
@@ -7154,6 +7162,25 @@ class App(ctk.CTk):
         self.db = DatabaseManager()
         # AI API のキー（DPAPI で暗号化して settings 表へ。設計書/05 の 3章）
         self.api_keys = ApiKeyStore(self.db)
+        # 音声（段階2）。⚠️ 画面より先に作る（スマホ連携・クリップボードが読み上げを頼むことがあるため）
+        # 宛先・声・音量は、合成・再生する時点で getter から読む（ワーカーのスレッドからは DB の値になる）
+        self.tts_engines = {
+            TTS_ENGINE_VOICEVOX: VoicevoxCompatibleEngine(
+                TTS_ENGINE_VOICEVOX, self.get_voicevox_url, cache_size=MAX_SPEECH_WAV_CACHE),
+            TTS_ENGINE_AIVISSPEECH: VoicevoxCompatibleEngine(
+                TTS_ENGINE_AIVISSPEECH, self.get_aivisspeech_url, cache_size=MAX_SPEECH_WAV_CACHE),
+        }
+        self.audio_player = AudioPlayer(
+            sounddevice, winsound, self._resolve_output_device_index, self._default_output_device_index,
+            on_device_failed=self._warn_output_device_once)
+        self.speech_service = SpeechService(
+            synthesize=self.synthesize_voice_wav,
+            play=lambda wav, volume, cancel: self.audio_player.play(
+                wav, volume, self.get_audio_output_device(), cancel),
+            default_voice=self.get_speech_speaker_id,
+            default_volume=self.get_speech_volume,
+            on_event=self._on_speech_event,
+            max_queue=MAX_SPEECH_QUEUE_SIZE)
         self.worker = AutoReplyWorker(self.db, self.append_log)
         # GRAVITYのタスク・ルーレット。⚠️ 監視(self.worker)と同時に動かさない（start_* の両方で弾く）
         self.task_worker = GravityTaskWorker(self.db, self.append_log, self._notify_gravity_job)
@@ -8668,35 +8695,8 @@ class App(ctk.CTk):
             return 50
 
     def _apply_volume_to_wav(self, wav_data, volume_percent):
-        """
-        WAVデータ(bytes)の音量を変更したWAVデータを返す。
-        16bitモノラル/ステレオのWAVに対応。それ以外の形式やエラー時は元データをそのまま返す。
-        """
-        volume_percent = max(0, min(100, int(volume_percent)))
-        if volume_percent == 100:
-            return wav_data
-        try:
-            with wave.open(io.BytesIO(wav_data), 'rb') as src:
-                params = src.getparams()
-                frames = src.readframes(src.getnframes())
-            if params.sampwidth != 2:
-                return wav_data  # 16bit以外は加工せずそのまま鳴らす
-
-            gain = (volume_percent / 100.0) ** 2
-            samples = array.array('h')
-            samples.frombytes(frames)
-            for i, value in enumerate(samples):
-                samples[i] = int(max(-32768, min(32767, value * gain)))
-
-            buffer = io.BytesIO()
-            with wave.open(buffer, 'wb') as dst:
-                dst.setnchannels(params.nchannels)
-                dst.setsampwidth(params.sampwidth)
-                dst.setframerate(params.framerate)
-                dst.writeframes(samples.tobytes())
-            return buffer.getvalue()
-        except Exception:
-            return wav_data
+        """WAVデータ(bytes)の音量を変更したWAVデータを返す（中身は agent/speech/audio.py に移した）"""
+        return apply_volume(wav_data, volume_percent)
 
     # --- 各アラーム設定の取得（UIが未構築でもDBから読めるようにしておく） ---
     def get_alarm_sound_type(self):
@@ -8778,30 +8778,17 @@ class App(ctk.CTk):
         return self.db.get_setting("alarm_sound_file", "") or ""
 
     # --- VOICEVOX（ずんだもん音声）連携 ---
+    # ⚠️ HTTP の中身・時間制限・合成結果の覚えは agent/speech/voicevox_compat.py に移した（段階2）。
+    #    ここは呼び出し口だけ残している（アクセント解析・話者一覧の取得・タイマーなどが呼ぶ）
     def _voicevox_request(self, path, method="GET", data=None, timeout=30):
-        url = f"{self.get_voicevox_url()}{path}"
-        req = urllib.request.Request(url, data=data, method=method)
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            return res.read()
+        return self.tts_engines[TTS_ENGINE_VOICEVOX].request(path, method=method, data=data, timeout=timeout)
 
     def fetch_voicevox_speakers(self):
         """
         VOICEVOXエンジンから全キャラのスタイル一覧を {キャラ名: {スタイル名: 話者ID}} で返す。
         接続できない場合は例外を投げる（呼び出し側でメッセージ表示）。
         """
-        raw = self._voicevox_request("/speakers", timeout=15)
-        speakers = json.loads(raw.decode("utf-8"))
-        result = {}
-        for speaker in speakers:
-            name = (speaker.get("name") or "").strip()
-            styles = {s["name"]: s["id"] for s in speaker.get("styles", []) if "id" in s}
-            if name and styles:
-                result[name] = styles
-        if not result:
-            raise RuntimeError("エンジンから音声が1つも見つかりませんでした。")
-        return result
+        return self.tts_engines[TTS_ENGINE_VOICEVOX].fetch_speakers()
 
     def get_voicevox_speakers(self):
         """保存済みのキャラ一覧を返す。まだ取得していなければ既定値（ずんだもんのみ）。"""
@@ -8845,29 +8832,9 @@ class App(ctk.CTk):
         ⚠️ 保持件数に上限を設けている。アラームだけで使っていた頃は決まった文しか
         通らなかったが、読み上げ機能では貼り付け・クリップボード・スマホから
         いくらでも違う文が流れてくる。WAVは数秒でも100KB前後あるため、
-        上限なしだと長時間の使用でメモリを際限なく食う。
+        上限なしだと長時間の使用でメモリを際限なく食う。（覚えは VoicevoxCompatibleEngine が持つ）
         """
-        cache_key = (self.get_voicevox_url(), speaker_id, text)
-        cache = getattr(self, "_zundamon_wav_cache", None)
-        if cache is None:
-            cache = self._zundamon_wav_cache = {}
-        if cache_key in cache:
-            return cache[cache_key]
-
-        query_path = f"/audio_query?text={urllib.parse.quote(text)}&speaker={speaker_id}"
-        query_json = self._voicevox_request(query_path, method="POST", data=b"")
-        wav_data = self._voicevox_request(
-            f"/synthesis?speaker={speaker_id}", method="POST", data=query_json, timeout=60
-        )
-
-        # 古いものから捨てる（dictは挿入順を保つのでそのまま先頭が最古）
-        while len(cache) >= MAX_SPEECH_WAV_CACHE:
-            try:
-                del cache[next(iter(cache))]
-            except (StopIteration, KeyError, RuntimeError):
-                break   # 別スレッドが同時に触った場合は次回に任せる
-        cache[cache_key] = wav_data
-        return wav_data
+        return self.tts_engines[TTS_ENGINE_VOICEVOX].synthesize(text, speaker_id)
 
     # --- AivisSpeech連携 ---
     # ⚠️ AivisSpeechはVOICEVOXと同じAPI形式（/speakers, /audio_query, /synthesis）の
@@ -8881,26 +8848,11 @@ class App(ctk.CTk):
         return (self.db.get_setting("aivisspeech_url", DEFAULT_AIVISSPEECH_URL) or DEFAULT_AIVISSPEECH_URL).rstrip("/")
 
     def _aivisspeech_request(self, path, method="GET", data=None, timeout=30):
-        url = f"{self.get_aivisspeech_url()}{path}"
-        req = urllib.request.Request(url, data=data, method=method)
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            return res.read()
+        return self.tts_engines[TTS_ENGINE_AIVISSPEECH].request(path, method=method, data=data, timeout=timeout)
 
     def fetch_aivisspeech_speakers(self):
         """AivisSpeechエンジンから全キャラのスタイル一覧を {キャラ名: {スタイル名: 話者ID}} で返す。"""
-        raw = self._aivisspeech_request("/speakers", timeout=15)
-        speakers = json.loads(raw.decode("utf-8"))
-        result = {}
-        for speaker in speakers:
-            name = (speaker.get("name") or "").strip()
-            styles = {s["name"]: s["id"] for s in speaker.get("styles", []) if "id" in s}
-            if name and styles:
-                result[name] = styles
-        if not result:
-            raise RuntimeError("エンジンから音声が1つも見つかりませんでした。")
-        return result
+        return self.tts_engines[TTS_ENGINE_AIVISSPEECH].fetch_speakers()
 
     def get_aivisspeech_speakers(self):
         """
@@ -8931,26 +8883,7 @@ class App(ctk.CTk):
 
     def synthesize_aivisspeech_wav(self, text, speaker_id):
         """AivisSpeechで読み上げ音声を合成してWAVデータ(bytes)を返す。挙動はVOICEVOX版と同じ。"""
-        cache_key = (self.get_aivisspeech_url(), speaker_id, text)
-        cache = getattr(self, "_aivisspeech_wav_cache", None)
-        if cache is None:
-            cache = self._aivisspeech_wav_cache = {}
-        if cache_key in cache:
-            return cache[cache_key]
-
-        query_path = f"/audio_query?text={urllib.parse.quote(text)}&speaker={speaker_id}"
-        query_json = self._aivisspeech_request(query_path, method="POST", data=b"")
-        wav_data = self._aivisspeech_request(
-            f"/synthesis?speaker={speaker_id}", method="POST", data=query_json, timeout=60
-        )
-
-        while len(cache) >= MAX_SPEECH_WAV_CACHE:
-            try:
-                del cache[next(iter(cache))]
-            except (StopIteration, KeyError, RuntimeError):
-                break
-        cache[cache_key] = wav_data
-        return wav_data
+        return self.tts_engines[TTS_ENGINE_AIVISSPEECH].synthesize(text, speaker_id)
 
     # --- VOICEVOX / AivisSpeech をまとめて扱う層 ---
     # ⚠️ 話者の選択は "engine:話者ID" の文字列（例: "voicevox:3"）で表す。
@@ -9081,64 +9014,31 @@ class App(ctk.CTk):
             data=json.dumps(query).encode("utf-8"), timeout=60)
 
     # --- 再生 ---
-    def _play_wav_bytes(self, wav_data, volume_percent):
+    def _play_wav_bytes(self, wav_data, volume_percent, cancel=NEVER):
         """
-        WAVデータを鳴らす。出力デバイスが選ばれていればそこへ、
-        選ばれていなければWindowsの既定デバイスへ流す。
+        WAVデータを鳴らす（鳴り終わるか、cancel で止められるまで戻らない）。出力デバイスが選ばれていればそこへ、
+        選ばれていなければWindowsの既定デバイスへ流す。アラーム・試聴が使う。
+        読み上げは音声サービス（self.speech_service）を通す。
+        ⚠️ 中身は agent/speech/playback.py の AudioPlayer に移した（段階2。途中で止められる作り）
         """
-        if not wav_data:
-            return False
+        return self.audio_player.play(wav_data, volume_percent, self.get_audio_output_device(), cancel)
 
-        device = self.get_audio_output_device()
-        if device:
-            if self._play_wav_to_device(wav_data, volume_percent, device):
-                return True
-            # 選んだデバイスで鳴らせなかった場合は、黙って無音にせず既定へ落とす。
-            # （デバイスを抜いた・名前が変わった等でも、とりあえず音は出る）
-            self._warn_output_device_once(device)
-
-        if winsound is None:
-            return False
-        try:
-            winsound.PlaySound(self._apply_volume_to_wav(wav_data, volume_percent), winsound.SND_MEMORY)
-            return True
-        except Exception:
-            return False
-
-    def _play_wav_to_device(self, wav_data, volume_percent, device_name):
+    def _default_output_device_index(self):
         """
-        指定した出力デバイスへWAVを流す。鳴らせたらTrue。
-
-        ⚠️ 書き込んだだけでは再生は終わらない。
-        RawOutputStream.write() は再生完了を待たずに返る（実測: 4.2秒の音声で0.04秒）。
-        そのまま閉じると途中で切れるため、音の長さぶん待ってから閉じること。
+        MME の既定の出力デバイスの番号（無ければ None）。
+        出力先が「既定のデバイス」のときも、止められる再生（sounddevice）で鳴らすために使う。
+        ⚠️ 既定のホストAPIの既定ではなく、MME の既定を引く（DirectSound・WASAPI は使えない。下の AUDIO_HOST_API）
         """
         if sounddevice is None:
-            return False
-        index = self._resolve_output_device_index(device_name)
-        if index is None:
-            return False
+            return None
         try:
-            adjusted = self._apply_volume_to_wav(wav_data, volume_percent)
-            with wave.open(io.BytesIO(adjusted), "rb") as w:
-                channels, sampwidth, framerate = w.getnchannels(), w.getsampwidth(), w.getframerate()
-                frame_count = w.getnframes()
-                frames = w.readframes(frame_count)
-            if sampwidth != 2 or not frames:
-                return False        # 16bit以外は扱わない（winsound側に任せる）
-
-            stream = sounddevice.RawOutputStream(
-                samplerate=framerate, channels=channels, dtype="int16", device=index)
-            try:
-                stream.start()
-                stream.write(frames)
-                time.sleep(frame_count / float(framerate) + 0.2)
-            finally:
-                stream.stop()
-                stream.close()
-            return True
+            for api in sounddevice.query_hostapis():
+                if api.get("name") == self.AUDIO_HOST_API:
+                    index = api.get("default_output_device", -1)
+                    return index if isinstance(index, int) and index >= 0 else None
         except Exception:
-            return False
+            return None
+        return None
 
     def _warn_output_device_once(self, device_name):
         """出力デバイスで鳴らせなかったことを、同じ相手につき1度だけ知らせる"""
@@ -9432,11 +9332,13 @@ class App(ctk.CTk):
 
         return None, None  # ビープ音
 
-    def _play_alarm_once(self, wav_data, volume_percent):
-        """用意済みのWAV（無ければビープ音）を1回鳴らす"""
+    def _play_alarm_once(self, wav_data, volume_percent, cancel=NEVER):
+        """用意済みのWAV（無ければビープ音）を1回鳴らす。cancel で途中で止まる（ビープ音は短いので止めない）"""
         if wav_data:
-            if self._play_wav_bytes(wav_data, volume_percent):
+            if self._play_wav_bytes(wav_data, volume_percent, cancel):
                 return True
+        if cancel.cancelled:
+            return True
         return self._play_beep_once(volume_percent)
 
     def test_alarm_sound(self):
@@ -9457,6 +9359,10 @@ class App(ctk.CTk):
     def _trigger_alarm(self):
         """タイマー終了時にアラーム音を鳴らし、確認ダイアログを表示する"""
         self.alarm_stop_flag = False
+        # OK を押したら、鳴っている途中の音も止める（段階2より前は最後まで鳴ってから止まっていた）。
+        # ⚠️ アラームは読み上げの待ち行列には入れない。読み上げが詰まっていても時間どおりに鳴らすため。
+        #    読み上げの「⏹ 止める」でも止まらない（止めるのはこのダイアログの OK）
+        alarm_cancel = CancelToken()
 
         if self.timer_sound_enabled_var.get() and winsound is not None:
             volume = self.get_alarm_volume()
@@ -9467,7 +9373,7 @@ class App(ctk.CTk):
                 if error:
                     self.append_log(f"⚠️ {error}")
                 while not self.alarm_stop_flag:
-                    if not self._play_alarm_once(wav_data, volume):
+                    if not self._play_alarm_once(wav_data, volume, alarm_cancel):
                         break
                     time.sleep(0.3)
 
@@ -9489,6 +9395,7 @@ class App(ctk.CTk):
 
             def on_ok():
                 self.alarm_stop_flag = True
+                alarm_cancel.cancel()
                 dialog.destroy()
 
             ctk.CTkButton(dialog, text="OK", command=on_ok, width=100).pack(pady=5)
@@ -9653,9 +9560,7 @@ class App(ctk.CTk):
     # 🗣️ 読み上げタブ
     # ====================================================
     def build_speech_tab(self):
-        self._speech_queue = queue.Queue(maxsize=MAX_SPEECH_QUEUE_SIZE)
-        self._speech_thread = None
-        self._speech_thread_lock = threading.Lock()
+        # 読み上げの待ち行列とスレッドは音声サービス（self.speech_service。__init__ で作る）が持つ
         self._speech_history = []
         self._speech_phrases_cache = []
         self._clipboard_last_text = None
@@ -9800,8 +9705,15 @@ class App(ctk.CTk):
                       fg_color="gray", hover_color="#444444",
                       command=lambda: self.speech_textbox.delete("1.0", tk.END)).pack(side="left", padx=5)
 
-        self.speech_queue_label = ctk.CTkLabel(frame, text="読み上げ待ち: なし", text_color="gray70")
-        self.speech_queue_label.pack(anchor="w", pady=(0, 10))
+        queue_row = ctk.CTkFrame(frame, fg_color="transparent")
+        queue_row.pack(anchor="w", fill="x", pady=(0, 10))
+        self.speech_queue_label = ctk.CTkLabel(queue_row, text="読み上げ待ち: なし", text_color="gray70")
+        self.speech_queue_label.pack(side="left")
+        # 今の読み上げを途中で止め、待っている分も捨てる（アラーム・試聴は別の経路なので止まらない）
+        self.speech_stop_btn = ctk.CTkButton(queue_row, text="⏹ 止める", width=90,
+                                             fg_color="#8B0000", hover_color="#5C0000",
+                                             command=self.stop_speech)
+        self.speech_stop_btn.pack(side="left", padx=(12, 0))
 
         self.build_speech_history_section(frame)
         self.build_speech_phrase_section(frame)
@@ -10384,7 +10296,7 @@ class App(ctk.CTk):
         self.db.save_setting("voicevox_speakers", json.dumps(speakers, ensure_ascii=False))
         # 合成結果のキャッシュは話者IDごとなので捨てなくてよいが、
         # スタイル構成が変わった可能性があるため念のため空にする
-        self._zundamon_wav_cache = {}
+        self.tts_engines[TTS_ENGINE_VOICEVOX].clear_cache()
         self._refresh_voice_dropdowns()
 
         total_styles = sum(len(v) for v in speakers.values())
@@ -10399,7 +10311,7 @@ class App(ctk.CTk):
         """取得したAivisSpeechのキャラ一覧を保存し、両方のプルダウンに反映する"""
         self._aivisspeech_speakers = speakers
         self.db.save_setting("aivisspeech_speakers", json.dumps(speakers, ensure_ascii=False))
-        self._aivisspeech_wav_cache = {}
+        self.tts_engines[TTS_ENGINE_AIVISSPEECH].clear_cache()
         self._refresh_voice_dropdowns()
 
         total_styles = sum(len(v) for v in speakers.values())
@@ -10483,25 +10395,6 @@ class App(ctk.CTk):
     # ====================================================
     # 🗣️ 読み上げ（ずんだもん）
     # ====================================================
-    def _ensure_speech_worker(self):
-        """
-        読み上げ専用のワーカースレッドを（まだ無ければ）起こす。
-
-        貼り付け欄・クリップボード・スマホの3系統から同時に要求が来るため、
-        1本のキューに集約して順番に処理する。winsoundの再生は終わるまでブロックするので、
-        ここを通さずに各所から直接鳴らすと音が重なったり、UIが固まったりする。
-
-        ⚠️ スマホ連携のサーバーはリクエストごとに別スレッドで動くため、この関数は
-        複数スレッドから同時に呼ばれうる。ロックなしだと「まだ無い」と判断した2本が
-        それぞれワーカーを起こし、同じキューを2本で食い合って音が重なってしまう。
-        （＝キューで直列化した意味がなくなる）
-        """
-        with self._speech_thread_lock:
-            if self._speech_thread is not None and self._speech_thread.is_alive():
-                return
-            self._speech_thread = threading.Thread(target=self._speech_worker, daemon=True)
-            self._speech_thread.start()
-
     def _post_to_ui(self, callback):
         """
         ワーカースレッドからUIスレッドへ処理を渡す。
@@ -10578,10 +10471,9 @@ class App(ctk.CTk):
             return False
         text = text[:MAX_SPEECH_TEXT_LENGTH]
 
-        self._ensure_speech_worker()
-        try:
-            self._speech_queue.put_nowait((text, source))
-        except queue.Full:
+        # 貼り付け欄・クリップボード・スマホの3系統から同時に来るので、音声サービスの1本の待ち行列で順番に喋る。
+        # 声と音量は「喋る時点」の読み上げ用の設定を読む（アラームとは別の声・音量）
+        if not self.speech_service.enqueue(SpeechJob(text=text, source=source)):
             # 連打や誤送信で延々と喋り続けないよう、溢れた分は捨てる
             self._post_to_ui(lambda: self.append_log("⚠️ 読み上げの待ち行列が一杯のため、1件を破棄しました。"))
             return False
@@ -10589,40 +10481,35 @@ class App(ctk.CTk):
         label = f"[{source}] " if source else ""
         self._post_to_ui(lambda: self.append_log(f"🗣️ 読み上げ: {label}「{text}」"))
         self._post_to_ui(lambda: self._add_speech_history(text))
-        self._post_to_ui(self._refresh_speech_queue_label)
         return True
 
-    def _speech_worker(self):
+    def _on_speech_event(self, kind, job, detail):
         """
-        キューから1件ずつ取り出して、合成→再生を最後まで行う。
-        このスレッドが死ぬと以後まったく喋らなくなるため、
-        1件の失敗が全体を巻き込まないよう、必ず握りつぶして次へ進む。
+        音声サービスからの知らせ。⚠️ 音声サービスのスレッドから呼ばれるので、画面には伝言板を通して触る。
         """
-        while True:
-            text, _source = self._speech_queue.get()
-            voice_selector = self.get_speech_speaker_id()
-            try:
-                # 読み上げはアラームとは別の声・音量を使う
-                wav_data = self.synthesize_voice_wav(text, voice_selector)
-                self._play_wav_bytes(wav_data, self.get_speech_volume())
-            except Exception as e:
-                # エンジン未起動などで失敗しても、ワーカーごと止めてはいけない
-                engine, _ = self._split_voice_selector(voice_selector)
-                message = (
-                    f"⚠️ 読み上げに失敗しました（{e}）。"
-                    f"{TTS_ENGINES[engine]['label']}が起動しているか確認してください。"
-                )
-                self._post_to_ui(lambda m=message: self.append_log(m))
-            finally:
-                # ここで例外が漏れるとワーカーごと止まり、以後まったく喋らなくなる
-                try:
-                    self._speech_queue.task_done()
-                except Exception:
-                    pass
-                self._post_to_ui(self._refresh_speech_queue_label)
+        if kind == SPEECH_EVENT_QUEUE_CHANGED:
+            self._post_to_ui(self._refresh_speech_queue_label)
+        elif kind == SPEECH_EVENT_FAILED:
+            # エンジン未起動などで失敗しても、音声サービスは次の用件へ進む（以前のワーカーと同じ）
+            engine, _ = self._split_voice_selector(job.voice or self.get_speech_speaker_id())
+            message = (
+                f"⚠️ 読み上げに失敗しました（{detail}）。"
+                f"{TTS_ENGINES[engine]['label']}が起動しているか確認してください。"
+            )
+            self._post_to_ui(lambda m=message: self.append_log(m))
+
+    def stop_speech(self):
+        """「⏹ 止める」: 今の読み上げを途中で止め、待っている分も捨てる"""
+        busy = self.speech_service.is_busy()
+        dropped = self.speech_service.stop_all()
+        if not busy and not dropped:
+            self.append_log("⏹ 止める読み上げはありません。")
+            return
+        self.append_log(f"⏹ 読み上げを止めました（待っていた{dropped}件も取り消し）。" if dropped
+                        else "⏹ 読み上げを止めました。")
 
     def _refresh_speech_queue_label(self):
-        waiting = self._speech_queue.qsize()
+        waiting = self.speech_service.pending_count()
         self.speech_queue_label.configure(
             text=f"読み上げ待ち: {waiting}件" if waiting else "読み上げ待ち: なし"
         )
@@ -11044,8 +10931,8 @@ class App(ctk.CTk):
         """
         スマホで編集されたアクセントのまま喋らせる。
 
-        読み上げキュー(request_speech)は「文字から合成する」作りなので通せない。
-        ここは編集済みクエリからWAVを作り、同じ再生経路に流す。
+        request_speech は「文字から合成する」ので、ここは編集済みクエリからWAVを作ってから、
+        合成済みの音として同じ待ち行列に入れる（ほかの読み上げと重ならず、「⏹ 止める」で止まる）。
         """
         selector = self.get_speech_speaker_id()
         try:
@@ -11057,10 +10944,11 @@ class App(ctk.CTk):
             self._post_to_ui(lambda: self.append_log(f"⚠️ スマホの解析: {reason}"))
             return False, reason
 
-        volume = self.get_speech_volume()
-        # 再生は音が鳴り終わるまで戻らないため、スマホを待たせないよう別スレッドで行う
-        threading.Thread(
-            target=lambda: self._play_wav_bytes(wav_data, volume), daemon=True).start()
+        # 待ち行列に入れるだけなので、鳴り終わるのを待たずにスマホへ返事できる
+        if not self.speech_service.enqueue(SpeechJob(wav=wav_data, source="スマホの解析", voice=selector)):
+            reason = "読み上げの待ち行列が一杯です。少し待ってからもう一度送ってください。"
+            self._post_to_ui(lambda: self.append_log(f"⚠️ スマホの解析: {reason}"))
+            return False, reason
         shown = label or "(編集したアクセント)"
         self._post_to_ui(lambda: self.append_log(f"🗣️ スマホの解析から読み上げました:「{shown}」"))
         return True, ""
@@ -12517,6 +12405,8 @@ class App(ctk.CTk):
         self.phone_bridge.stop()
         # マイクの転送も止める。開いたままだと音声デバイスを掴み続けてしまう
         self.stop_input_passthrough()
+        # 読み上げも途中で止める（出力デバイスを掴んだまま閉じない。待つのは短く）
+        self.speech_service.shutdown(timeout=0.5)
         self._cancel_scheduled_jobs()
         self._check_thread_and_destroy()
 
