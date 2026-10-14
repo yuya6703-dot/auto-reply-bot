@@ -69,6 +69,11 @@ import pygetwindow as gw
 import pyautogui
 from adbutils import adb
 
+# AIチャット・音声エージェントの部品（設計書/00〜09）。⚠️ agent からはこのファイルを import しない（D3）
+from agent.api_keys import (ApiKeyStore, SecretStoreError, validate_api_key, redact_secrets,
+                            STATUS_SAVED, STATUS_ENV, STATUS_UNREADABLE)
+from agent.llm import PROVIDERS, DEFAULT_PROVIDER_ID, provider_by_label, provider_by_id, PingResult
+
 # ====================================================
 # 📁 パス設定
 # ====================================================
@@ -520,6 +525,8 @@ def safe_print(message):
 def write_error_log(message):
     """エラー内容をファイルに追記する（exeでの原因調査用）"""
     try:
+        # ⚠️ 例外の文言に AI API のキーが紛れても残さない（設計書/06 の 7章）
+        message = redact_secrets(message)
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {message}\n")
@@ -2055,6 +2062,8 @@ class DatabaseManager:
 
     # --- ログ ---
     def save_log(self, message):
+        # ⚠️ AI API のキーらしい文字列は、DBに入れる前に伏せる（設計書/06 の 7章）
+        message = redact_secrets(message)
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -7143,6 +7152,8 @@ class App(ctk.CTk):
         self._apply_window_icon(self)
 
         self.db = DatabaseManager()
+        # AI API のキー（DPAPI で暗号化して settings 表へ。設計書/05 の 3章）
+        self.api_keys = ApiKeyStore(self.db)
         self.worker = AutoReplyWorker(self.db, self.append_log)
         # GRAVITYのタスク・ルーレット。⚠️ 監視(self.worker)と同時に動かさない（start_* の両方で弾く）
         self.task_worker = GravityTaskWorker(self.db, self.append_log, self._notify_gravity_job)
@@ -9498,6 +9509,7 @@ class App(ctk.CTk):
         self.build_emulator_section(self.settings_scroll)
         self.build_auto_ok_section(self.settings_scroll)
         self.build_daily_task_section(self.settings_scroll)
+        self.build_ai_api_section(self.settings_scroll)
 
         frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         frame.pack(fill="x", padx=20, pady=(10, 20))
@@ -11335,6 +11347,162 @@ class App(ctk.CTk):
         self.db.save_setting("daily_task_notify_sound", "1" if enabled else "0")
         self.append_log(f"⚙️ タスクのお知らせの音を {'ON' if enabled else 'OFF'} にしました。")
 
+    # --- AI API（設計書/05「3. AI API キーの入力と保存」。段階1） ---
+    # 本人の要望（2026-10-15）「AI API という値を入力して保存するための箱と、保存する機能と、そのボタン」。
+    # ⚠️ キーは画面・ログに一切出さない。状態の表示にもキーの一部（末尾など）を出さない
+    AI_API_KEY_MASK = "●"
+
+    def build_ai_api_section(self, parent):
+        section = ctk.CTkFrame(parent)
+        section.pack(fill="x", padx=20, pady=(10, 0))
+
+        ctk.CTkLabel(section, text="🤖 AI API", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(10, 3))
+        ctk.CTkLabel(
+            section,
+            text="AIの機能で使うAPIキーを保存します。\n"
+                 "キーは、このPCのWindowsユーザーだけが読み出せる形で暗号化して保存します。画面やログには表示しません。\n"
+                 "提供元はまだ決まっていないので、今は「未定」として保存しておけます（接続確認は提供元が決まってから）。",
+            justify="left", text_color="gray70"
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        provider_frame = ctk.CTkFrame(section, fg_color="transparent")
+        provider_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(provider_frame, text="提供元:", width=70, anchor="w").pack(side="left", padx=(0, 8))
+        saved_provider = provider_by_id(self.db.get_setting("ai_api_provider", DEFAULT_PROVIDER_ID) or DEFAULT_PROVIDER_ID)
+        self.ai_provider_var = ctk.StringVar(value=saved_provider.label)
+        self.ai_provider_menu = ctk.CTkOptionMenu(
+            provider_frame, variable=self.ai_provider_var, values=[p.label for p in PROVIDERS.values()],
+            command=self.on_ai_provider_selected, width=260)
+        self.ai_provider_menu.pack(side="left")
+
+        key_frame = ctk.CTkFrame(section, fg_color="transparent")
+        key_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(key_frame, text="APIキー:", width=70, anchor="w").pack(side="left", padx=(0, 8))
+        self.ai_api_key_entry = ctk.CTkEntry(key_frame, width=300, show=self.AI_API_KEY_MASK)
+        self.ai_api_key_entry.pack(side="left", padx=(0, 5))
+        self.ai_api_key_entry.bind("<Button-3>", self._show_entry_context_menu)
+        self.ai_api_key_entry.bind("<Return>", lambda e: self.save_ai_api_key())
+
+        # 押している間だけ見せる（離したら隠す。押しっぱなしで画面に出たままにならないように）
+        self.ai_api_reveal_btn = ctk.CTkButton(key_frame, text="👁", width=36,
+                                               fg_color="#555555", hover_color="#3a3a3a")
+        self.ai_api_reveal_btn.pack(side="left", padx=(0, 5))
+        self.ai_api_reveal_btn.bind("<ButtonPress-1>", lambda e: self._set_ai_key_reveal(True))
+        self.ai_api_reveal_btn.bind("<ButtonRelease-1>", lambda e: self._set_ai_key_reveal(False))
+        self.ai_api_reveal_btn.bind("<Leave>", lambda e: self._set_ai_key_reveal(False))
+
+        ctk.CTkButton(key_frame, text="💾 保存", width=70,
+                      command=self.save_ai_api_key).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(key_frame, text="🗑 削除", width=70, fg_color="red", hover_color="darkred",
+                      command=self.delete_ai_api_key).pack(side="left", padx=(0, 5))
+        self.ai_api_test_btn = ctk.CTkButton(key_frame, text="🔌 接続確認", width=100,
+                                             fg_color="#555555", hover_color="#3a3a3a",
+                                             command=self.test_ai_api_connection)
+        self.ai_api_test_btn.pack(side="left")
+
+        self.ai_api_status_label = ctk.CTkLabel(section, text="", justify="left", text_color="gray70")
+        self.ai_api_status_label.pack(anchor="w", padx=12, pady=(0, 12))
+        self._refresh_ai_api_status()
+
+    def _selected_ai_provider(self):
+        return provider_by_label(self.ai_provider_var.get())
+
+    def _set_ai_key_reveal(self, reveal):
+        self.ai_api_key_entry.configure(show="" if reveal else self.AI_API_KEY_MASK)
+
+    def _refresh_ai_api_status(self, note="", ok=None):
+        """保存の状態と、接続確認ができるかを表示する。⚠️ キーの一部も表示しない"""
+        info = self._selected_ai_provider()
+        state = self.api_keys.status(info.provider_id, info.env_var)
+        if state == STATUS_SAVED:
+            text, color = "保存済み（暗号化してこのPCに保存）", "#4a9e4a"
+        elif state == STATUS_ENV:
+            text, color = f"環境変数 {info.env_var} のキーを使います（保存はしていません）", "#4a9e4a"
+        elif state == STATUS_UNREADABLE:
+            text, color = "保存されていますが、このPCのユーザーでは読み出せません。入れ直してください。", "#d08a4a"
+        else:
+            text, color = "未保存", "gray70"
+        if info.factory is None:
+            text += f"\n※ {info.note}"
+        if note:
+            text += f"\n{note}"
+            color = "#4a9e4a" if ok else "#d08a4a"
+        self.ai_api_status_label.configure(text=f"状態: {text}", text_color=color)
+        # 接続確認は、提供元のアダプターがあるときだけ押せる
+        self.ai_api_test_btn.configure(state="normal" if info.factory else "disabled")
+
+    def on_ai_provider_selected(self, label):
+        info = self._selected_ai_provider()
+        self.db.save_setting("ai_api_provider", info.provider_id)
+        # 別の提供元のキーを打ちかけのまま、こちらへ保存しないよう欄を空にする
+        self.ai_api_key_entry.delete(0, "end")
+        self._set_ai_key_reveal(False)
+        self._refresh_ai_api_status()
+
+    def save_ai_api_key(self):
+        info = self._selected_ai_provider()
+        key, problem = validate_api_key(self.ai_api_key_entry.get())
+        if key is None:
+            messagebox.showwarning("APIキー", problem)
+            return
+        try:
+            self.api_keys.save(info.provider_id, key)
+        except (SecretStoreError, ValueError) as e:
+            messagebox.showerror("APIキー", f"保存できませんでした。\n\n{e}")
+            return
+        finally:
+            key = None
+        self.ai_api_key_entry.delete(0, "end")
+        self._set_ai_key_reveal(False)
+        self._refresh_ai_api_status()
+        self.append_log(f"🔐 AI API（{info.label}）のキーを暗号化して保存しました。")
+
+    def delete_ai_api_key(self):
+        info = self._selected_ai_provider()
+        if self.api_keys.status(info.provider_id) not in (STATUS_SAVED, STATUS_UNREADABLE):
+            messagebox.showinfo("APIキーの削除", f"{info.label}には、保存されているキーがありません。")
+            return
+        if not messagebox.askyesno("APIキーの削除", f"{info.label}の保存済みのAPIキーを削除しますか？"):
+            return
+        self.api_keys.delete(info.provider_id)
+        self._refresh_ai_api_status()
+        self.append_log(f"🗑️ AI API（{info.label}）の保存済みのキーを削除しました。")
+
+    def test_ai_api_connection(self):
+        """入力欄にキーがあればそれで、無ければ保存済み（または環境変数）のキーで、接続を確かめる"""
+        info = self._selected_ai_provider()
+        if info.factory is None:
+            messagebox.showinfo("接続確認", info.note)
+            return
+        typed = self.ai_api_key_entry.get().strip()
+        if typed:
+            key, problem = validate_api_key(typed)
+            if key is None:
+                messagebox.showwarning("APIキー", problem)
+                return
+        else:
+            key = self.api_keys.load(info.provider_id, info.env_var)
+        if not key:
+            messagebox.showinfo("接続確認", "APIキーを入力するか、保存してから押してください。")
+            return
+
+        self.ai_api_test_btn.configure(state="disabled")
+        self.ai_api_status_label.configure(text="状態: 接続を確認しています...", text_color="gray70")
+
+        def run(api_key=key):
+            try:
+                result = info.factory(api_key).ping(timeout_seconds=10.0)
+            except Exception:
+                write_error_log(f"AI APIの接続確認でエラー:\n{traceback.format_exc()}")
+                result = PingResult(ok=False, kind="unknown")
+            self._post_to_ui(lambda: self._on_ai_api_test_done(info, result))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_ai_api_test_done(self, info, result):
+        self._refresh_ai_api_status(note=f"接続確認: {result.message}", ok=result.ok)
+        self.append_log(f"{'✅' if result.ok else '⚠️'} AI API（{info.label}）の接続確認: {result.message}")
+
     # --- エミュレータ(MuMu) ---
     def build_emulator_section(self, parent):
         """MuMuの場所・対象アプリ・自動起動の設定エリア"""
@@ -11702,6 +11870,9 @@ class App(ctk.CTk):
 
     # --- ログ ---
     def append_log(self, message):
+        # ⚠️ AI API のキーらしい文字列は、画面にも出さない（設計書/06 の 7章）
+        message = redact_secrets(message)
+
         def update_gui():
             if self.winfo_exists():
                 self.log_textbox.configure(state="normal")
