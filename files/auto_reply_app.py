@@ -1278,9 +1278,10 @@ def find_point_shop_buttons(xml_dump, display=None):
 # ====================================================
 # 💬 音声ルームのチャット欄（意味で読む）
 # ====================================================
-# ⚠️ 今の自動返信は使っていない。自動返信は「監視範囲の中の文字」を部品を問わず読む（意図した仕様）。
-# ここは、チャット欄の行を「誰が何を言ったか」「どんなお知らせか」で読むための土台として置いてある
+# チャット欄の行を「誰が何を言ったか」「どんなお知らせか」で読む
 # （2026-10-11 本人の希望「チャット欄の情報理解を高めて、後々の開発に活かしたい」）。
+# 自動返信は、ペアの「対象」が「すべての文字（今まで通り）」なら監視範囲の文字を部品を問わず読み（意図した仕様）、
+# それ以外の対象（人の発言だけ・お知らせだけ・［参加したとき］など）ならここで読んだ行を使う（2026-10-15〜）。
 # 部品は開発ログ.md「チャット欄（rvMessages）の部品」に表がある。
 
 CHAT_KIND_MESSAGE = "message"            # 人の発言（名前と本文）
@@ -1350,6 +1351,100 @@ def parse_chat_rows(xml_dump, display=None):
 
 
 # ====================================================
+# 🔑 キーワードのペアの「対象」（どこに出た文字に反応するか）
+# ====================================================
+# 2026-10-15 本人と（全部任せる）: 範囲の文字を全部拾うと、人の名前・席番号・広告・ルーム名にワードが
+# 含まれていても反応する。チャット欄の行を意味で読み（parse_chat_rows）、ペアごとに対象を選べるようにした。
+# 既存のペアは KEYWORD_TARGET_ANY のまま（今まで通りの動き）。
+KEYWORD_TARGET_ANY = "any"            # 監視範囲の中の文字なら何でも（今まで通り）
+KEYWORD_TARGET_MESSAGE = "message"    # 人の発言の本文だけ
+KEYWORD_TARGET_NOTICE = "notice"      # お知らせの行だけ
+# お知らせの種類そのものをきっかけにする。検知ワードの欄には、この見出しが入る（文言を打たなくてよい）
+KEYWORD_EVENT_TARGETS = {
+    "join": "［参加したとき］",
+    "like": "［ルームにいいねしたとき］",
+    "mic": "［マイクをもらったとき］",
+    "rename": "［ルーム名を変えたとき］",
+}
+KEYWORD_TARGET_LABELS = {
+    KEYWORD_TARGET_ANY: "すべての文字（今まで通り）",
+    KEYWORD_TARGET_MESSAGE: "人の発言の本文だけ",
+    KEYWORD_TARGET_NOTICE: "お知らせの行だけ",
+    **KEYWORD_EVENT_TARGETS,
+}
+# 一覧に添える短い印（今まで通りのペアには付けない）
+KEYWORD_TARGET_TAGS = {KEYWORD_TARGET_MESSAGE: "〔発言〕", KEYWORD_TARGET_NOTICE: "〔お知らせ〕"}
+# 返信ワードに書くと、相手の名前に置き換わる
+KEYWORD_NAME_PLACEHOLDER = "{名前}"
+# 「誰が」が人の名前のお知らせ（ルーム名の変更は、新しいルーム名なので名前にしない）
+NOTICE_KINDS_WITH_PERSON = ("join", "like", "mic")
+
+
+def clean_display_name(name):
+    """チャット欄の名前は長いと「名前..」と切れて出る。末尾の「..」「…」と空白を除く"""
+    return re.sub(r"(\s*(\.\.+|…)\s*)+$", "", (name or "").strip())
+
+
+def render_reply(template, name=""):
+    """返信ワードの {名前} を相手の名前に置き換える（名前が読めないときは空にする）"""
+    return (template or "").replace(KEYWORD_NAME_PLACEHOLDER, clean_display_name(name))
+
+
+def chat_row_key(row):
+    """
+    チャット欄の行の目印（返信済みかを覚えるのに使う）。発言は「名前: 本文」、お知らせは文言そのもの。
+    ⚠️ 名前が画面の上で切れて読めない発言は None（目印に使わない）。上へ流れて名前が切れると、
+       同じ発言の目印が「名前: 本文」から「本文」に変わり、返信済みと分からずにもう一度返してしまう
+    """
+    if row["kind"] == CHAT_KIND_MESSAGE:
+        return f"{row['name']}: {row['text']}" if row["name"] and row["text"] else None
+    if row["kind"] == CHAT_KIND_NOTICE:
+        return row["text"] or None
+    return None
+
+
+def match_keyword_rows(rows, target, trigger_word, y_min, y_max, ignore_words=()):
+    """
+    チャット欄の行のうち、対象が target のペアに当たる行を [(行の目印, 縦の位置, 名前), ...] で返す（上から順）。
+    監視範囲(y_min〜y_max)の外の行は数えない（範囲で見る、という今までの考え方を保つ）。
+    """
+    found = []
+    for row in rows or []:
+        box, key = row.get("box"), chat_row_key(row)
+        if not box or not key:
+            continue
+        center_y = (box[1] + box[3]) / 2
+        if not (y_min <= center_y <= y_max):
+            continue
+        text = row["text"]
+        if target in KEYWORD_EVENT_TARGETS:
+            if row["kind"] != CHAT_KIND_NOTICE or row["notice"] != target:
+                continue
+        elif target == KEYWORD_TARGET_MESSAGE:
+            if row["kind"] != CHAT_KIND_MESSAGE or trigger_word not in text:
+                continue
+        elif target == KEYWORD_TARGET_NOTICE:
+            if row["kind"] != CHAT_KIND_NOTICE or trigger_word not in text:
+                continue
+        else:
+            continue
+        if target not in KEYWORD_EVENT_TARGETS and any(w in text for w in ignore_words):
+            continue
+        if row["kind"] == CHAT_KIND_MESSAGE:
+            name = row["name"]
+        else:
+            name = row["subject"] if row["notice"] in NOTICE_KINDS_WITH_PERSON else ""
+        found.append((key, center_y, name))
+    return found
+
+
+def name_in_text(text):
+    """今まで通りのペアで当たった文字から、名前を読み取れるなら返す（参加・いいね・マイクのお知らせの文型）"""
+    kind, subject = chat_notice_kind(text)
+    return subject if kind in NOTICE_KINDS_WITH_PERSON else ""
+
+
+# ====================================================
 # 🗄️ 1. データ永続化 (SQLite3)
 # ====================================================
 class DatabaseManager:
@@ -1416,12 +1511,14 @@ class DatabaseManager:
                 ''')
                 # キーワード（検知ワード⇔返信ワード）テーブル。set_idでキーワードセットに属する
                 # enabled: ペア単位の有効/無効。0のペアはセットが有効でも監視対象から外れる
+                # target: どこに出た文字に反応するか（KEYWORD_TARGET_*、KEYWORD_EVENT_TARGETS のキー）
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS keywords (
                         set_id INTEGER,
                         trigger_word TEXT,
                         reply_message TEXT,
                         enabled INTEGER DEFAULT 1,
+                        target TEXT DEFAULT 'any',
                         PRIMARY KEY (set_id, trigger_word)
                     )
                 ''')
@@ -1447,6 +1544,7 @@ class DatabaseManager:
 
                 self._migrate_legacy_keywords_table(conn, cursor)
                 self._migrate_keyword_enabled_column(conn, cursor)
+                self._migrate_keyword_target_column(conn, cursor)
                 self._cleanup_legacy_backup_table(conn, cursor)
 
                 # デフォルトセットが1つも無ければ作成する（初回起動時、またはマイグレーション後）
@@ -1534,6 +1632,23 @@ class DatabaseManager:
             safe_print("keywordsテーブルにenabled列を追加しました（既存ペアは全て有効）。")
         except sqlite3.Error as e:
             safe_print(f"enabled列の追加中にエラー: {e}")
+
+    def _migrate_keyword_target_column(self, conn, cursor):
+        """
+        ペアの「対象」(target列)を後から追加したバージョンへの移行。
+        既存のペアは全て「すべての文字（今まで通り）」にする（動きを変えない）。
+        """
+        try:
+            cursor.execute("PRAGMA table_info(keywords)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "target" in columns:
+                return
+            cursor.execute(f"ALTER TABLE keywords ADD COLUMN target TEXT DEFAULT '{KEYWORD_TARGET_ANY}'")
+            cursor.execute("UPDATE keywords SET target = ? WHERE target IS NULL", (KEYWORD_TARGET_ANY,))
+            conn.commit()
+            safe_print("keywordsテーブルにtarget列を追加しました（既存ペアは全て今まで通り）。")
+        except sqlite3.Error as e:
+            safe_print(f"target列の追加中にエラー: {e}")
 
     def _cleanup_legacy_backup_table(self, conn, cursor):
         """
@@ -1656,22 +1771,43 @@ class DatabaseManager:
     # --- キーワード ---
     def get_keywords_in_set(self, set_id):
         """
-        指定セット内のペアを [{'trigger':, 'reply':, 'enabled':}, ...] で返す
+        指定セット内のペアを [{'trigger':, 'reply':, 'enabled':, 'target':}, ...] で返す
         （キーワード設定タブの一覧表示用）
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    'SELECT trigger_word, reply_message, COALESCE(enabled, 1) FROM keywords WHERE set_id = ?',
-                    (set_id,)
+                    'SELECT trigger_word, reply_message, COALESCE(enabled, 1), COALESCE(target, ?) '
+                    'FROM keywords WHERE set_id = ?',
+                    (KEYWORD_TARGET_ANY, set_id)
                 )
                 return [
-                    {"trigger": row[0], "reply": row[1], "enabled": bool(row[2])}
+                    {"trigger": row[0], "reply": row[1], "enabled": bool(row[2]), "target": row[3]}
                     for row in cursor.fetchall()
                 ]
         except sqlite3.Error:
             return []
+
+    def get_active_keyword_targets(self):
+        """
+        get_active_keywords と同じペアについて、{検知ワード: 対象} を返す。
+        get_active_keywords の形（{検知ワード: 返信ワード}）は監視ループ・テストが広く使っているので変えず、横に並べる。
+        """
+        if self.get_setting(KEYWORD_AUTO_REPLY_SETTING, "1") != "1":
+            return {}
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT k.trigger_word, COALESCE(k.target, ?)
+                    FROM keywords k
+                    JOIN keyword_sets s ON k.set_id = s.id
+                    WHERE s.enabled = 1 AND COALESCE(k.enabled, 1) = 1
+                ''', (KEYWORD_TARGET_ANY,))
+                return dict(cursor.fetchall())
+        except sqlite3.Error:
+            return {}
 
     def get_active_keywords(self):
         """
@@ -1700,20 +1836,34 @@ class DatabaseManager:
         except sqlite3.Error:
             return {}
 
-    def upsert_keyword(self, set_id, trigger_word, reply_message):
-        """新規追加は有効状態で作成し、既存ペアの更新時は現在の有効/無効をそのまま維持する"""
+    def upsert_keyword(self, set_id, trigger_word, reply_message, target=None):
+        """
+        新規追加は有効状態で作成し、既存ペアの更新時は現在の有効/無効をそのまま維持する。
+        target を省くと、新規は「すべての文字（今まで通り）」、既存は今の対象のまま。
+        """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    '''
-                    INSERT INTO keywords (set_id, trigger_word, reply_message, enabled)
-                    VALUES (?, ?, ?, 1)
-                    ON CONFLICT(set_id, trigger_word)
-                    DO UPDATE SET reply_message = excluded.reply_message
-                    ''',
-                    (set_id, trigger_word, reply_message)
-                )
+                if target is None:
+                    cursor.execute(
+                        '''
+                        INSERT INTO keywords (set_id, trigger_word, reply_message, enabled, target)
+                        VALUES (?, ?, ?, 1, ?)
+                        ON CONFLICT(set_id, trigger_word)
+                        DO UPDATE SET reply_message = excluded.reply_message
+                        ''',
+                        (set_id, trigger_word, reply_message, KEYWORD_TARGET_ANY)
+                    )
+                else:
+                    cursor.execute(
+                        '''
+                        INSERT INTO keywords (set_id, trigger_word, reply_message, enabled, target)
+                        VALUES (?, ?, ?, 1, ?)
+                        ON CONFLICT(set_id, trigger_word)
+                        DO UPDATE SET reply_message = excluded.reply_message, target = excluded.target
+                        ''',
+                        (set_id, trigger_word, reply_message, target)
+                    )
                 conn.commit()
             return True, ""
         except sqlite3.Error as e:
@@ -4313,6 +4463,10 @@ class AutoReplyWorker:
         self._manual_queue = []
         self._recent_manual_texts = []
         self._manual_lock = threading.Lock()
+        # 有効なペアの {検知ワード: 対象}（KEYWORD_TARGET_*）。_get_runtime_config が更新する
+        self._keyword_targets = {}
+        # 自動返信で送った文（{名前} を差し込んだもの）。自分の発言の見分けに使う（_remember_own_text）
+        self._recent_reply_texts = []
 
     def log(self, message):
         # 画面には実際の内容を表示し、DBに保存する分だけ第三者の名前を伏せる
@@ -4409,8 +4563,26 @@ class AutoReplyWorker:
         既存の「返信ワードを含む行は対象外」という考え方を、手入力にも広げたもの。
         """
         with self._manual_lock:
-            recent = list(self._recent_manual_texts)
+            recent = list(self._recent_manual_texts) + list(self._recent_reply_texts)
         return any(text and text in chat_line for text in recent)
+
+    # 自動返信で送った文（{名前} を差し込んだもの）を覚えておく件数
+    MAX_RECENT_REPLY_TEXTS = 20
+
+    def _remember_own_text(self, text):
+        """
+        自動返信で実際に送った文も、自分の発言として覚える。
+        ⚠️ 返信ワードに {名前} があると送る文が毎回変わり、「返信ワードを含む行は自分の発言」の見分けが効かない。
+           送った文そのものを覚えておけば、それを含む行に自動返信し返さずに済む
+        ⚠️ 手入力の記録(_recent_manual_texts)とは別に持つ。同じ箱に入れると、手入力の分を押し出してしまう
+           （手入力は送信待ちの上限と同じ件数を覚える約束。tests/test_regression_manual_memory.py）
+        """
+        if not text:
+            return
+        with self._manual_lock:
+            self._recent_reply_texts.append(text)
+            while len(self._recent_reply_texts) > self.MAX_RECENT_REPLY_TEXTS:
+                self._recent_reply_texts.pop(0)
 
     # --- エミュレータ接続 ---
     def _prepare_mumu(self, launch_app=True):
@@ -4575,9 +4747,16 @@ class AutoReplyWorker:
             self.log("💡 キーワード設定タブで、使いたいペアをダブルクリックして☑にしてください。")
             return
 
+        targets = self.db.get_active_keyword_targets() if self.db else {}
         self.log(f"🔑 有効な検知ワード（{len(keywords)}件）:")
         for trigger in keywords:
-            self.log(f" ・「{trigger}」")
+            target = targets.get(trigger, KEYWORD_TARGET_ANY)
+            if target in KEYWORD_EVENT_TARGETS:
+                self.log(f" ・{trigger}（お知らせの種類で反応）")
+            elif target != KEYWORD_TARGET_ANY:
+                self.log(f" ・「{trigger}」（{KEYWORD_TARGET_LABELS[target]}）")
+            else:
+                self.log(f" ・「{trigger}」")
 
     def _warn_if_target_app_not_foreground(self, d):
         """
@@ -4685,7 +4864,7 @@ class AutoReplyWorker:
             if item[0] != last_log or (now - last_time) > self.RETRY_SAME_LOG_SECONDS
         ]
 
-    def _forget_replied_off_screen(self, replied_logs, chat_texts):
+    def _forget_replied_off_screen(self, replied_logs, chat_texts, extra_visible=()):
         """
         画面から消えたメッセージは「返信済み」の記録から外す。
 
@@ -4699,7 +4878,8 @@ class AutoReplyWorker:
         """
         if not chat_texts:
             return
-        visible = {text for text, _ in chat_texts}
+        # extra_visible: チャット欄の行の目印（chat_row_key）。対象を選んだペアは、範囲の文字ではなくこれで覚えている
+        visible = {text for text, _ in chat_texts} | set(extra_visible)
         for logged in [t for t in replied_logs if t not in visible]:
             del replied_logs[logged]
 
@@ -4716,6 +4896,9 @@ class AutoReplyWorker:
         画面には答えが出ているので、共通部分を計算してそのまま提案する。
         """
         keywords = list(self.db.get_active_keywords().keys()) if self.db else []
+        # お知らせの種類で反応するペア（［参加したとき］など）は、文字で比べない
+        targets = self.db.get_active_keyword_targets() if self.db else {}
+        keywords = [k for k in keywords if targets.get(k, KEYWORD_TARGET_ANY) not in KEYWORD_EVENT_TARGETS]
         if not keywords or not screen_texts:
             return
 
@@ -5620,6 +5803,8 @@ class AutoReplyWorker:
             return self._config_cache
 
         keywords_map = self.db.get_active_keywords()
+        # ペアごとの対象。戻り値の形は変えずに横に持つ（テストや他の呼び出しが3つ組を前提にしている）
+        self._keyword_targets = self.db.get_active_keyword_targets()
         cooldown_enabled, cooldown_seconds = self._get_cooldown_settings()
 
         # ログのマスク対象外にする語を更新する。
@@ -5829,10 +6014,20 @@ class AutoReplyWorker:
                 chat_texts = [item for item in chat_texts if not any(ignore in item[0] for ignore in IGNORE_WORDS)]
                 out_of_bounds_texts = [t for t in out_of_bounds_texts if not any(ignore in t for ignore in IGNORE_WORDS)]
 
+                # 対象を選んだペア（人の発言だけ・お知らせだけ・お知らせの種類）があるときだけ、
+                # チャット欄の行を意味で読む。今まで通りのペアだけなら読まない（動きも重さも変えない）
+                chat_rows = []
+                if any(t != KEYWORD_TARGET_ANY for t in self._keyword_targets.values()):
+                    try:
+                        chat_rows = parse_chat_rows(xml_dump, self._target_display)
+                    except ET.ParseError:
+                        chat_rows = []
+                row_keys = [key for key in (chat_row_key(row) for row in chat_rows) if key]
+
                 # 画面から流れて消えた行は「返信済み」の記録から外す。
                 # 同じ人が入り直した時に、文面が同じというだけで
                 # 二度と返信できなくなるのを防ぐ。
-                self._forget_replied_off_screen(replied_logs, chat_texts)
+                self._forget_replied_off_screen(replied_logs, chat_texts, row_keys)
 
                 # 検知ワードの有無を素早く判定するための検索用文字列。
                 # 生のXMLではなく、エスケープを戻した後のテキストを使う。
@@ -5841,7 +6036,8 @@ class AutoReplyWorker:
                 if chat_texts:
                     current_latest = max(chat_texts, key=lambda x: x[1])[0]
                     if current_latest != self._last_seen_any_chat:
-                        is_own_reply = any(reply in current_latest for reply in keywords_map.values())
+                        is_own_reply = (any(reply in current_latest for reply in keywords_map.values())
+                                        or self._is_own_manual_text(current_latest))
                         if not is_own_reply:
                             # 「検知」だと検知ワードに一致したように読めてしまうため、
                             # 単に画面が変わっただけであることが分かる文言にしている。
@@ -5874,6 +6070,9 @@ class AutoReplyWorker:
                         )
                         if sent_ok:
                             self._remember_replied(replied_logs, latest_log)
+                            # 待ち行列には {名前} を差し込んだ後の文が入っている
+                            if reply_message != keywords_map.get(trigger_word, reply_message):
+                                self._remember_own_text(reply_message)
                         last_sent_time[trigger_word] = time.time()
                         last_scroll_time = time.time()
                         last_processed_logs[trigger_word] = (latest_log, time.time())
@@ -5883,9 +6082,6 @@ class AutoReplyWorker:
                     if not self.is_running:
                         break
 
-                    if trigger_word not in detected_texts_joined:
-                        continue
-
                     # ⚠️ 既にクールダウン待ちの行があるトリガーは、今回は触らない。
                     # 待ち行列は1トリガーにつき1件しか持てないため、ここで次の行を
                     # 拾うと待機中の行を上書きしてしまい、古い人を追い越して
@@ -5893,17 +6089,31 @@ class AutoReplyWorker:
                     if trigger_word in pending_sends:
                         continue
 
-                    matched_elements = [item for item in chat_texts if trigger_word in item[0]]
+                    target = self._keyword_targets.get(trigger_word, KEYWORD_TARGET_ANY)
+                    if target == KEYWORD_TARGET_ANY:
+                        # 今まで通り: 監視範囲の文字なら何でも
+                        if trigger_word not in detected_texts_joined:
+                            continue
+                        matched_elements = [item for item in chat_texts if trigger_word in item[0]]
+                        row_names = {}
 
-                    if not matched_elements:
-                        out_of_bounds_matched = [t for t in out_of_bounds_texts if trigger_word in t]
-                        if out_of_bounds_matched:
-                            latest_out = out_of_bounds_matched[-1]
-                            if out_of_bounds_warned.get(trigger_word) != latest_out:
-                                self.log(f"⚠️ 【範囲外】で文字を検知しました:「{latest_out}」")
-                                self.log("💡 監視範囲がズレているため無視されました。範囲を少し広めに選択し直してみてください。")
-                                out_of_bounds_warned[trigger_word] = latest_out
-                        continue
+                        if not matched_elements:
+                            out_of_bounds_matched = [t for t in out_of_bounds_texts if trigger_word in t]
+                            if out_of_bounds_matched:
+                                latest_out = out_of_bounds_matched[-1]
+                                if out_of_bounds_warned.get(trigger_word) != latest_out:
+                                    self.log(f"⚠️ 【範囲外】で文字を検知しました:「{latest_out}」")
+                                    self.log("💡 監視範囲がズレているため無視されました。範囲を少し広めに選択し直してみてください。")
+                                    out_of_bounds_warned[trigger_word] = latest_out
+                            continue
+                    else:
+                        # 対象を選んだペア: チャット欄の行のうち、発言・お知らせ・お知らせの種類が合うものだけ
+                        rows_hit = match_keyword_rows(chat_rows, target, trigger_word,
+                                                      y_min_internal, y_max_internal, IGNORE_WORDS)
+                        if not rows_hit:
+                            continue
+                        matched_elements = [(key, center_y) for key, center_y, _ in rows_hit]
+                        row_names = {key: name for key, _, name in rows_hit}
 
                     last_log, last_time = last_processed_logs.get(trigger_word, ("", 0))
                     pending = self._select_pending_replies(
@@ -5911,6 +6121,10 @@ class AutoReplyWorker:
 
                     if pending:
                         latest_log = pending[0][0]
+                        # 返信ワードの {名前} を、相手の名前に置き換える
+                        name = row_names.get(latest_log, "") if target != KEYWORD_TARGET_ANY else name_in_text(latest_log)
+                        template = reply_message
+                        reply_message = render_reply(template, name)
                         self.log(f"🎯 検知!【{trigger_word}】ログ:「{latest_log}」")
                         if len(pending) > 1:
                             self.log(f"📥 未返信があと{len(pending) - 1}件あります。順番に処理します。")
@@ -5933,6 +6147,8 @@ class AutoReplyWorker:
                             )
                             if sent_ok:
                                 self._remember_replied(replied_logs, latest_log)
+                                if reply_message != template:
+                                    self._remember_own_text(reply_message)
                             last_sent_time[trigger_word] = time.time()
                             last_scroll_time = time.time()
                             last_processed_logs[trigger_word] = (latest_log, time.time())
@@ -7152,9 +7368,26 @@ class App(ctk.CTk):
         self.trigger_entry = ctk.CTkEntry(edit_frame, width=300)
         self.trigger_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        ctk.CTkLabel(edit_frame, text="返信ワード:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        # どこに出た文字に反応するか。お知らせの種類（［参加したとき］など）を選ぶと、検知ワードは打たなくてよい
+        ctk.CTkLabel(edit_frame, text="対象:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        self.keyword_target_var = ctk.StringVar(value=KEYWORD_TARGET_LABELS[KEYWORD_TARGET_ANY])
+        self.keyword_target_menu = ctk.CTkOptionMenu(
+            edit_frame, variable=self.keyword_target_var, values=list(KEYWORD_TARGET_LABELS.values()),
+            command=self.on_keyword_target_selected, width=300
+        )
+        self.keyword_target_menu.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        ctk.CTkLabel(edit_frame, text="返信ワード:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
         self.reply_entry = ctk.CTkEntry(edit_frame, width=420)
-        self.reply_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        self.reply_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+
+        ctk.CTkLabel(
+            edit_frame,
+            text=f"返信ワードに {KEYWORD_NAME_PLACEHOLDER} と書くと、相手の名前に置き換えます（読めないときは空になります）。\n"
+                 "「人の発言の本文だけ」「お知らせの行だけ」と［…したとき］は、GRAVITYの音声ルームのチャット欄を\n"
+                 "行ごとに読んで判断します（人の名前・席番号・広告などには反応しません）。",
+            justify="left", text_color="gray"
+        ).grid(row=3, column=1, padx=5, pady=(0, 5), sticky="w")
 
         # 検知ワード・返信ワード欄で、他アプリからコピーした文字列を貼り付けたり
         # 入力済みの文字列をコピーしたりできるよう、右クリックメニューを用意する
@@ -7169,7 +7402,7 @@ class App(ctk.CTk):
             entry_widget.bind("<Button-3>", self._show_entry_context_menu)
 
         kw_btn_frame = ctk.CTkFrame(edit_frame, fg_color="transparent")
-        kw_btn_frame.grid(row=2, column=1, pady=10, sticky="w")
+        kw_btn_frame.grid(row=4, column=1, pady=10, sticky="w")
 
         ctk.CTkButton(kw_btn_frame, text="➕ 追加 / 更新", command=self.add_or_update_keyword, width=120).pack(side="left", padx=5)
         ctk.CTkButton(kw_btn_frame, text="🔀 有効/無効 切替", command=self.toggle_selected_keyword_enabled,
@@ -11257,7 +11490,8 @@ class App(ctk.CTk):
         self._keyword_rows = rows
         for index, row in enumerate(rows):
             mark = "☑" if row["enabled"] else "☐"
-            self.keyword_listbox.insert(tk.END, f"{mark} {row['trigger']}  ➔  {row['reply']}")
+            tag = KEYWORD_TARGET_TAGS.get(row.get("target"), "")
+            self.keyword_listbox.insert(tk.END, f"{mark} {tag}{row['trigger']}  ➔  {row['reply']}")
             # 無効なペアはグレー表示にして、ひと目で区別できるようにする
             if not row["enabled"]:
                 self.keyword_listbox.itemconfig(index, fg="#7a7a7a")
@@ -11276,10 +11510,39 @@ class App(ctk.CTk):
     def on_keyword_select(self, event):
         row = self._selected_keyword_row()
         if row:
-            self.trigger_entry.delete(0, tk.END)
-            self.trigger_entry.insert(0, row["trigger"])
+            target = row.get("target") or KEYWORD_TARGET_ANY
+            self.keyword_target_var.set(KEYWORD_TARGET_LABELS.get(target, KEYWORD_TARGET_LABELS[KEYWORD_TARGET_ANY]))
+            self._set_trigger_entry(row["trigger"], editable=target not in KEYWORD_EVENT_TARGETS)
             self.reply_entry.delete(0, tk.END)
             self.reply_entry.insert(0, row["reply"])
+
+    def _selected_keyword_target(self):
+        """「対象」で選んでいるもの（KEYWORD_TARGET_* か KEYWORD_EVENT_TARGETS のキー）"""
+        label = self.keyword_target_var.get()
+        return next((key for key, text in KEYWORD_TARGET_LABELS.items() if text == label), KEYWORD_TARGET_ANY)
+
+    def _set_trigger_entry(self, text, editable=True):
+        """
+        検知ワードの欄の文字と、打てるかどうかを変える。
+        ⚠️ 打てない状態の欄は、消す・入れるが効かない。一度打てる状態に戻してから書き換える
+        """
+        self.trigger_entry.configure(state="normal")
+        self.trigger_entry.delete(0, tk.END)
+        self.trigger_entry.insert(0, text)
+        self.trigger_entry.configure(state="normal" if editable else "disabled")
+
+    def on_keyword_target_selected(self, label):
+        """
+        「対象」を選んだとき。お知らせの種類（［参加したとき］など）なら、検知ワードの欄にその見出しを入れて打てなくする。
+        文字で反応する対象に戻したときは、欄に残った見出しを消して打てるようにする。
+        """
+        target = self._selected_keyword_target()
+        if target in KEYWORD_EVENT_TARGETS:
+            self._set_trigger_entry(KEYWORD_EVENT_TARGETS[target], editable=False)
+        elif self.trigger_entry.get() in KEYWORD_EVENT_TARGETS.values():
+            self._set_trigger_entry("", editable=True)
+        else:
+            self.trigger_entry.configure(state="normal")
 
     def toggle_selected_keyword_enabled(self, event=None):
         """選択中のペアの有効/無効を切り替える（ボタン、またはダブルクリックから呼ばれる）"""
@@ -11303,16 +11566,24 @@ class App(ctk.CTk):
             messagebox.showerror("エラー", f"有効/無効の切り替えに失敗しました。\n\n詳細: {err}")
 
     def add_or_update_keyword(self):
-        k = self.trigger_entry.get().strip()
+        target = self._selected_keyword_target()
+        # お知らせの種類で反応するペアは、検知ワードの欄に決まった見出しを入れる（打った文字は使わない）
+        k = KEYWORD_EVENT_TARGETS[target] if target in KEYWORD_EVENT_TARGETS else self.trigger_entry.get().strip()
         v = self.reply_entry.get().strip()
+        if target not in KEYWORD_EVENT_TARGETS and k in KEYWORD_EVENT_TARGETS.values():
+            messagebox.showwarning("対象の確認", f"「{k}」は、お知らせの種類で反応するときの見出しです。\n"
+                                             "「対象」でその種類を選んでください。")
+            return
         if k and v:
-            success, err = self.db.upsert_keyword(self.current_keyword_set_id, k, v)
+            success, err = self.db.upsert_keyword(self.current_keyword_set_id, k, v, target=target)
             if success:
                 self.refresh_keyword_listbox()
-                self.trigger_entry.delete(0, tk.END)
+                self._set_trigger_entry("", editable=True)
                 self.reply_entry.delete(0, tk.END)
+                self.keyword_target_var.set(KEYWORD_TARGET_LABELS[KEYWORD_TARGET_ANY])
                 set_name = self.keyword_set_var.get()
-                self.append_log(f"✅ セット「{set_name}」にキーワードを保存しました:「{k}」➔「{v}」")
+                note = "" if target == KEYWORD_TARGET_ANY else f"（対象: {KEYWORD_TARGET_LABELS[target]}）"
+                self.append_log(f"✅ セット「{set_name}」にキーワードを保存しました:「{k}」➔「{v}」{note}")
             else:
                 messagebox.showerror("保存エラー", f"キーワードの保存に失敗しました。\n\n詳細: {err}")
         else:

@@ -12,6 +12,8 @@
 | `test_daily_task_worker.py` | 不要 | タスク・ルーレットの実行役 `GravityTaskWorker` を「にせのMuMu」で通しで動かす。守り（広告・音声ルーム・ポイント消費ボタンの近くでは何も送らない）と、各タスクの流れ |
 | `test_chat_rows.py` | 不要 | 音声ルームのチャット欄を「意味で読む」関数（`parse_chat_rows`）。発言・お知らせ・アナウンスの見分け方。⚠️ 今の自動返信はまだ使っていない |
 | `test_gui_daily_task.py` | 不要 | メインタブのタスク・ルーレットのボタンと、設定タブの区画。監視と同時に動かさないこと（画面が一瞬出る） |
+| `test_keyword_targets.py` | 不要 | キーワードのペアの「対象」（すべての文字／人の発言の本文だけ／お知らせの行だけ／［参加したとき］など）と返信ワードの `{名前}`。監視の本体を、伏せ字にした実物の音声ルームの画面で何周か回す |
+| `test_gui_keyword_target.py` | 不要 | キーワード設定タブの「対象」の欄（選ぶと検知ワードの欄がどう変わるか、保存・選択・一覧の印）。画面が一瞬出る |
 
 ## 実行
 
@@ -22,6 +24,8 @@ python tests/test_daily_tasks.py
 python tests/test_daily_task_worker.py
 python tests/test_gui_daily_task.py
 python tests/test_chat_rows.py
+python tests/test_keyword_targets.py
+python tests/test_gui_keyword_target.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方
