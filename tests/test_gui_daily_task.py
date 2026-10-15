@@ -206,14 +206,22 @@ check("アイコンのファイルが見つかる", icon is not None and icon.en
 # iconbitmap が呼ばれた順を記録し、上書きの時間を過ぎた後で「最後に付いたもの」を見る。
 import time
 
-def recorded(window):
-    calls = []
-    original = window.iconbitmap
-    def record(bitmap=None, default=None):
-        calls.append(bitmap)
-        return original(bitmap, default)
-    window.iconbitmap = record
-    return calls
+
+class RecordedToplevel(ctk.CTkToplevel):
+    """
+    iconbitmap が呼ばれた順を、窓を作った瞬間から記録するダイアログ。
+    ⚠️ 作った後でメソッドを差し替えてはいけない。CTkToplevel は作る途中（タイトルバーの色を変えるところ）で
+       自分で update() を呼ぶので、作るのに0.2秒以上かかると、0.2秒後の上書きが作る途中で先に走ってしまう。
+       後から差し替えた記録には何も残らず、ときどき失敗していた（2026-10-15。記録が [] のまま）
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.icon_calls = []
+        super().__init__(*args, **kwargs)
+
+    def iconbitmap(self, bitmap=None, default=None):
+        self.icon_calls.append(bitmap)
+        return super().iconbitmap(bitmap, default)
 
 def pump_until(condition, timeout=5.0):
     """
@@ -226,12 +234,13 @@ def pump_until(condition, timeout=5.0):
         h.update()
         time.sleep(0.02)
 
-plain = ctk.CTkToplevel(h)
-plain_calls = recorded(plain)
-dialog = ctk.CTkToplevel(h)
-dialog_calls = recorded(dialog)
+plain = RecordedToplevel(h)
+plain_calls = plain.icon_calls
+dialog = RecordedToplevel(h)
+dialog_calls = dialog.icon_calls
 A.App._apply_window_icon(dialog)
 # 対策したダイアログは「付ける → 既定のアイコンに上書きされる → 付け直す」の3回呼ばれるはず
+# （作るのが遅いと「上書き → 付ける → 付け直す」の順になる。どちらでも、最後はアプリのアイコン）
 pump_until(lambda: plain_calls and len(dialog_calls) >= 3)
 # 付け直した後に、さらに上書きされないことも見る
 settle = time.time() + 0.5
