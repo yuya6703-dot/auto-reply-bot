@@ -16,6 +16,7 @@ KIND_NETWORK = "network"
 KIND_RATE_LIMITED = "rate_limited"
 KIND_SERVER = "server"
 KIND_BAD_REQUEST = "bad_request"
+KIND_BILLING = "billing"            # 前払いの残高が無い・支払いの設定（やり直しても通らない）
 KIND_CANCELLED = "cancelled"
 KIND_UNKNOWN = "unknown"
 
@@ -30,6 +31,7 @@ PING_MESSAGES = {
     KIND_NETWORK: "つながりませんでした（ネットワークを確かめてください）。",
     KIND_RATE_LIMITED: "使いすぎの制限に当たりました。少し待ってから試してください。",
     KIND_SERVER: "提供元の側で問題が起きているようです。少し待ってから試してください。",
+    KIND_BILLING: "支払いの設定（前払いの残高など）を確かめてください。",
     KIND_UNKNOWN: "確認できませんでした。",
 }
 

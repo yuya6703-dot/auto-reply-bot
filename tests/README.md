@@ -21,6 +21,8 @@
 | `test_agent_guards.py` | 不要 | 同じ出来事を2度処理しない（T29）、1日の回数の上限（T31）、発言の頻度の上限（T32）、判断の間に上限に達したら喋らない（C5）、保留、AIの失敗が続いたら呼ばない状態へ・回復・認証の失敗（T10〜T13 の基本） |
 | `test_agent_lifecycle.py` | 不要 | 止める・緊急停止・再開（T36・T37）、再起動で直近の出来事と人格が戻る（T38）、`agent_data.db` が壊れていたらバックアップから戻す/作り直す（T39）、保存期間 |
 | `test_gui_agent_tab.py` | 不要 | AIタブ（開始・停止・緊急停止・再開・手入力の出来事・設定・判断のログ）。AIの声がスピーカー（読み上げの出力先ではない）に行くことも。画面が一瞬出る |
+| `test_agent_gemini.py` | 不要 | Gemini のアダプター（にせの HTTP。**通信しない**）: 送る形（キーはヘッダーだけ・URL に入れない、responseJsonSchema、役割）、返事の読み方（考えた中身を除く・拒否・途中切れ）、失敗の種類とやり直してよいか、接続確認、費用の見積もり |
+| `run_agent_scenarios.py` | **`--live` のとき必要** | AIの判断の場面集（`fixtures/agent_scenarios.json`）を流して、喋るべき/黙るべきと合う割合を出す。ふつうは模擬で流す。`--live` は本物の Gemini（**費用がかかる。本人の了解をとってから**） |
 | `agent_harness.py` | ― | 上のAIのテストが共通で使う器（模擬のAI・にせの声・一時フォルダの `agent_data.db`）。テストそのものではない |
 
 ## 実行
@@ -41,6 +43,7 @@ python tests/test_agent_decision.py
 python tests/test_agent_guards.py
 python tests/test_agent_lifecycle.py
 python tests/test_gui_agent_tab.py
+python tests/test_agent_gemini.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方

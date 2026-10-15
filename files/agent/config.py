@@ -20,7 +20,10 @@ class AgentConfig:
     max_utterances_per_minute: int = 2     # R7
     max_utterances_per_hour: int = 30      # R7
     max_decisions_per_minute: int = 6      # R10: 判断の呼び出しの頻度
-    daily_call_limit: int = 300            # R8: AI を呼ぶ回数の1日の上限（費用の上限は実際の提供元が決まる段階4で）
+    daily_call_limit: int = 300            # R8: AI を呼ぶ回数の1日の上限
+    daily_cost_limit_usd: float = 1.0      # R8: 費用の見積もりの1日の上限（米ドル）。8割で知らせる
+    monthly_cost_limit_usd: float = 10.0   # R8: 1か月の上限
+    model: str = ""                        # 使うモデル（空なら提供元の既定）
     react_max_chars: int = 40              # C2: 短い反応の上限
     engage_max_chars: int = 120            # C2: 参加の上限
     hold_max_seconds: float = 30.0         # 保留した出来事は、これより古くなったら記録だけにする
@@ -30,8 +33,8 @@ class AgentConfig:
     degraded_after_failures: int = 3       # 続けてこの回数失敗したら AI を呼ばない状態へ
     degraded_check_seconds: float = 60.0   # AI を呼ばない状態で、回復を確かめる間隔
 
-    # 画面で変える項目（段階3では AI の名前と1日の回数の上限だけ）
-    EDITABLE = ("ai_name", "daily_call_limit")
+    # 画面で変える項目
+    EDITABLE = ("ai_name", "daily_call_limit", "daily_cost_limit_usd", "monthly_cost_limit_usd", "model")
 
     @classmethod
     def load(cls, get_setting):
@@ -50,6 +53,8 @@ class AgentConfig:
                 continue
             setattr(config, f.name, value)
         config.daily_call_limit = max(0, config.daily_call_limit)
+        config.daily_cost_limit_usd = max(0.0, config.daily_cost_limit_usd)
+        config.monthly_cost_limit_usd = max(0.0, config.monthly_cost_limit_usd)
         config.ai_name = config.ai_name.strip()[:20]
         return config
 

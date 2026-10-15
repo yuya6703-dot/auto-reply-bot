@@ -2,14 +2,15 @@
 """
 AI API の提供元の一覧。
 
-2026-10-15 本人の決定: 提供元は「まだ決めない」。段階1では、キーを保存しておける「未定」と、
-流れを試せる「テスト用（模擬）」だけを並べる。提供元が決まったら、ここに1行と llm/<提供元>.py を足す
+2026-10-15 本人の決定: 段階1では提供元を「まだ決めない」→ 段階4で「Gemini（Google）」に決めた。
+「未定」はキーを置いておく場所として残す。提供元を足すときは、ここに1行と llm/<提供元>.py を足す
 （手順は 設計書/05 の 2.4）。
 """
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .base import PingResult, LLMProvider   # noqa: F401（外から使う）
+from .gemini import GeminiProvider
 from .mock import MockProvider
 
 
@@ -24,6 +25,7 @@ class ProviderInfo:
 
 UNASSIGNED_PROVIDER_ID = "unassigned"
 MOCK_PROVIDER_ID = "mock"
+GEMINI_PROVIDER_ID = "gemini"
 
 PROVIDERS = {
     UNASSIGNED_PROVIDER_ID: ProviderInfo(
@@ -32,6 +34,10 @@ PROVIDERS = {
     MOCK_PROVIDER_ID: ProviderInfo(
         MOCK_PROVIDER_ID, "テスト用（模擬）", None, MockProvider,
         "通信しません。保存と接続確認の流れを試すためのものです。"),
+    GEMINI_PROVIDER_ID: ProviderInfo(
+        GEMINI_PROVIDER_ID, "Gemini（Google）", "GEMINI_API_KEY", GeminiProvider,
+        "キーは Google AI Studio で作れます。⚠️ 無料枠では、送った内容が Google の製品の改善に使われます"
+        "（チャットをつなぐと、ルームの他の人の発言も含みます）。"),
 }
 DEFAULT_PROVIDER_ID = UNASSIGNED_PROVIDER_ID
 

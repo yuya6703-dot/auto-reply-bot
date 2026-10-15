@@ -26,7 +26,7 @@ from .gate import OBSERVE as GATE_OBSERVE
 from .gate import Gate, GateSnapshot, is_strong_signal
 from .generation import CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, precheck, request_utterance
 from .inbox import Inbox
-from .llm.base import KIND_AUTH, KIND_BAD_REQUEST, PURPOSE_DECIDE, PURPOSE_GENERATE, LLMError
+from .llm.base import KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_GENERATE, LLMError
 from .persona import DEFAULT_PERSONA_ID, Persona
 from .usage import UsageTracker
 
@@ -108,7 +108,7 @@ class AgentRuntime:
         self._failures = 0
         self._degraded = False
         self._next_recovery_check = 0.0
-        self._limit_notified_day = None
+        self._notified = set()
         self._current_cancel = None
         self._speech_cancel = None
 
@@ -138,7 +138,10 @@ class AgentRuntime:
                 return False, "緊急停止中です。「再開」を押してから始めてください。"
             if self._running:
                 return False, "もう動いています。"
-            provider = self.deps.provider_factory()
+            try:
+                provider = self.deps.provider_factory()
+            except ValueError as e:          # キーが無い など。言うことは呼び出し側が書く
+                return False, str(e)
             if provider is None:
                 return False, ("使う AI が決まっていません。設定タブの「🤖 AI API」で提供元を選んでください"
                                "（今選べるのは「テスト用（模擬）」だけです）。")
@@ -231,6 +234,14 @@ class AgentRuntime:
 
     def today_usage(self):
         return self.usage.today()
+
+    def month_usage(self):
+        return self.usage.this_month()
+
+    def set_persona(self, persona):
+        """人格を差し替えて保存する（次の判断・文から効く）"""
+        self.deps.store.save_persona(persona)
+        self.persona = persona
 
     # ================= スレッドの中 =================
     def _set_state(self, state):
@@ -330,12 +341,14 @@ class AgentRuntime:
         self.window.add_action(decision.action)
 
     def _snapshot(self, now):
-        calls, _cost = self.usage.today()
+        calls, cost_today = self.usage.today()
+        _calls_month, cost_month = self.usage.this_month()
         with self._lock:
             return GateSnapshot(now=now, degraded=self._degraded, listening=self._listening,
                                 speaking=self._speaking, last_utterance_end=self._last_utterance_end,
                                 utterance_times=list(self._utterance_times),
-                                decision_times=list(self._decision_times), calls_today=calls)
+                                decision_times=list(self._decision_times), calls_today=calls,
+                                cost_today=cost_today, cost_month=cost_month)
 
     def _hold(self, events, wait_seconds):
         with self._lock:
@@ -349,6 +362,7 @@ class AgentRuntime:
 
         # --- 規則の関所（AI を呼ばない） ---
         snap = self._snapshot(now)
+        self._warn_budget(snap)
         result = self.gate.check(events, snap)
         if result.outcome == GATE_HOLD:
             self._hold(events, result.wait_seconds)
@@ -360,7 +374,7 @@ class AgentRuntime:
             self._record(Decision(OBSERVE, result.reason, DECIDED_BY_RULE, turn_id, rule_id=result.rule_id))
             self.log.write(f"🤫 記録だけ（{result.rule_id} {result.reason}）")
             if result.rule_id == "R8":
-                self._notify_limit_once(now)
+                self._notify_limit_once(snap)
             return
 
         # --- AI の判断 ---
@@ -482,9 +496,11 @@ class AgentRuntime:
     def _on_llm_failure(self, error, turn_id, during="判断"):
         kind = error.kind
         self._record(Decision(SILENT, f"AIの呼び出しに失敗（{kind}）", DECIDED_BY_LLM, turn_id))
-        if kind in (KIND_AUTH, KIND_BAD_REQUEST):
+        if kind in (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING):
             self._enter_degraded()
-            hint = "設定タブの「🤖 AI API」でAPIキーを確かめてください" if kind == KIND_AUTH else "設定を確かめてください"
+            hint = {KIND_AUTH: "設定タブの「🤖 AI API」でAPIキーを確かめてください",
+                    KIND_BILLING: "提供元の支払いの設定（前払いの残高など）を確かめてください",
+                    }.get(kind, "AIタブのモデルなどの設定を確かめてください")
             self.log.notice(f"⚠️ AIの{during}に失敗しました（{kind}）。{hint}。AIを呼ばない状態にします。")
             return
         self._failures += 1
@@ -517,9 +533,33 @@ class AgentRuntime:
             self._report_state()
             self.log.notice("✅ AIが使えるようになりました。")
 
-    def _notify_limit_once(self, now):
-        day = time.strftime("%Y%m%d", time.localtime(now))
-        if self._limit_notified_day != day:
-            self._limit_notified_day = day
-            self.log.notice(f"⚠️ 今日AIを呼べる回数（{self.config.daily_call_limit}回）に達しました。"
-                            "明日まで、記録だけにします。")
+    def _once(self, key):
+        """同じ知らせを1度だけ（key に日付・月を入れて、日・月ごとに1度）"""
+        if key in self._notified:
+            return False
+        self._notified.add(key)
+        return True
+
+    def _notify_limit_once(self, snap):
+        c = self.config
+        day = time.strftime("%Y%m%d", time.localtime(snap.now))
+        month = day[:6]
+        if snap.cost_month >= c.monthly_cost_limit_usd:
+            if self._once(("limit-month", month)):
+                self.log.notice(f"⚠️ 今月の費用の見積もりが上限（${c.monthly_cost_limit_usd:.2f}）に達しました。"
+                                "来月まで、記録だけにします。")
+        elif snap.cost_today >= c.daily_cost_limit_usd:
+            if self._once(("limit-cost", day)):
+                self.log.notice(f"⚠️ 今日の費用の見積もりが上限（${c.daily_cost_limit_usd:.2f}）に達しました。"
+                                "明日まで、記録だけにします。")
+        elif self._once(("limit-calls", day)):
+            self.log.notice(f"⚠️ 今日AIを呼べる回数（{c.daily_call_limit}回）に達しました。明日まで、記録だけにします。")
+
+    def _warn_budget(self, snap):
+        """費用の見積もりが上限の8割を超えたら知らせる（設計書/08 の 6章。日・月ごとに1度）"""
+        c = self.config
+        day = time.strftime("%Y%m%d", time.localtime(snap.now))
+        if c.daily_cost_limit_usd > 0 and snap.cost_today >= 0.8 * c.daily_cost_limit_usd                 and snap.cost_today < c.daily_cost_limit_usd and self._once(("warn-day", day)):
+            self.log.notice(f"⚠️ 今日の費用の見積もりが上限の8割（${snap.cost_today:.3f} / ${c.daily_cost_limit_usd:.2f}）を超えました。")
+        if c.monthly_cost_limit_usd > 0 and snap.cost_month >= 0.8 * c.monthly_cost_limit_usd                 and snap.cost_month < c.monthly_cost_limit_usd and self._once(("warn-month", day[:6])):
+            self.log.notice(f"⚠️ 今月の費用の見積もりが上限の8割（${snap.cost_month:.3f} / ${c.monthly_cost_limit_usd:.2f}）を超えました。")

@@ -105,8 +105,10 @@ check("DB のログにキーが残らない", all(FAKE_KEY not in r[0] for r in 
 store.delete("unassigned")
 check("削除したキーは、もう覚えていない（伏せない）", K.redact_secrets(FAKE_KEY) == FAKE_KEY)
 
-print("■ 提供元の一覧（2026-10-15 本人の決定: まだ決めない）")
-check("未定と模擬だけ", set(PROVIDERS) == {"unassigned", "mock"}, list(PROVIDERS))
+print("■ 提供元の一覧（2026-10-15 本人の決定: 段階1は「まだ決めない」→ 段階4で Gemini）")
+check("未定・模擬・Gemini", set(PROVIDERS) == {"unassigned", "mock", "gemini"}, list(PROVIDERS))
+check("Gemini の標準の環境変数は GEMINI_API_KEY", PROVIDERS["gemini"].env_var == "GEMINI_API_KEY")
+check("Gemini の説明に、無料枠では送った内容が使われることを書く", "無料枠" in PROVIDERS["gemini"].note)
 check("既定は未定", DEFAULT_PROVIDER_ID == "unassigned")
 check("未定は接続確認できない", PROVIDERS["unassigned"].factory is None)
 check("表示名から引ける", provider_by_label("テスト用（模擬）").provider_id == "mock")

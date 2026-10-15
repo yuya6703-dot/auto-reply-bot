@@ -87,6 +87,8 @@ from agent.speech.service import (SpeechService, SpeechJob,
 from agent.config import AgentConfig
 from agent.events import make_manual_event, KIND_CHAT_MESSAGE as AGENT_KIND_MESSAGE, KIND_CHAT_NOTICE as AGENT_KIND_NOTICE
 from agent.llm.mock import MockProvider, MODE_LABELS as MOCK_MODE_LABELS, MODE_SCRIPT as MOCK_MODE_SCRIPT
+from agent.llm.gemini import GeminiProvider, MODELS as GEMINI_MODELS, DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
+from agent.persona import Persona
 from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN_RESTORED, OPEN_RECREATED
 from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
                            STATE_STOPPED as AGENT_STOPPED, STATE_EMERGENCY as AGENT_EMERGENCY,
@@ -9441,7 +9443,8 @@ class App(ctk.CTk):
                      font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", pady=(0, 3))
         ctk.CTkLabel(
             frame,
-            text="今は試すための段階です。手で入れた出来事に対して、AIが「黙る」か「喋る」かを決める流れを確かめられます。\n"
+            text="手で入れた出来事に対して、AIが「黙る」か「喋る」かを決める流れを確かめられます。\n"
+                 "AIは設定タブ「🤖 AI API」で選んだ提供元を使います（テスト用（模擬）か Gemini）。\n"
                  "GRAVITYのチャットとはまだつながっていません。AIの声はPCのスピーカーにだけ鳴り、ルームには流しません。",
             justify="left", text_color="gray70"
         ).pack(anchor="w", pady=(0, 10))
@@ -9470,10 +9473,10 @@ class App(ctk.CTk):
         ctk.CTkButton(buttons, text="⏹ 音声を止める", width=120, fg_color="#8B0000", hover_color="#5C0000",
                       command=self.stop_speech).pack(side="left", padx=5)
 
-        self.agent_usage_label = ctk.CTkLabel(control, text="", text_color="gray70")
+        self.agent_usage_label = ctk.CTkLabel(control, text="", text_color="gray70", justify="left")
         self.agent_usage_label.pack(anchor="w", padx=12, pady=(0, 10))
 
-        # --- 設定（段階3は AI の名前と回数の上限だけ） ---
+        # --- 設定 ---
         settings = ctk.CTkFrame(frame)
         settings.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(settings, text="⚙️ 設定", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(10, 4))
@@ -9481,7 +9484,7 @@ class App(ctk.CTk):
         row = ctk.CTkFrame(settings, fg_color="transparent")
         row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
         ctk.CTkLabel(row, text="AIの名前:", width=110, anchor="w").pack(side="left")
-        self.agent_name_entry = ctk.CTkEntry(row, width=160, placeholder_text="（呼ばれたら返事をしやすくなる）")
+        self.agent_name_entry = ctk.CTkEntry(row, width=160, placeholder_text="例: アイ（呼ばれたら応じる）")
         self.agent_name_entry.pack(side="left", padx=(0, 12))
         if config.ai_name:      # ⚠️ 空を入れると、薄く出る説明（placeholder）が消える
             self.agent_name_entry.insert(0, config.ai_name)
@@ -9492,12 +9495,36 @@ class App(ctk.CTk):
         ctk.CTkLabel(row, text="回").pack(side="left", padx=(0, 12))
         ctk.CTkButton(row, text="💾 保存", width=70, command=self.save_agent_settings).pack(side="left")
 
+        model_row = ctk.CTkFrame(settings, fg_color="transparent")
+        model_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(model_row, text="Geminiのモデル:", width=110, anchor="w").pack(side="left")
+        model_labels = dict(GEMINI_MODELS)
+        self.agent_model_var = ctk.StringVar(value=model_labels.get(config.model or GEMINI_DEFAULT_MODEL,
+                                                                    model_labels[GEMINI_DEFAULT_MODEL]))
+        ctk.CTkOptionMenu(model_row, variable=self.agent_model_var, values=list(model_labels.values()),
+                          width=300).pack(side="left")
+
+        cost_row = ctk.CTkFrame(settings, fg_color="transparent")
+        cost_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(cost_row, text="費用の上限:", width=110, anchor="w").pack(side="left")
+        ctk.CTkLabel(cost_row, text="1日 $").pack(side="left")
+        self.agent_cost_day_entry = ctk.CTkEntry(cost_row, width=70)
+        self.agent_cost_day_entry.pack(side="left", padx=(2, 12))
+        self.agent_cost_day_entry.insert(0, f"{config.daily_cost_limit_usd:g}")
+        ctk.CTkLabel(cost_row, text="1か月 $").pack(side="left")
+        self.agent_cost_month_entry = ctk.CTkEntry(cost_row, width=70)
+        self.agent_cost_month_entry.pack(side="left", padx=(2, 12))
+        self.agent_cost_month_entry.insert(0, f"{config.monthly_cost_limit_usd:g}")
+        ctk.CTkLabel(cost_row, text="（見積もり。8割で知らせ、超えたらAIを呼ばない）", text_color="gray70").pack(side="left")
+
         mock_row = ctk.CTkFrame(settings, fg_color="transparent")
         mock_row.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
         ctk.CTkLabel(mock_row, text="模擬AIの返事:", width=110, anchor="w").pack(side="left")
         self.agent_mock_mode_var = ctk.StringVar(value=MOCK_MODE_LABELS[MOCK_MODE_SCRIPT])
         ctk.CTkOptionMenu(mock_row, variable=self.agent_mock_mode_var, values=list(MOCK_MODE_LABELS.values()),
                           command=self.on_agent_mock_mode_selected, width=280).pack(side="left")
+
+        self.build_agent_persona_section(frame)
 
         # --- 手で出来事を入れる ---
         manual = ctk.CTkFrame(frame)
@@ -9536,8 +9563,110 @@ class App(ctk.CTk):
         self.agent_log_textbox = ctk.CTkTextbox(log_section, height=220, state="disabled", wrap="word")
         self.agent_log_textbox.pack(fill="x", padx=12, pady=(0, 12))
 
+        # 前にAIを使ったことがあれば、保存した人格を欄に出す（使ったことが無ければ記録のファイルは作らない）
+        if os.path.exists(AGENT_DB_FILE) and self._ensure_agent_runtime() is not None:
+            self._fill_agent_persona(self.agent_runtime.persona)
         self._refresh_agent_provider_label()
         self._refresh_agent_state()
+
+    # 人格の欄の上限（文字数・行数）。長すぎると毎回AIへ送る量が増える
+    PERSONA_LIMITS = {"name": 20, "summary": 300, "character": 600, "speaking_style": 200}
+    PERSONA_MAX_LINES = {"boundaries": 10, "example_lines": 5}
+    PERSONA_LINE_CHARS = 60
+
+    def build_agent_persona_section(self, parent):
+        """人格（話し方・性格）の設定（設計書/04 の 7章）。判断の規則や上限は変えない"""
+        section = ctk.CTkFrame(parent)
+        section.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(section, text="🎭 人格", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(section, text="AIの話し方・性格です。文の作り方にだけ効きます（喋る回数や間の規則は変わりません）。\n"
+                                   "声は読み上げタブの声を使います。",
+                     justify="left", text_color="gray70").pack(anchor="w", padx=12, pady=(0, 6))
+        self.agent_persona_widgets = {}
+
+        def add_entry(key, label):
+            row = ctk.CTkFrame(section, fg_color="transparent")
+            row.pack(anchor="w", fill="x", padx=12, pady=(0, 4))
+            ctk.CTkLabel(row, text=label, width=110, anchor="w", justify="left").pack(side="left")
+            entry = ctk.CTkEntry(row, width=520)
+            entry.pack(side="left")
+            entry.bind("<Button-3>", self._show_entry_context_menu)
+            self.agent_persona_widgets[key] = entry
+
+        def add_box(key, label, height):
+            row = ctk.CTkFrame(section, fg_color="transparent")
+            row.pack(anchor="w", fill="x", padx=12, pady=(0, 4))
+            ctk.CTkLabel(row, text=label, width=110, anchor="nw", justify="left").pack(side="left", anchor="n")
+            box = ctk.CTkTextbox(row, width=520, height=height, wrap="word")
+            box.pack(side="left")
+            self.agent_persona_widgets[key] = box
+
+        add_entry("name", "名前（空なら\nAIの名前）:")
+        add_box("summary", "要約:", 50)
+        add_box("character", "性格:", 70)
+        add_entry("speaking_style", "話し方:")
+        add_box("boundaries", "しないこと\n（1行に1つ）:", 70)
+        add_box("example_lines", "口調の例\n（1行に1つ）:", 50)
+        buttons = ctk.CTkFrame(section, fg_color="transparent")
+        buttons.pack(anchor="w", fill="x", padx=12, pady=(2, 10))
+        ctk.CTkButton(buttons, text="💾 人格を保存", width=120, command=self.save_agent_persona).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(buttons, text="↺ 既定に戻す", width=110, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.reset_agent_persona).pack(side="left")
+        self._fill_agent_persona(Persona())
+
+    def _fill_agent_persona(self, persona):
+        values = {"name": persona.name, "summary": persona.summary, "character": persona.character,
+                  "speaking_style": persona.speaking_style, "boundaries": "\n".join(persona.boundaries),
+                  "example_lines": "\n".join(persona.example_lines)}
+        for key, widget in self.agent_persona_widgets.items():
+            if isinstance(widget, ctk.CTkTextbox):
+                widget.delete("1.0", "end")
+                widget.insert("1.0", values[key])
+            else:
+                widget.delete(0, "end")
+                if values[key]:
+                    widget.insert(0, values[key])
+
+    def _read_agent_persona(self):
+        """欄から人格を作る。上限を超えていたら (None, 理由)"""
+        raw = {}
+        for key, widget in self.agent_persona_widgets.items():
+            raw[key] = (widget.get("1.0", "end") if isinstance(widget, ctk.CTkTextbox) else widget.get()).strip()
+        labels = {"name": "名前", "summary": "要約", "character": "性格", "speaking_style": "話し方",
+                  "boundaries": "しないこと", "example_lines": "口調の例"}
+        for key, limit in self.PERSONA_LIMITS.items():
+            if len(raw[key]) > limit:
+                return None, f"{labels[key]}は{limit}文字までにしてください（今{len(raw[key])}文字）。"
+        lists = {}
+        for key, max_lines in self.PERSONA_MAX_LINES.items():
+            lines = [line.strip() for line in raw[key].splitlines() if line.strip()]
+            if len(lines) > max_lines:
+                return None, f"{labels[key]}は{max_lines}行までにしてください。"
+            if any(len(line) > self.PERSONA_LINE_CHARS for line in lines):
+                return None, f"{labels[key]}は1行{self.PERSONA_LINE_CHARS}文字までにしてください。"
+            lists[key] = lines
+        if not raw["summary"]:
+            return None, "要約を入れてください（AIが判断するときに使います）。"
+        base = self.agent_runtime.persona if self.agent_runtime is not None else Persona()
+        return Persona(persona_id=base.persona_id, name=raw["name"], summary=raw["summary"],
+                       character=raw["character"], speaking_style=raw["speaking_style"],
+                       boundaries=lists["boundaries"], example_lines=lists["example_lines"], voice=base.voice), ""
+
+    def save_agent_persona(self):
+        persona, problem = self._read_agent_persona()
+        if persona is None:
+            messagebox.showwarning("人格", problem)
+            return
+        runtime = self._ensure_agent_runtime()
+        if runtime is None:
+            return
+        runtime.set_persona(persona)
+        self._append_agent_log("🎭 人格を保存しました（次の判断から使います）。")
+
+    def reset_agent_persona(self):
+        if not messagebox.askyesno("人格", "人格の欄を既定に戻しますか？（保存するまでは使われません）"):
+            return
+        self._fill_agent_persona(Persona())
 
     # --- AIタブ: 中身 ---
     def _ensure_agent_runtime(self):
@@ -9570,7 +9699,7 @@ class App(ctk.CTk):
         return self.agent_runtime
 
     def _agent_provider(self):
-        """設定タブ「🤖 AI API」で選んだ提供元を作る。まだ使えなければ None"""
+        """設定タブ「🤖 AI API」で選んだ提供元を作る。まだ使えなければ None、キーが無ければ ValueError（理由を言う）"""
         info = provider_by_id(self.db.get_setting("ai_api_provider", DEFAULT_PROVIDER_ID) or DEFAULT_PROVIDER_ID)
         if info.factory is None:
             return None
@@ -9578,7 +9707,12 @@ class App(ctk.CTk):
             key = self.api_keys.load(info.provider_id, info.env_var) or ""
         except SecretStoreError:
             key = ""
+        if not key and info.factory is not MockProvider:
+            raise ValueError(f"{info.label}のAPIキーがありません。設定タブの「🤖 AI API」で保存してください。")
         provider = info.factory(key)
+        key = None
+        if isinstance(provider, GeminiProvider):
+            provider.model = AgentConfig.load(self.db.get_setting).model or GEMINI_DEFAULT_MODEL
         if isinstance(provider, MockProvider):
             provider.mode = self._selected_agent_mock_mode()
             self._agent_mock = provider
@@ -9631,7 +9765,11 @@ class App(ctk.CTk):
         info = provider_by_id(self.db.get_setting("ai_api_provider", DEFAULT_PROVIDER_ID) or DEFAULT_PROVIDER_ID)
         if info.factory is None:
             text = (f"使うAI: {info.label} — 設定タブの「🤖 AI API」で提供元を選ぶと始められます"
-                    "（今選べるのは「テスト用（模擬）」だけです）。")
+                    "（テスト用（模擬）か Gemini）。")
+        elif info.factory is GeminiProvider:
+            model = AgentConfig.load(self.db.get_setting).model or GEMINI_DEFAULT_MODEL
+            text = (f"使うAI: {info.label}（{model}）\n"
+                    "⚠️ 無料枠では、送った内容がGoogleの製品の改善に使われます。")
         else:
             text = f"使うAI: {info.label}"
         self.agent_provider_label.configure(text=text)
@@ -9650,14 +9788,17 @@ class App(ctk.CTk):
 
     def _refresh_agent_usage(self):
         config = AgentConfig.load(self.db.get_setting)
-        if self.agent_runtime is None:
-            self.agent_usage_label.configure(text=f"今日AIを呼んだ回数: 0 / {config.daily_call_limit}回")
-            return
-        try:
-            calls, _cost = self.agent_runtime.today_usage()
-        except Exception:
-            return
-        self.agent_usage_label.configure(text=f"今日AIを呼んだ回数: {calls} / {config.daily_call_limit}回")
+        calls, cost, month_cost = 0, 0.0, 0.0
+        if self.agent_runtime is not None:
+            try:
+                calls, cost = self.agent_runtime.today_usage()
+                _calls, month_cost = self.agent_runtime.month_usage()
+            except Exception:
+                return
+        self.agent_usage_label.configure(
+            text=f"今日AIを呼んだ回数: {calls} / {config.daily_call_limit}回\n"
+                 f"費用の見積もり: 今日 ${cost:.4f} / ${config.daily_cost_limit_usd:.2f}・"
+                 f"今月 ${month_cost:.4f} / ${config.monthly_cost_limit_usd:.2f}（請求額ではありません）")
 
     def start_agent(self):
         runtime = self._ensure_agent_runtime()
@@ -9707,12 +9848,27 @@ class App(ctk.CTk):
         if limit < 0:
             messagebox.showwarning("AI", "1日にAIを呼ぶ上限は、0以上の数で入れてください。")
             return
+        try:
+            cost_day = float(self.agent_cost_day_entry.get().strip())
+            cost_month = float(self.agent_cost_month_entry.get().strip())
+        except ValueError:
+            messagebox.showwarning("AI", "費用の上限は、0以上の数（米ドル）で入れてください。")
+            return
+        if cost_day < 0 or cost_month < 0:
+            messagebox.showwarning("AI", "費用の上限は、0以上の数（米ドル）で入れてください。")
+            return
+        model = next((code for code, label in GEMINI_MODELS if label == self.agent_model_var.get()), GEMINI_DEFAULT_MODEL)
         config.ai_name, config.daily_call_limit = name, limit
+        config.daily_cost_limit_usd, config.monthly_cost_limit_usd, config.model = cost_day, cost_month, model
         config.save(self.db.save_setting)
         if self.agent_runtime is not None:
-            self.agent_runtime.config.ai_name = name
-            self.agent_runtime.config.daily_call_limit = limit
-        self._append_agent_log(f"⚙️ 設定を保存しました（AIの名前: {name or '（なし）'}、1日の上限: {limit}回）")
+            live = self.agent_runtime.config
+            live.ai_name, live.daily_call_limit = name, limit
+            live.daily_cost_limit_usd, live.monthly_cost_limit_usd, live.model = cost_day, cost_month, model
+        self._append_agent_log(f"⚙️ 設定を保存しました（AIの名前: {name or '（なし）'}、1日の上限: {limit}回、"
+                               f"費用の上限: 1日 ${cost_day:g}・1か月 ${cost_month:g}、モデル: {model}）。"
+                               "モデルの変更は、次に「▶ 開始」したときから使います。")
+        self._refresh_agent_provider_label()
         self._refresh_agent_usage()
 
     def submit_agent_manual_event(self):
@@ -11640,7 +11796,7 @@ class App(ctk.CTk):
             text, color = "保存されていますが、このPCのユーザーでは読み出せません。入れ直してください。", "#d08a4a"
         else:
             text, color = "未保存", "gray70"
-        if info.factory is None:
+        if info.note:
             text += f"\n※ {info.note}"
         if note:
             text += f"\n{note}"

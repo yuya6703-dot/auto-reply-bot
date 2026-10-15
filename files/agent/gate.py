@@ -18,7 +18,7 @@ RULE_TEXTS = {
     "R5": "誰かが話している",
     "R6": "直前に自分が喋った",
     "R7": "発言の回数の上限",
-    "R8": "AIを呼ぶ回数の上限（1日）",
+    "R8": "AIを呼ぶ回数・費用の上限",
     "R9": "中身が無い・無視する言葉",
     "R10": "判断の頻度の上限",
 }
@@ -38,6 +38,8 @@ class GateSnapshot:
     utterance_times: list = field(default_factory=list)   # 自分が喋り始めた時刻
     decision_times: list = field(default_factory=list)    # AI に判断させた時刻
     calls_today: int = 0
+    cost_today: float = 0.0
+    cost_month: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -87,7 +89,8 @@ class Gate:
         last_hour = [t for t in snap.utterance_times if snap.now - t < 3600]
         if len(last_minute) >= c.max_utterances_per_minute or len(last_hour) >= c.max_utterances_per_hour:
             return GateResult(OBSERVE, "R7", None, strong)
-        if snap.calls_today >= c.daily_call_limit:
+        if (snap.calls_today >= c.daily_call_limit or snap.cost_today >= c.daily_cost_limit_usd
+                or snap.cost_month >= c.monthly_cost_limit_usd):
             return GateResult(OBSERVE, "R8", None, strong)
         if all(is_meaningless(e, c.ignore_words) for e in fresh):
             return GateResult(OBSERVE, "R9", None, strong)
