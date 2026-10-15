@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 
 from .context import EMOTIONS
-from .decision import request_structured
+from .decision import SPEAKING_ACTIONS, parse_decision, request_structured
 
 PRIORITY_AI = 50      # 音声サービスの優先度（読み上げと同じ。来た順に喋る）
 
@@ -56,6 +56,28 @@ def request_utterance(provider, request, turn_id, cancel, on_call):
     """文を作ってもらう。型に合わなければ1回だけ作り直し。失敗は DecisionFailed / LLMError"""
     return request_structured(provider, request, cancel, on_call,
                               lambda r: parse_utterance(r.structured, turn_id))
+
+
+def request_decision_with_text(provider, request, turn_id, cancel, on_call):
+    """
+    判断と文を1回で頼む（context.build_combined_request）。(Decision, Utterance または None) を返す。
+    文が無い・形が合わないときは None（呼ぶ側が文だけをもう一度頼む）。判断の形が合わなければ1回だけ作り直し（DecisionFailed / LLMError）
+    """
+    holder = {}
+
+    def parse(response):
+        decision = parse_decision(response.structured, turn_id, response.model)
+        holder["data"] = response.structured
+        return decision
+
+    decision = request_structured(provider, request, cancel, on_call, parse)
+    utterance = None
+    if decision.action in SPEAKING_ACTIONS:
+        try:
+            utterance = parse_utterance(holder.get("data"), turn_id)
+        except ValueError:
+            utterance = None
+    return decision, utterance
 
 
 def precheck(text, max_chars, banned_words=(), recent_own=()):

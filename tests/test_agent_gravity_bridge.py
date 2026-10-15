@@ -1,0 +1,191 @@
+# -*- coding: utf-8 -*-
+"""
+GRAVITY のチャット欄の行を AI の出来事にする橋（GravityChatBridge。段階5、設計書/08 の T30）。
+
+伏せ字にした実物の音声ルームの画面（fixtures/voiceroom_guest.xml）を使う。音は鳴らさない・通信しない。
+監視の本体（_run_monitor）を にせの端末で回し、キーワード自動返信が今まで通り動くことも確かめる。
+"""
+import os, tempfile
+
+from agent_harness import Agent, check, finish, wait_until
+import auto_reply_app as A
+from agent.llm.mock import MODE_ENGAGE
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+GRAVITY = "anonymous.sns.community.gravity"
+
+
+def fixture(name):
+    with open(os.path.join(_HERE, "fixtures", name), encoding="utf-8") as f:
+        return f.read()
+
+
+GUEST = fixture("voiceroom_guest.xml")
+ROWS = A.parse_chat_rows(GUEST, 2)
+# 上から: 発言 伏せ字3「伏せ字4」 / 参加 伏せ字5 / いいね 伏せ字3 / 発言 伏せ字3「伏せ字6」 / ルーム名の変更
+
+
+def msg(name, text):
+    return {"kind": A.CHAT_KIND_MESSAGE, "name": name, "text": text, "notice": "", "subject": "",
+            "welcome": False, "box": (0, 0, 1, 1), "parts": ()}
+
+
+got = []
+bridge = A.GravityChatBridge(got.extend)
+
+print("■ 最初の画面は「前からあった」")
+first = bridge.on_rows(ROWS)
+check("5行すべて渡す（発言2・お知らせ3）", len(first) == 5 and [e.kind for e in first] ==
+      ["chat_message", "chat_notice", "chat_notice", "chat_message", "chat_notice"], [e.kind for e in first])
+check("すべて backlog（反応しない）", all(e.backlog for e in first))
+check("発言は名前と本文", (first[0].speaker, first[0].text) == ("伏せ字3", "伏せ字4"))
+check("参加・いいねのお知らせは、誰がを speaker に", first[1].speaker == "伏せ字5" and first[2].speaker == "伏せ字3")
+check("ルーム名の変更は speaker なし", first[4].speaker is None)
+check("出どころは gravity・目印は一意", all(e.source == "gravity" for e in first) and len({e.key for e in first}) == 5)
+
+print("■ T30 同じ画面を何周読んでも、新しい出来事は生まれない")
+for _ in range(5):
+    bridge.on_rows(ROWS)
+check("T30 5周読んでも増えない", len(got) == 5, len(got))
+
+print("■ 新しい行")
+rows2 = ROWS + [msg("伏せ字7", "こんばんは")]
+new = bridge.on_rows(rows2)
+check("下に増えた1行だけ渡す", len(new) == 1 and new[0].text == "こんばんは" and not new[0].backlog, new)
+rows3 = rows2 + [msg("伏せ字7", "こんばんは")]
+new = bridge.on_rows(rows3)
+check("同じ人が同じ文をもう一度言ったら、2つ目も新しい行", len(new) == 1 and not new[0].backlog)
+rows4 = rows3[1:]
+check("上へ流れて消えただけなら何も渡さない", bridge.on_rows(rows4) == [])
+rows5 = [msg("伏せ字8", "昔の発言")] + rows4
+new = bridge.on_rows(rows5)
+check("⚠️ 上へ戻して出てきた昔の行は「前からあった」（今さら反応しない）", len(new) == 1 and new[0].backlog)
+new = bridge.on_rows([msg("伏せ字9", "別のルームの発言"), msg("伏せ字9", "もう1つ")])
+check("画面が丸ごと変わったら「前からあった」", len(new) == 2 and all(e.backlog for e in new))
+
+print("■ 自分の発言・読めない行")
+bridge.reset()
+bridge.on_rows([])
+new = bridge.on_rows([msg("自分の名前", "いらっしゃい！"), msg("伏せ字3", "どうも")],
+                     is_own_text=lambda text: text == "いらっしゃい！")
+check("空のチャット欄の次に出た行は新しい行", len(new) == 2 and not any(e.backlog for e in new))
+check("自分が送った文は is_self", new[0].is_self and not new[1].is_self)
+cut = dict(msg("", "名前が切れた発言"))
+announcement = {"kind": A.CHAT_KIND_ANNOUNCEMENT, "name": "伏せ字3", "text": "アナウンス", "notice": "", "subject": "",
+                "welcome": False, "box": (0, 0, 1, 1), "parts": ()}
+bridge.reset()
+check("名前が切れた発言・アナウンスは渡さない", bridge.on_rows([cut, announcement]) == [])
+long_row = msg("伏せ字3", "あ" * 1000)
+bridge.reset()
+check("長すぎる本文は300字まで", len(bridge.on_rows([long_row])[0].text) == 300)
+
+print("■ このアカウントの名前の発言は自分の発言（2026-10-15）")
+mine = A.GravityChatBridge(lambda events: None, self_names=lambda: ["テストちゃ👼"])
+mine.on_rows([])
+new = mine.on_rows([msg("テストちゃ👼", "こんばんは"), msg("テストちゃ..", "名前が切れて出た"), msg("テストちゃん", "別の人"),
+                    {"kind": A.CHAT_KIND_NOTICE, "name": "", "text": "テストちゃ👼さんが音声ルームにいいねをしました",
+                     "notice": "like", "subject": "テストちゃ👼", "welcome": False, "box": (0, 0, 1, 1), "parts": ()},
+                    {"kind": A.CHAT_KIND_NOTICE, "name": "", "text": "伏せ字5が音声ルームに参加しました",
+                     "notice": "join", "subject": "伏せ字5", "welcome": False, "box": (0, 0, 1, 1), "parts": ()}])
+check("アカウント名の発言は is_self", new[0].is_self)
+check("名前が切れて出ても（先頭が同じなら）is_self", new[1].is_self)
+check("似ているが違う名前は他の人", not new[2].is_self)
+check("自分がしたこと（いいね）のお知らせも自分のこと", new[3].is_self and not new[4].is_self)
+
+print("■ AI へつなぐ: 前からあった行には反応せず、新しい行で判断する")
+a = Agent(mode=MODE_ENGAGE)
+bridge = A.GravityChatBridge(lambda events: [a.runtime.submit(e) for e in events])
+bridge.on_rows(ROWS)
+check("前からあった行は記録だけ（R3。AI を呼ばない）", a.wait_decisions(1) and a.decisions()[-1][3] == "R3"
+      and a.decide_calls() == [], a.decisions())
+bridge.on_rows(ROWS + [msg("伏せ字7", "アイ、聞こえる？")])
+check("新しい行で AI が判断して喋る", wait_until(lambda: len(a.speaker.spoken) == 1), a.logs[-3:])
+check("AI には前からあった行も直近の会話として渡る", "伏せ字3: 伏せ字4" in a.decide_calls()[0].messages[0].content)
+a.close()
+
+
+# ----------------------------------------------------------------------
+print("■ 監視の本体から AI へ渡す（キーワード自動返信は今まで通り）")
+A.time.sleep = lambda seconds: None
+
+
+class FakeRoom:
+    """screens を順に返す（最後の画面を繰り返す）。rounds 周読んだら監視を止める"""
+
+    def __init__(self, worker, screens, rounds):
+        self.worker, self.screens, self.rounds, self.reads = worker, screens, rounds, 0
+
+    def dump_hierarchy(self, compressed=True):
+        self.reads += 1
+        if self.reads > self.rounds:
+            self.worker.is_running = False
+        return self.screens[min(self.reads - 1, len(self.screens) - 1)]
+
+    def window_size(self):
+        return 540, 960
+
+
+def run_monitor(pairs, screens, rounds, bridge):
+    db = A.DatabaseManager(os.path.join(tempfile.mkdtemp(), "t.db"))
+    db.save_setting("mumu_target_package", GRAVITY)
+    db.save_setting("cooldown_enabled", "0")
+    set_id = db.get_keyword_sets()[0]["id"]
+    for trigger in list(A.DEFAULT_KEYWORDS):
+        db.delete_keyword(set_id, trigger)
+    for trigger, reply, target in pairs:
+        db.upsert_keyword(set_id, trigger, reply, target=target)
+    logs, sent = [], []
+    w = A.AutoReplyWorker(db, logs.append)
+    w.is_running = True
+    room = FakeRoom(w, screens, rounds)
+    w._connect_to_emulator = lambda: room
+    w._calculate_y_bounds = lambda d, y1, y2: (0, 960, 960)
+    w._warn_if_target_app_not_foreground = lambda d: None
+    w._perform_initial_scan = lambda d, a, b: None
+    w._auto_dismiss_dialog = lambda d, all_nodes, xml_dump: False
+    w._watch_foreground_change = lambda d: None
+    w._scroll_down = lambda *a, **k: None
+
+    def fake_execute(d, nodes, half_y, y1, y2, text, fc, thr, all_nodes=None):
+        sent.append(text)
+        return fc, True
+    w._execute_reply = fake_execute
+    w.set_agent_bridge(bridge)
+    w._run_monitor(0, 0, 100, 100)
+    return sent, logs, w
+
+
+# 2つ目の画面: いちばん下の行（ルーム名の変更）が、新しい参加のお知らせに変わった（下に新しい行が出た）
+JOINED = GUEST.replace("ルーム名を伏せ字1に変更しました", "伏せ字7が音声ルームに参加しました")
+assert JOINED != GUEST
+received = []
+bridge = A.GravityChatBridge(received.extend)
+sent, logs, w = run_monitor([("［参加したとき］", "{名前}さん、いらっしゃい！", "join")],
+                            [GUEST, GUEST, GUEST, JOINED], rounds=8, bridge=bridge)
+fresh = [e for e in received if not e.backlog]
+check("始めた時点の5行は「前からあった」", len([e for e in received if e.backlog]) == 5, len(received))
+check("新しい参加のお知らせを1回だけ AI へ渡す", [e.text for e in fresh] == ["伏せ字7が音声ルームに参加しました"], fresh)
+check("キーワード自動返信は今まで通り（2人に1回ずつ）", sent == ["伏せ字5さん、いらっしゃい！", "伏せ字7さん、いらっしゃい！"], sent)
+
+received.clear()
+off = A.GravityChatBridge(received.extend, active=lambda: False)
+calls = []
+real_parse = A.parse_chat_rows
+A.parse_chat_rows = lambda *a, **k: calls.append(1) or real_parse(*a, **k)
+run_monitor([("こんにちは", "こんにちは！", A.KEYWORD_TARGET_ANY)], [GUEST], rounds=3, bridge=off)
+check("渡さない間は何も渡さない", received == [])
+check("渡さない間は、今まで通りチャット欄の行を読まない（重さを変えない）", calls == [], len(calls))
+on = A.GravityChatBridge(received.extend)
+run_monitor([("こんにちは", "こんにちは！", A.KEYWORD_TARGET_ANY)], [GUEST], rounds=3, bridge=on)
+check("渡すときは、今まで通りのペアだけでも行を読む", len(calls) > 0 and len(received) == 5)
+A.parse_chat_rows = real_parse
+
+own = []
+mine = A.GravityChatBridge(own.extend)
+SAID = GUEST.replace("伏せ字6", "伏せ字5さん、いらっしゃい！")
+run_monitor([("［参加したとき］", "{名前}さん、いらっしゃい！", "join")], [GUEST.replace("伏せ字6", "x"), SAID],
+            rounds=6, bridge=mine)
+said = [e for e in own if e.text == "伏せ字5さん、いらっしゃい！"]
+check("自動返信で送った文がチャット欄に出たら、AI には自分の発言として渡す", said and all(e.is_self for e in said), said)
+
+finish()

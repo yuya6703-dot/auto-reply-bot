@@ -84,8 +84,12 @@ from agent.speech.service import (SpeechService, SpeechJob,
                                   EVENT_FAILED as SPEECH_EVENT_FAILED,
                                   EVENT_QUEUE_CHANGED as SPEECH_EVENT_QUEUE_CHANGED)
 # AIのエージェント（段階3: 骨組み。模擬のAIと手入力の出来事で試す。設計書/09 の S3）
-from agent.config import AgentConfig
-from agent.events import make_manual_event, KIND_CHAT_MESSAGE as AGENT_KIND_MESSAGE, KIND_CHAT_NOTICE as AGENT_KIND_NOTICE
+from agent.config import (AgentConfig, NAMES_MAX_CHARS as AGENT_NAMES_MAX_CHARS,
+                          OUTPUT_VOICE as AGENT_OUTPUT_VOICE, OUTPUT_CHAT as AGENT_OUTPUT_CHAT,
+                          CHAT_APPROVE as AGENT_CHAT_APPROVE, CHAT_AUTO as AGENT_CHAT_AUTO)
+from agent.events import (AgentEvent, make_manual_event, new_event_id as new_agent_event_id,
+                          KIND_CHAT_MESSAGE as AGENT_KIND_MESSAGE, KIND_CHAT_NOTICE as AGENT_KIND_NOTICE,
+                          SOURCE_GRAVITY as AGENT_SOURCE_GRAVITY)
 from agent.llm.mock import MockProvider, MODE_LABELS as MOCK_MODE_LABELS, MODE_SCRIPT as MOCK_MODE_SCRIPT
 from agent.llm.gemini import GeminiProvider, MODELS as GEMINI_MODELS, DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
 from agent.persona import Persona
@@ -93,7 +97,8 @@ from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN
 from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
                            STATE_STOPPED as AGENT_STOPPED, STATE_EMERGENCY as AGENT_EMERGENCY,
                            SPOKEN as AGENT_SPOKEN, SPEECH_CANCELLED as AGENT_SPEECH_CANCELLED,
-                           SPEECH_FAILED as AGENT_SPEECH_FAILED)
+                           SPEECH_FAILED as AGENT_SPEECH_FAILED, POSTED as AGENT_POSTED,
+                           CHAT_DISCARDED as AGENT_CHAT_DISCARDED, CHAT_FAILED as AGENT_CHAT_FAILED)
 
 # ====================================================
 # 📁 パス設定
@@ -1479,9 +1484,109 @@ def name_in_text(text):
     return subject if kind in NOTICE_KINDS_WITH_PERSON else ""
 
 
+# ====================================================
+# 🤖 チャット欄の行を AI の出来事にする（設計書/03 の 3.1、段階5）
+# ====================================================
+class GravityChatBridge:
+    """
+    監視ループが読んだチャット欄の行（parse_chat_rows）から、新しい行だけを AI の出来事にして渡す。
+    監視スレッドから呼ばれる。AI へ渡すのは on_events（呼び出し側で runtime.submit する）。
+
+    - 「新しい行」は、画面に出ている行の目印ごとの数を前回と比べて決める（同じ画面を何周読んでも1回だけ。T30）。
+      同じ人が同じ文を2回言ったら、2つ目は数が増えるので新しい行になる
+    - 渡し始めた最初の画面にあった行は「前からあった」（backlog）として渡す（反応はしない。会話の流れとしてだけ使う）
+    - ⚠️ 前回知っていた行より上に新しく出た行も「前からあった」にする。チャット欄を上へ戻して昔の発言を読んだとき、
+      それに AI が今さら反応しないように。前回の行が1つも残っていない（画面が丸ごと変わった）ときも同じ
+    - 自分の発言（手入力で送った文・自動返信の文・このアカウントの名前の発言）は is_self（AI は反応しない。設計書/06 の 9章）。
+      このアカウントが誰か（参加・いいね・マイク）のお知らせも自分のこと。名前は切れて出るので friend_name_matches で比べる
+    - アナウンス・読めない行・名前が切れた発言は渡さない
+    """
+    MAX_TEXT = 300
+
+    def __init__(self, on_events, active=lambda: True, self_names=lambda: [], clock=time.time):
+        self._on_events = on_events     # (list[AgentEvent]) -> None
+        self.active = active            # 渡してよいか（AIが動いていて、本人がスイッチをONにしている）
+        self.self_names = self_names    # () -> このアカウントの表示名のリスト（監視スレッドから呼ばれる）
+        self._clock = clock
+        self._counts = None             # 前回の画面の {行の目印: 数}。None = まだ読んでいない
+        self._seq = 0
+
+    def reset(self):
+        """次に読む画面を「前からあった」扱いにする（監視を始め直した・ルームを出た・渡すのを止めていた）"""
+        self._counts = None
+
+    def on_rows(self, rows, is_own_text=lambda text: False):
+        """新しい行を出来事にして渡す。渡した出来事のリストを返す"""
+        first = self._counts is None
+        previous = self._counts or {}
+        counts, seen, marks = {}, {}, []
+        for row in rows or []:
+            key = chat_row_key(row)
+            if not key:
+                marks.append(None)
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            seen[key] = seen.get(key, 0) + 1
+            marks.append((key, seen[key] > previous.get(key, 0)))     # (目印, 新しいか)
+        self._counts = counts
+        known_positions = [i for i, m in enumerate(marks) if m and not m[1]]
+        last_known = known_positions[-1] if known_positions else None
+        whole_screen_changed = bool(previous) and last_known is None
+
+        now = self._clock()
+        my_names = list(self.self_names() or [])
+
+        def is_me(name):
+            return bool(name) and any(friend_name_matches(name, mine) for mine in my_names)
+
+        events = []
+        for i, (row, mark) in enumerate(zip(rows or [], marks)):
+            if not mark or not mark[1] or row["kind"] not in (CHAT_KIND_MESSAGE, CHAT_KIND_NOTICE):
+                continue
+            backlog = first or whole_screen_changed or (last_known is not None and i < last_known)
+            self._seq += 1
+            text = (row["text"] or "")[:self.MAX_TEXT]
+            if row["kind"] == CHAT_KIND_MESSAGE:
+                kind, speaker = AGENT_KIND_MESSAGE, row["name"]
+                is_self = is_me(speaker) or bool(is_own_text(row["text"]))
+            else:
+                kind = AGENT_KIND_NOTICE
+                speaker = row["subject"] if row["notice"] in NOTICE_KINDS_WITH_PERSON else None
+                is_self = is_me(speaker)
+            events.append(AgentEvent(
+                event_id=new_agent_event_id(), kind=kind, source=AGENT_SOURCE_GRAVITY,
+                key=f"gravity:{mark[0]}#{self._seq}", speaker=speaker or None, text=text, observed_at=now,
+                meta={"backlog": backlog, "notice": row.get("notice", "")}, is_self=is_self))
+        if events:
+            self._on_events(events)
+        return events
+
+
 # GRAVITYの音声ルームのチャット欄と入力欄の部品（GRAVITY画面部品.md。ゲストの画面で実測）
 CHAT_LIST_ID = "rvMessages"     # チャット欄の一覧。⚠️ 上端は画面で変わる（実測 159 と 248）。決め打ちせず毎回探す
 ROOM_INPUT_ID = "etText"        # 入力欄。空のときは案内文「メッセージを送信」が文字として入っている
+
+
+ROOM_SHEET_ID = "design_bottom_sheet"     # 下から出るシート（チャットの入力・人の情報・ギフトなど）
+ROOM_SEND_ID = "btnSend"                   # チャットの入力のシートの「送る」
+
+# チャット欄が読めないときの案内（2026-10-16 本人「チャット欄が見つかりませんと表示される」）。
+# ⚠️ シートが開いていると、画面の読み取りにはシートの部品しか出ず、後ろのルーム（チャット欄）が隠れる。
+#    ルームは開いているのに「ルームを開くと」と案内すると、何をすればよいか分からない
+CHAT_HIDDEN_BY_INPUT = ("✍️ チャットの入力欄が開いているあいだは、後ろのチャット欄が隠れて読めません。"
+                        "打ち終えるか、MuMuで戻る（BACK）を押して入力欄を閉じると、また読み始めます。")
+CHAT_HIDDEN_BY_SHEET = ("⏳ ルームの上に、下から出る画面（シート）が開いていて、チャット欄が隠れています。"
+                        "閉じると、また読み始めます。")
+CHAT_NOT_IN_ROOM = "⏳ 音声ルームのチャット欄が見つかりません。ルームを開くと読み始めます。"
+
+
+def chat_missing_message(xml_dump, display=None):
+    """チャット欄が読めないとき、どうすれば読めるようになるかの案内（入力欄・シート・ルームの外）"""
+    if find_by_id(xml_dump, ROOM_SHEET_ID, display):
+        if find_by_id(xml_dump, ROOM_INPUT_ID, display) and find_by_id(xml_dump, ROOM_SEND_ID, display):
+            return CHAT_HIDDEN_BY_INPUT
+        return CHAT_HIDDEN_BY_SHEET
+    return CHAT_NOT_IN_ROOM
 
 
 def find_chat_list_bounds(xml_dump, display=None):
@@ -4464,6 +4569,13 @@ class MuMuController:
 # ====================================================
 # 🤖 2. 監視ワーカー (uiautomator2 + XML解析 + 自動返信)
 # ====================================================
+class AgentChatText(str):
+    """
+    AI がチャットに書き込む文（段階5b）。手入力送信の待ち行列に、手入力の文と一緒に並ぶ。
+    ふつうの文字列と同じに送られるが、印が付いているので緊急停止で AI の分だけ捨てられる（本人の手入力は消さない。T50）
+    """
+
+
 class AutoReplyWorker:
     def __init__(self, db: DatabaseManager, log_callback):
         self.db = db
@@ -4525,8 +4637,13 @@ class AutoReplyWorker:
         self._recent_reply_texts = []
         # 範囲を選ばずに開始したか（チャット欄の枠を監視範囲にする）。_run_monitor が決める
         self._auto_range = False
-        # 範囲を選ばずに開始したとき、始めた時点でチャット欄が見つかったか
+        # 範囲を選ばずに開始したとき、始めた時点でチャット欄が見つかったか（見つからなければ、出した案内の文）
         self._auto_chat_found = False
+        self._auto_chat_missing_message = None
+        # チャット欄の行を AI へ渡す橋（GravityChatBridge）。App が set_agent_bridge で渡す。None なら渡さない
+        self._agent_bridge = None
+        # AIタブの判断のログにも出したいこと（AIの文を実際に送れたか・チャット欄が隠れたか）。App が渡す（監視スレッドから呼ぶ）
+        self.agent_note = None
 
     def log(self, message):
         # 画面には実際の内容を表示し、DBに保存する分だけ第三者の名前を伏せる
@@ -4559,6 +4676,31 @@ class AutoReplyWorker:
 
     def is_alive(self):
         return self.thread is not None and self.thread.is_alive()
+
+    def set_agent_bridge(self, bridge):
+        """チャット欄の行を AI へ渡す橋をつなぐ（段階5）。⚠️ 渡すかどうかは bridge.active() が毎周回決める"""
+        self._agent_bridge = bridge
+
+    def _agent_note(self, message):
+        """AIタブの判断のログにも出す（2026-10-16 本人「AIの判断記録ログにも表示できるようにした方がいい」）"""
+        note = self.agent_note
+        if note is None:
+            return
+        try:
+            note(message)
+        except Exception:
+            pass
+
+    def _agent_bridge_active(self):
+        bridge = self._agent_bridge
+        try:
+            return bridge is not None and bool(bridge.active())
+        except Exception:
+            return False
+
+    def _reset_agent_bridge(self):
+        if self._agent_bridge is not None:
+            self._agent_bridge.reset()
 
     # --- 手入力送信 ---
     # 送信待ちに積める上限。連打などで無限にたまらないようにする
@@ -4603,6 +4745,29 @@ class AutoReplyWorker:
         if waiting > 1:
             return 1, f"送信待ちに追加しました（順番待ち{waiting}件）。"
         return 1, "送信待ちに追加しました。"
+
+    def enqueue_agent_text(self, text):
+        """
+        AI の文を1件、送信待ちに積む（段階5b）。戻り値: (受け付けたか, 理由)。
+        ⚠️ 送るのは手入力と同じく監視スレッドだけ。送った文は自分の発言として覚える（自分に自動返信しない）
+        """
+        text = (text or "").strip()
+        if not text:
+            return False, "送る文がありません。"
+        if not (self.is_running and self.is_alive()):
+            return False, "監視中ではないため送信できません。"
+        with self._manual_lock:
+            if len(self._manual_queue) >= self.MAX_MANUAL_QUEUE:
+                return False, "送信待ちが一杯です。"
+            self._manual_queue.append(AgentChatText(text))
+        return True, ""
+
+    def discard_agent_texts(self):
+        """送信待ちから AI の文だけを捨てる（緊急停止）。捨てた件数を返す"""
+        with self._manual_lock:
+            before = len(self._manual_queue)
+            self._manual_queue = [t for t in self._manual_queue if not isinstance(t, AgentChatText)]
+            return before - len(self._manual_queue)
 
     def enqueue_manual_text(self, text):
         """手入力した1件を送信待ちに積む。戻り値: (受け付けたか, 画面に出す文言)"""
@@ -4799,10 +4964,12 @@ class AutoReplyWorker:
         self._update_target_display(xml)
         box = find_chat_list_bounds(xml, self._target_display)
         self._auto_chat_found = bool(box)
+        self._auto_chat_missing_message = None
         if box:
             self.log(f"💬 音声ルームのチャット欄を見つけました。この中を見ます（Y {box[1]}〜{box[3]}px。範囲の選択は要りません）。")
             return box[1], box[3], w_height
-        self.log("⏳ 音声ルームのチャット欄が見つかりません。ルームを開くと読み始めます。")
+        self._auto_chat_missing_message = chat_missing_message(xml, self._target_display)
+        self.log(self._auto_chat_missing_message)
         return 0, w_height, w_height
 
     def _log_active_keywords(self):
@@ -5690,8 +5857,27 @@ class AutoReplyWorker:
 
         return self._type_reply_text(d, reply_message)
 
+    def _set_focused_text(self, d, reply_message):
+        """
+        今選ばれている入力欄に、文字を直接入れる（部品の操作。文字入力の切り替えを使わないので速い）。入ったら True。
+        改行もそのまま入る（d.send_keys が MuMu で結局使っていたのと同じやり方。2026-10-14 の記録）
+        """
+        try:
+            d(focused=True).set_text(reply_message, timeout=self.FOCUSED_FIELD_WAIT)
+        except Exception:
+            return False
+        time.sleep(0.2)
+        return self._input_text_matches(d, reply_message)
+
     def _type_reply_text(self, d, reply_message):
-        """IME経由で直接入力する（貼り付けが使えない端末での本命の入力方法）"""
+        """
+        直接入力する（貼り付けが使えない端末での本命の入力方法）。
+        まず入力欄に直接入れ（速い）、入らなかったときだけ IME 経由（d.send_keys）にする。
+        ⚠️ d.send_keys は MuMu では文字入力の切り替えを待ってやり直し、約9秒かかってから同じ直接入力に切り替わっていた
+        """
+        if self._set_focused_text(d, reply_message):
+            self.log("⌨️ 入力欄に文字を入れました。")
+            return True
         try:
             d.send_keys(reply_message)
             time.sleep(0.4)
@@ -5773,13 +5959,25 @@ class AutoReplyWorker:
         self._check_after_action(d, f"送信ボタン「{label[:10]}」をタップ")
         return True
 
-    def _send_reply(self, d, reply_message):
-        """入力欄に返信ワードを入れて送信する（入力欄は呼び出し側でタップ済み）"""
+    # 入力欄（今選ばれている部品）を直接さわるときに、部品が見つかるまで待つ秒数
+    FOCUSED_FIELD_WAIT = 2.0
+
+    def _clear_input(self, d):
+        """
+        入力欄を空にする。
+        ⚠️ d.clear_text() を使わない。uiautomator2 は先に自分の文字入力（AdbKeyboard）へ切り替えようとするが、
+           MuMu はその切り替えを止める（MuMuIMETrace: ime shell BLOCKED）。切り替えを5秒待ち、3回やり直した末に失敗するので、
+           1回あたり約8秒を捨てていた（2026-10-16 本人「応答遅いの気になる」）。今選ばれている部品を直接空にする
+        """
         try:
-            d.clear_text()
-            time.sleep(0.2)
+            d(focused=True).clear_text(timeout=self.FOCUSED_FIELD_WAIT)
+            time.sleep(0.1)
         except Exception:
             pass
+
+    def _send_reply(self, d, reply_message):
+        """入力欄に返信ワードを入れて送信する（入力欄は呼び出し側でタップ済み）"""
+        self._clear_input(d)
 
         if not self._fill_reply_text(d, reply_message):
             return False
@@ -5967,7 +6165,8 @@ class AutoReplyWorker:
                 while len(self._recent_manual_texts) > self.MAX_RECENT_MANUAL_TEXTS:
                     self._recent_manual_texts.pop(0)
 
-            self.log(f"✍️ 手入力送信します:「{text}」")
+            self.log(f"🤖 AIの文を送信します:「{text}」" if isinstance(text, AgentChatText)
+                     else f"✍️ 手入力送信します:「{text}」")
             failure_count, sent_ok = self._execute_reply(
                 d, nodes, half_y, y_min_internal, y_max_internal, text,
                 failure_count, FAILURE_WARN_THRESHOLD, all_nodes=all_nodes
@@ -5975,6 +6174,9 @@ class AutoReplyWorker:
             sent_any = True
             if not sent_ok:
                 self.log("⚠️ 手入力送信に失敗しました。入力欄に文字が残っていないか確認してください。")
+            if isinstance(text, AgentChatText):
+                self._agent_note(f"✉️ チャットに送りました:「{text}」" if sent_ok
+                                 else f"⚠️ チャットに送れませんでした（入力欄・送るボタンが見つからない など）:「{text}」")
 
             with self._manual_lock:
                 more = bool(self._manual_queue)
@@ -6013,6 +6215,8 @@ class AutoReplyWorker:
         # 対象アプリを変えた場合や、まだ起動しきっていない場合に、
         # 古い画面を相手にしてしまうため。
         self._target_display = None
+        # AI へ渡す行も、始めた時点の画面は「前からあった」にする（前回の監視の続きにしない）
+        self._reset_agent_bridge()
         try:
             d = self._connect_to_emulator()
         except Exception as e:
@@ -6030,8 +6234,10 @@ class AutoReplyWorker:
             self.log(f"❌ 監視範囲の計算に失敗しました: {e}")
             self.log("💡 エミュレータのウインドウが最小化・非表示になっていないか確認してください。")
             return
-        # 開始のときに「チャット欄が見つかりません」と出していれば、周回の中では繰り返さない
-        chat_missing_logged = self._auto_range and not self._auto_chat_found
+        # 開始のときに「チャット欄が見つかりません」などと出していれば、周回の中では同じ案内を繰り返さない
+        # （出した案内の文を覚える。入力欄が開いた・閉じたなど、理由が変わったら出し直す）
+        chat_missing_logged = (getattr(self, "_auto_chat_missing_message", None) or True) \
+            if self._auto_range and not self._auto_chat_found else False
 
         half_y = w_height / 2
 
@@ -6112,13 +6318,18 @@ class AutoReplyWorker:
                 # チャット欄が無い（ルームの画面でない・小さくしている）間は、何も検知せずに待つ。
                 # ⚠️ 前の枠のまま読むと、ホーム画面などの文字に反応してしまう
                 if chat_missing:
-                    if not chat_missing_logged:
-                        self.log("⏳ 音声ルームのチャット欄が見つかりません。ルームを開くと読み始めます。")
-                        chat_missing_logged = True
+                    message = chat_missing_message(xml_dump, self._target_display)
+                    if chat_missing_logged != message:
+                        self.log(message)
+                        self._agent_note(message)
+                        chat_missing_logged = message
+                    # ルームに戻ったときの画面は「前からあった」にする（出ている間の発言に今さら反応しない）
+                    self._reset_agent_bridge()
                     time.sleep(0.5)
                     continue
                 if chat_missing_logged:
-                    self.log(f"💬 チャット欄が見つかったので、読み始めます（Y {y_min_internal}〜{y_max_internal}px）。")
+                    self.log(f"💬 チャット欄が見えるようになったので、読み始めます（Y {y_min_internal}〜{y_max_internal}px）。")
+                    self._agent_note("💬 チャット欄が見えるようになったので、また読み始めます。")
                     chat_missing_logged = False
 
                 # 手入力送信の待ちがあれば、キーワード判定より先に送る。
@@ -6137,14 +6348,25 @@ class AutoReplyWorker:
                 chat_texts = [item for item in chat_texts if not any(ignore in item[0] for ignore in IGNORE_WORDS)]
                 out_of_bounds_texts = [t for t in out_of_bounds_texts if not any(ignore in t for ignore in IGNORE_WORDS)]
 
-                # 対象を選んだペア（人の発言だけ・お知らせだけ・お知らせの種類）があるときだけ、
+                # 対象を選んだペア（人の発言だけ・お知らせだけ・お知らせの種類）があるか、AI へ渡すときだけ、
                 # チャット欄の行を意味で読む。今まで通りのペアだけなら読まない（動きも重さも変えない）
+                agent_active = self._agent_bridge_active()
                 chat_rows = []
-                if any(t != KEYWORD_TARGET_ANY for t in self._keyword_targets.values()):
+                if agent_active or any(t != KEYWORD_TARGET_ANY for t in self._keyword_targets.values()):
                     try:
                         chat_rows = parse_chat_rows(xml_dump, self._target_display)
                     except ET.ParseError:
                         chat_rows = []
+                # AI へ新しい行を渡す（段階5）。⚠️ 渡すだけ。AI の判断と声は別のスレッドで、監視は待たない
+                if agent_active:
+                    own_replies = [r for r in keywords_map.values() if r and KEYWORD_NAME_PLACEHOLDER not in r]
+                    try:
+                        self._agent_bridge.on_rows(
+                            chat_rows, lambda text: any(r in text for r in own_replies) or self._is_own_manual_text(text))
+                    except Exception:
+                        write_error_log(f"AIへチャット欄の行を渡す処理でエラー:\n{traceback.format_exc()}")
+                else:
+                    self._reset_agent_bridge()
                 row_keys = [key for key in (chat_row_key(row) for row in chat_rows) if key]
 
                 # 画面から流れて消えた行は「返信済み」の記録から外す。
@@ -9435,6 +9657,15 @@ class App(ctk.CTk):
         self.agent_runtime = None      # 初めて使うときに作る（使わない人の PC に agent_data.db を作らない）
         self.agent_store = None
         self._agent_mock = None
+        # GRAVITYのチャット欄の行を AI へ渡すか（段階5）。⚠️ 監視スレッドが読むので Tk の変数ではなく素の値で持つ
+        self._agent_gravity_on = self.db.get_setting(self.AGENT_GRAVITY_SETTING, "0") == "1"
+        # このアカウントの表示名（監視スレッドが読むので素の値で持つ。設定を保存したら入れ替える）
+        self._agent_self_names = AgentConfig.load(self.db.get_setting).self_name_list
+        self.agent_bridge = GravityChatBridge(self._on_gravity_events, active=self._agent_gravity_active,
+                                              self_names=lambda: self._agent_self_names)
+        self.worker.set_agent_bridge(self.agent_bridge)
+        # 監視ワーカーで起きた、AIに関わること（実際に送れたか・チャット欄が隠れたか）も判断のログに出す
+        self.worker.agent_note = lambda message: self._post_to_ui(lambda: self._append_agent_log(message))
 
         frame = ctk.CTkScrollableFrame(self.tab_agent, fg_color="transparent")
         frame.pack(fill="both", expand=True, padx=20, pady=15)
@@ -9445,7 +9676,8 @@ class App(ctk.CTk):
             frame,
             text="手で入れた出来事に対して、AIが「黙る」か「喋る」かを決める流れを確かめられます。\n"
                  "AIは設定タブ「🤖 AI API」で選んだ提供元を使います（テスト用（模擬）か Gemini）。\n"
-                 "GRAVITYのチャットとはまだつながっていません。AIの声はPCのスピーカーにだけ鳴り、ルームには流しません。",
+                 "「💬 GRAVITYのチャットをAIに渡す」をONにすると、監視中に読んだチャット欄の新しい行もAIに届きます。\n"
+                 "応答のしかたは「声（PCのスピーカーだけ）」か「チャットに書き込む」を選べます。声はルームには流しません。",
             justify="left", text_color="gray70"
         ).pack(anchor="w", pady=(0, 10))
 
@@ -9473,6 +9705,11 @@ class App(ctk.CTk):
         ctk.CTkButton(buttons, text="⏹ 音声を止める", width=120, fg_color="#8B0000", hover_color="#5C0000",
                       command=self.stop_speech).pack(side="left", padx=5)
 
+        self.agent_gravity_var = ctk.BooleanVar(value=self._agent_gravity_on)
+        ctk.CTkSwitch(control, text="💬 GRAVITYのチャットをAIに渡す（メインタブで監視している間だけ）",
+                      variable=self.agent_gravity_var, command=self.on_agent_gravity_toggled).pack(
+            anchor="w", padx=12, pady=(2, 6))
+
         self.agent_usage_label = ctk.CTkLabel(control, text="", text_color="gray70", justify="left")
         self.agent_usage_label.pack(anchor="w", padx=12, pady=(0, 10))
 
@@ -9483,11 +9720,22 @@ class App(ctk.CTk):
         config = AgentConfig.load(self.db.get_setting)
         row = ctk.CTkFrame(settings, fg_color="transparent")
         row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
-        ctk.CTkLabel(row, text="AIの名前:", width=110, anchor="w").pack(side="left")
-        self.agent_name_entry = ctk.CTkEntry(row, width=160, placeholder_text="例: アイ（呼ばれたら応じる）")
+        ctk.CTkLabel(row, text="AIの呼ばれ方:", width=110, anchor="w").pack(side="left")
+        self.agent_name_entry = ctk.CTkEntry(row, width=260, placeholder_text="例: アイ、アイちゃん（「、」で区切って複数）")
         self.agent_name_entry.pack(side="left", padx=(0, 12))
+        self.agent_name_entry.bind("<Button-3>", self._show_entry_context_menu)
         if config.ai_name:      # ⚠️ 空を入れると、薄く出る説明（placeholder）が消える
             self.agent_name_entry.insert(0, config.ai_name)
+        self_row = ctk.CTkFrame(settings, fg_color="transparent")
+        self_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(self_row, text="自分の\nアカウント名:", width=110, anchor="w", justify="left").pack(side="left")
+        self.agent_self_names_entry = ctk.CTkEntry(
+            self_row, width=260, placeholder_text="GRAVITYでのこのアカウントの表示名")
+        self.agent_self_names_entry.pack(side="left", padx=(0, 8))
+        self.agent_self_names_entry.bind("<Button-3>", self._show_entry_context_menu)
+        if config.self_names:
+            self.agent_self_names_entry.insert(0, config.self_names)
+        ctk.CTkLabel(self_row, text="（この名前の発言は、AI自身の発言として扱う）", text_color="gray70").pack(side="left")
         ctk.CTkLabel(row, text="1日にAIを呼ぶ上限:", anchor="w").pack(side="left", padx=(0, 6))
         self.agent_limit_entry = ctk.CTkEntry(row, width=70)
         self.agent_limit_entry.pack(side="left", padx=(0, 4))
@@ -9523,6 +9771,20 @@ class App(ctk.CTk):
         self.agent_mock_mode_var = ctk.StringVar(value=MOCK_MODE_LABELS[MOCK_MODE_SCRIPT])
         ctk.CTkOptionMenu(mock_row, variable=self.agent_mock_mode_var, values=list(MOCK_MODE_LABELS.values()),
                           command=self.on_agent_mock_mode_selected, width=280).pack(side="left")
+
+        output_row = ctk.CTkFrame(settings, fg_color="transparent")
+        output_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(output_row, text="応答のしかた:", width=110, anchor="w").pack(side="left")
+        self.agent_output_var = ctk.StringVar(value=self.AGENT_OUTPUT_LABELS[config.output_mode])
+        ctk.CTkOptionMenu(output_row, variable=self.agent_output_var, values=list(self.AGENT_OUTPUT_LABELS.values()),
+                          command=self.on_agent_output_selected, width=260).pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(output_row, text="チャットに送る前に:").pack(side="left", padx=(0, 6))
+        self.agent_chat_send_var = ctk.StringVar(value=self.AGENT_CHAT_SEND_LABELS[config.chat_send_mode])
+        ctk.CTkOptionMenu(output_row, variable=self.agent_chat_send_var,
+                          values=list(self.AGENT_CHAT_SEND_LABELS.values()),
+                          command=self.on_agent_chat_send_selected, width=220).pack(side="left")
+        ctk.CTkLabel(settings, text="チャットは1分に1通・1時間に20通まで。送るのはメインタブの監視です（監視していないと送れません）。",
+                     text_color="gray70").pack(anchor="w", padx=12, pady=(0, 10))
 
         self.build_agent_persona_section(frame)
 
@@ -9668,6 +9930,206 @@ class App(ctk.CTk):
             return
         self._fill_agent_persona(Persona())
 
+    # --- AIタブ: GRAVITYのチャットを渡す（段階5） ---
+    AGENT_GRAVITY_SETTING = "agent.gravity_bridge"
+    AGENT_GRAVITY_CONSENT_SETTING = "agent.gravity_consent"     # 了解をもらった提供元（変えたら聞き直す）
+
+    def _agent_gravity_active(self):
+        """監視スレッドから呼ばれる。⚠️ Tk に触らない"""
+        runtime = self.agent_runtime
+        return bool(self._agent_gravity_on and runtime is not None and runtime.running
+                    and runtime.state != AGENT_EMERGENCY)
+
+    def _confirm_agent_gravity_consent(self):
+        """
+        ルームの他の人の名前と発言を外部の AI へ送ってよいか、本人に確かめる（設計書/06 の 8章 H1・H8）。
+        模擬なら送らないので聞かない。提供元を変えたら聞き直す。了解をもらえたら True
+        """
+        info = provider_by_id(self.db.get_setting("ai_api_provider", DEFAULT_PROVIDER_ID) or DEFAULT_PROVIDER_ID)
+        if info.factory is None or info.factory is MockProvider:
+            return True
+        if self.db.get_setting(self.AGENT_GRAVITY_CONSENT_SETTING, "") == info.provider_id:
+            return True
+        free_tier = ("\n\n⚠️ Geminiの無料枠では、送った内容がGoogleの製品の改善に使われます（有料枠では使われません）。"
+                     if info.factory is GeminiProvider else "")
+        ok = messagebox.askyesno(
+            "GRAVITYのチャットをAIに渡す",
+            f"チャット欄に出た、ルームの他の人の名前と発言を、{info.label}に送ってAIに判断させます。{free_tier}\n\n"
+            "AIの声はPCのスピーカーにだけ鳴り、ルームには流しません。チャットにも書き込みません。\n\n送ってよいですか？")
+        if ok:
+            self.db.save_setting(self.AGENT_GRAVITY_CONSENT_SETTING, info.provider_id)
+        return ok
+
+    def on_agent_gravity_toggled(self):
+        on = bool(self.agent_gravity_var.get())
+        if on and not self._confirm_agent_gravity_consent():
+            self.agent_gravity_var.set(False)
+            on = False
+        self._agent_gravity_on = on
+        self.db.save_setting(self.AGENT_GRAVITY_SETTING, "1" if on else "0")
+        if on:
+            note = "" if self.worker.is_running else "（メインタブで監視を始めると届きます）"
+            self._append_agent_log(f"💬 GRAVITYのチャットをAIに渡します{note}。")
+        else:
+            self._append_agent_log("💬 GRAVITYのチャットをAIに渡すのをやめました。")
+
+    def _on_gravity_events(self, events):
+        """監視スレッドから呼ばれる。新しい行を AI の受付箱へ入れ、AIタブのログに出す（⚠️ Tk には伝言板で）"""
+        runtime = self.agent_runtime
+        if runtime is None:
+            return
+        backlog, lines = 0, []
+        for event in events:
+            if not runtime.submit(event):
+                continue
+            if event.backlog:
+                backlog += 1
+                continue
+            who = f"{event.speaker}: " if event.kind == AGENT_KIND_MESSAGE else "お知らせ: "
+            mark = "（自分）" if event.is_self else ""
+            lines.append(f"📥 [GRAVITY] {who}{event.text}{mark}")
+        if backlog:
+            lines.insert(0, f"📜 画面にあった{backlog}件を、前からの会話として渡しました（これには反応しません）。")
+        for line in lines:
+            self._post_to_ui(lambda line=line: self._append_agent_log(line))
+
+    # --- AIタブ: 応答のしかた（声 / チャット。段階5b） ---
+    AGENT_OUTPUT_LABELS = {AGENT_OUTPUT_VOICE: "🔊 声で答える（PCのスピーカーだけ）",
+                           AGENT_OUTPUT_CHAT: "💬 チャットに書き込む"}
+    AGENT_CHAT_SEND_LABELS = {AGENT_CHAT_APPROVE: "毎回確認する（下書きを見せる）",
+                              AGENT_CHAT_AUTO: "確認せずに送る"}
+
+    def _set_agent_config_value(self, name, value):
+        """設定を1つ保存し、動いているエージェントにもすぐ効かせる"""
+        self.db.save_setting(f"agent.{name}", value)
+        if self.agent_runtime is not None:
+            setattr(self.agent_runtime.config, name, value)
+
+    def on_agent_output_selected(self, label):
+        mode = next((m for m, text in self.AGENT_OUTPUT_LABELS.items() if text == label), AGENT_OUTPUT_VOICE)
+        current = AgentConfig.load(self.db.get_setting).output_mode
+        if mode == current:
+            return
+        if mode == AGENT_OUTPUT_CHAT and not messagebox.askyesno(
+                "チャットに書き込む",
+                "AIが、GRAVITYのルームのチャットに書き込みます。\n"
+                "このアカウントの発言として、ルームの全員に見えます。\n\n"
+                "送るのはメインタブの監視です（監視していないと送れません）。1分に1通・1時間に20通までです。\n"
+                "「チャットに送る前に」が「毎回確認する」なら、送る前に下書きを見せます（60秒で捨てます）。\n\n"
+                "チャットに書き込むようにしますか？"):
+            self.agent_output_var.set(self.AGENT_OUTPUT_LABELS[current])
+            return
+        self._set_agent_config_value("output_mode", mode)
+        self._append_agent_log(f"🔀 応答のしかた: {self.AGENT_OUTPUT_LABELS[mode]}")
+
+    def on_agent_chat_send_selected(self, label):
+        mode = next((m for m, text in self.AGENT_CHAT_SEND_LABELS.items() if text == label), AGENT_CHAT_APPROVE)
+        current = AgentConfig.load(self.db.get_setting).chat_send_mode
+        if mode == current:
+            return
+        if mode == AGENT_CHAT_AUTO and not messagebox.askyesno(
+                "確認せずに送る",
+                "AIの文を、下書きを見せずにそのままチャットに送ります。\n"
+                "AIが変なことを書いても、送る前に止められません（緊急停止で、まだ送っていない分は捨てられます）。\n\n"
+                "確認せずに送るようにしますか？"):
+            self.agent_chat_send_var.set(self.AGENT_CHAT_SEND_LABELS[current])
+            return
+        self._set_agent_config_value("chat_send_mode", mode)
+        self._append_agent_log(f"🔀 チャットに送る前に: {self.AGENT_CHAT_SEND_LABELS[mode]}")
+
+    def _agent_post_chat(self, utterance, cancel):
+        """
+        AIの文をチャットへ（エージェントのスレッドから呼ばれる）。確認するなら下書きを見せて、本人の答えを待つ。
+        ⚠️ ここからエミュレータを触らない。監視ワーカーの送信待ちに積むだけ（送るのは監視スレッドだけ）
+        """
+        runtime = self.agent_runtime
+        config = runtime.config if runtime is not None else AgentConfig()
+        if not self.worker.is_running:
+            return AGENT_CHAT_FAILED       # 送れないのに下書きを見せても仕方ない
+        text = utterance.text
+        if config.chat_send_mode != AGENT_CHAT_AUTO:
+            holder, done = {"ok": False, "text": text}, threading.Event()
+            self._post_to_ui(lambda: self._show_agent_chat_draft(text, holder, done, cancel,
+                                                                 config.chat_approval_seconds))
+            while not done.wait(0.2):
+                if getattr(self, "_closing", False):
+                    return AGENT_SPEECH_CANCELLED
+                if cancel.cancelled:
+                    # 緊急停止。下書きはすぐ閉じる（窓の1秒ごとの見回りを待たない）
+                    self._post_to_ui(lambda: holder.get("close", lambda: None)())
+                    return AGENT_SPEECH_CANCELLED
+            if cancel.cancelled:
+                return AGENT_SPEECH_CANCELLED
+            if not holder["ok"]:
+                return AGENT_CHAT_DISCARDED
+            text = holder["text"]
+        ok, _reason = self.worker.enqueue_agent_text(text)
+        return AGENT_POSTED if ok else AGENT_CHAT_FAILED
+
+    def _show_agent_chat_draft(self, text, holder, done, cancel, seconds):
+        """AIの下書きを見せる（画面のスレッド）。送る / 捨てる / 時間切れ / 緊急停止で閉じて done を立てる"""
+        dialog = ctk.CTkToplevel(self)
+        self._apply_window_icon(dialog)
+        dialog.title("AIの下書き")
+        dialog.geometry("480x280")
+        dialog.attributes("-topmost", True)
+        self._agent_draft_dialog = dialog
+        names = "・".join(AgentConfig.load(self.db.get_setting).self_name_list) or "このアカウント"
+        ctk.CTkLabel(dialog, text="AIがチャットに書こうとしています。\n"
+                                  f"{names}の発言として、ルームの全員に見えます（直してから送ることもできます）。",
+                     justify="left", wraplength=450).pack(anchor="w", padx=14, pady=(12, 6))
+        box = ctk.CTkTextbox(dialog, height=90, wrap="word")
+        box.pack(fill="x", padx=14)
+        box.insert("1.0", text)
+        countdown = ctk.CTkLabel(dialog, text="", text_color="gray70")
+        countdown.pack(anchor="w", padx=14, pady=(4, 0))
+
+        def finish(ok):
+            if done.is_set():
+                return
+            holder["ok"] = ok
+            holder["text"] = " ".join(box.get("1.0", "end").split())
+            done.set()
+            self._agent_draft_dialog = None
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        def send():
+            edited = " ".join(box.get("1.0", "end").split())
+            limit = self.get_manual_char_limit()
+            if not edited:
+                messagebox.showwarning("AIの下書き", "送る文が空です。", parent=dialog)
+                return
+            if limit and len(edited) > limit:
+                messagebox.showwarning("AIの下書き", f"1通{limit}文字までです（今{len(edited)}文字）。", parent=dialog)
+                return
+            finish(True)
+
+        def tick(remaining):
+            if done.is_set():
+                return
+            if cancel.cancelled:
+                finish(False)
+                return
+            if remaining <= 0:
+                self._append_agent_log("⏱ 下書きは、時間が過ぎたので捨てました。")
+                finish(False)
+                return
+            countdown.configure(text=f"あと{remaining}秒で捨てます")
+            dialog.after(1000, tick, remaining - 1)
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(anchor="e", padx=14, pady=10)
+        ctk.CTkButton(buttons, text="🗑 捨てる", width=100, fg_color="gray", hover_color="#444444",
+                      command=lambda: finish(False)).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="📨 送る", width=100, fg_color="green", hover_color="darkgreen",
+                      command=send).pack(side="left")
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+        holder["close"] = lambda: finish(False)      # 緊急停止のとき、待っている側から閉じる
+        tick(int(seconds))
+
     # --- AIタブ: 中身 ---
     def _ensure_agent_runtime(self):
         """エージェントを（まだ無ければ）作る。作れなければ None（理由は画面に出す）"""
@@ -9687,6 +10149,7 @@ class App(ctk.CTk):
         deps = AgentDeps(
             provider_factory=self._agent_provider,
             speak=self._agent_speak,
+            post_chat=self._agent_post_chat,
             stop_speech=self.speech_service.stop_all,
             store=store,
             on_log=lambda line: self._post_to_ui(lambda: self._append_agent_log(line)),
@@ -9804,6 +10267,12 @@ class App(ctk.CTk):
         runtime = self._ensure_agent_runtime()
         if runtime is None:
             return
+        # 渡すスイッチがONのまま提供元を変えていたら、ここで聞き直す（了解が無ければスイッチを切る）
+        if self._agent_gravity_on and not self._confirm_agent_gravity_consent():
+            self.agent_gravity_var.set(False)
+            self._agent_gravity_on = False
+            self.db.save_setting(self.AGENT_GRAVITY_SETTING, "0")
+            self._append_agent_log("💬 了解をもらえなかったので、GRAVITYのチャットは渡しません。")
         runtime.config = AgentConfig.load(self.db.get_setting)
         runtime.gate.config = runtime.config
         try:
@@ -9822,6 +10291,10 @@ class App(ctk.CTk):
 
     def emergency_stop_agent(self):
         """どの状態からでも。AIも音声もすぐ止め、「再開」を押すまで何もしない"""
+        # まだ送っていない AI の文を捨てる（本人の手入力の分は残す。T50）
+        dropped = self.worker.discard_agent_texts()
+        if dropped:
+            self.append_log(f"🛑 送信待ちにあったAIの文{dropped}件を捨てました。")
         if self.agent_runtime is not None:
             self.agent_runtime.emergency_stop()
         else:
@@ -9837,8 +10310,9 @@ class App(ctk.CTk):
     def save_agent_settings(self):
         config = AgentConfig.load(self.db.get_setting)
         name = self.agent_name_entry.get().strip()
-        if len(name) > 20:
-            messagebox.showwarning("AI", "AIの名前は20文字までにしてください。")
+        self_names = self.agent_self_names_entry.get().strip()
+        if len(name) > AGENT_NAMES_MAX_CHARS or len(self_names) > AGENT_NAMES_MAX_CHARS:
+            messagebox.showwarning("AI", f"呼ばれ方・自分のアカウント名は、それぞれ{AGENT_NAMES_MAX_CHARS}文字までにしてください。")
             return
         try:
             limit = int(self.agent_limit_entry.get().strip())
@@ -9858,14 +10332,16 @@ class App(ctk.CTk):
             messagebox.showwarning("AI", "費用の上限は、0以上の数（米ドル）で入れてください。")
             return
         model = next((code for code, label in GEMINI_MODELS if label == self.agent_model_var.get()), GEMINI_DEFAULT_MODEL)
-        config.ai_name, config.daily_call_limit = name, limit
+        config.ai_name, config.self_names, config.daily_call_limit = name, self_names, limit
         config.daily_cost_limit_usd, config.monthly_cost_limit_usd, config.model = cost_day, cost_month, model
         config.save(self.db.save_setting)
+        self._agent_self_names = config.self_name_list
         if self.agent_runtime is not None:
             live = self.agent_runtime.config
-            live.ai_name, live.daily_call_limit = name, limit
+            live.ai_name, live.self_names, live.daily_call_limit = name, self_names, limit
             live.daily_cost_limit_usd, live.monthly_cost_limit_usd, live.model = cost_day, cost_month, model
-        self._append_agent_log(f"⚙️ 設定を保存しました（AIの名前: {name or '（なし）'}、1日の上限: {limit}回、"
+        self._append_agent_log(f"⚙️ 設定を保存しました（呼ばれ方: {'・'.join(config.ai_names) or '（なし）'}、"
+                               f"自分のアカウント名: {'・'.join(config.self_name_list) or '（なし）'}、1日の上限: {limit}回、"
                                f"費用の上限: 1日 ${cost_day:g}・1か月 ${cost_month:g}、モデル: {model}）。"
                                "モデルの変更は、次に「▶ 開始」したときから使います。")
         self._refresh_agent_provider_label()

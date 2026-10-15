@@ -5,6 +5,7 @@
 上から順に見て、当たったらそこで決める。R1（停止中）と R4（同じ出来事）は受付箱の入口で落とすので、ここには来ない。
 """
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -25,6 +26,8 @@ RULE_TEXTS = {
 
 # 記号・空白だけ（R9）。文字・数字が1つも無いもの
 _NO_WORD = re.compile(r"^[\W_]*$", re.UNICODE)
+# チャット欄のメンションは長い名前が「@名前..」と切れて出る（2026-10-16 実物で確認）
+_CUT_MENTION = re.compile(r"@([^\s@]+?)(?:\.\.+|…)")
 
 
 @dataclass
@@ -54,9 +57,31 @@ class GateResult:
         return RULE_TEXTS.get(self.rule_id, "")
 
 
-def is_strong_signal(event, ai_name):
-    """AI の名前が呼ばれた（自分の発言・起動前からあった行は数えない）"""
-    return bool(ai_name) and not event.is_self and not event.backlog and ai_name in (event.text or "")
+def _norm(text):
+    return unicodedata.normalize("NFKC", text or "").strip()
+
+
+def mentions_name(text, names):
+    """
+    名前のどれかで呼ばれているか。名前そのものが入っているか、切れたメンション「@名前..」の先頭が名前と同じか。
+    ⚠️ 切れた残りが1文字だと別の人の名前とも合うので、2文字以上のときだけ（friend_name_matches と同じ考え）
+    """
+    text = _norm(text)
+    names = [n for n in (_norm(n) for n in names) if n]
+    if any(name in text for name in names):
+        return True
+    for match in _CUT_MENTION.finditer(text):
+        head = match.group(1)
+        if len(head) >= 2 and any(name.lstrip("@").startswith(head) for name in names):
+            return True
+    return False
+
+
+def is_strong_signal(event, ai_names):
+    """AI が呼ばれた（自分の発言・起動前からあった行は数えない）"""
+    if isinstance(ai_names, str):
+        ai_names = [ai_names] if ai_names else []
+    return not event.is_self and not event.backlog and mentions_name(event.text, ai_names)
 
 
 def is_meaningless(event, ignore_words):
@@ -75,7 +100,7 @@ class Gate:
             return GateResult(OBSERVE, "R2")
         if not fresh:
             return GateResult(OBSERVE, "R3")
-        strong = any(is_strong_signal(e, c.ai_name) for e in fresh)
+        strong = any(is_strong_signal(e, c.call_names) for e in fresh)
         if snap.listening:
             return GateResult(HOLD, "R5", None, strong)
         if not strong:
@@ -85,9 +110,12 @@ class Gate:
                 remaining = snap.last_utterance_end + c.min_gap_after_speaking - snap.now
                 if remaining > 0:
                     return GateResult(HOLD, "R6", remaining, strong)
-        last_minute = [t for t in snap.utterance_times if snap.now - t < 60]
-        last_hour = [t for t in snap.utterance_times if snap.now - t < 3600]
-        if len(last_minute) >= c.max_utterances_per_minute or len(last_hour) >= c.max_utterances_per_hour:
+        if not self._within_limits(snap):
+            # 呼ばれたときは捨てずに、1分の上限が空くまで待ってから返事する（1時間の上限なら記録だけ）。
+            # 2026-10-16 実物: 返事の55秒後にまた呼ばれ、1分1通の上限で記録だけになり、返事をしないままだった
+            wait = self._wait_for_limit(snap)
+            if strong and wait is not None:
+                return GateResult(HOLD, "R7", wait, strong)
             return GateResult(OBSERVE, "R7", None, strong)
         if (snap.calls_today >= c.daily_call_limit or snap.cost_today >= c.daily_cost_limit_usd
                 or snap.cost_month >= c.monthly_cost_limit_usd):
@@ -99,9 +127,23 @@ class Gate:
             return GateResult(HOLD, "R10", max(0.1, recent[0] + 60 - snap.now), strong)
         return GateResult(PASS, None, None, strong)
 
-    def utterance_allowed(self, snap):
-        """C5: 判断の間に発言の上限を超えていないか（喋る直前にもう一度見る）"""
-        c = self.config
+    def _within_limits(self, snap):
+        """発言の回数の上限（応答のしかたで変わる。チャットは1分に1通・1時間に20通）"""
+        per_minute, per_hour = self.config.utterance_limits
         last_minute = [t for t in snap.utterance_times if snap.now - t < 60]
         last_hour = [t for t in snap.utterance_times if snap.now - t < 3600]
-        return len(last_minute) < c.max_utterances_per_minute and len(last_hour) < c.max_utterances_per_hour
+        return len(last_minute) < per_minute and len(last_hour) < per_hour
+
+    def _wait_for_limit(self, snap):
+        """1分の上限が空くまでの秒数。1時間の上限に当たっていれば None（待っても空かない）"""
+        per_minute, per_hour = self.config.utterance_limits
+        if len([t for t in snap.utterance_times if snap.now - t < 3600]) >= per_hour:
+            return None
+        minute = sorted(t for t in snap.utterance_times if snap.now - t < 60)
+        if len(minute) < per_minute:
+            return 0.1
+        return max(0.1, minute[len(minute) - per_minute] + 60 - snap.now + 0.5)
+
+    def utterance_allowed(self, snap):
+        """C5: 判断の間に発言の上限を超えていないか（喋る直前にもう一度見る）"""
+        return self._within_limits(snap)

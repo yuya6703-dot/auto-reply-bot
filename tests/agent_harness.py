@@ -14,7 +14,7 @@ from agent.events import AgentEvent, KIND_CHAT_MESSAGE, SOURCE_TEST, make_manual
 from agent.llm.base import PURPOSE_DECIDE, PURPOSE_GENERATE
 from agent.llm.mock import MockProvider
 from agent.memory.store import AgentStore
-from agent.runtime import SPEECH_CANCELLED, SPOKEN, AgentDeps, AgentRuntime
+from agent.runtime import CHAT_DISCARDED, POSTED, SPEECH_CANCELLED, SPOKEN, AgentDeps, AgentRuntime
 
 FAILS = []
 
@@ -74,6 +74,26 @@ class FakeSpeaker:
         self.stop_all_calls += 1
 
 
+class FakeChat:
+    """AgentDeps.post_chat のにせもの。answer で返事を決める（POSTED / CHAT_DISCARDED / CHAT_FAILED / "wait"）"""
+
+    def __init__(self, answer=POSTED):
+        self.answer = answer
+        self.posted = []
+        self.asked = []
+        self.waiting = threading.Event()
+
+    def post(self, utterance, cancel):
+        self.asked.append(utterance.text)
+        if self.answer == "wait":           # 確認の画面で本人が迷っている（緊急停止で止まる）
+            self.waiting.set()
+            cancel.wait(10.0)
+            return SPEECH_CANCELLED if cancel.cancelled else CHAT_DISCARDED
+        if self.answer == POSTED:
+            self.posted.append(utterance.text)
+        return self.answer
+
+
 class Agent:
     """runtime・mock・speaker・store・ログをまとめたもの"""
 
@@ -84,12 +104,14 @@ class Agent:
         self.open_status = self.store.open()
         self.mock = MockProvider(mode=mode)
         self.speaker = FakeSpeaker(play_seconds)
+        self.chat = FakeChat()
         self.logs, self.notices, self.states, self.errors = [], [], [], []
         defaults = dict(settle_seconds=0.15, ai_name="アイ")
         defaults.update(config)
         self.config = AgentConfig(**defaults)
         self.runtime = AgentRuntime(AgentDeps(
             provider_factory=lambda: self.mock, speak=self.speaker.speak, stop_speech=self.speaker.stop_all,
+            post_chat=self.chat.post,
             store=self.store, on_log=self.logs.append, on_notice=self.notices.append,
             on_state=self.states.append, on_error=self.errors.append), self.config)
         if start:

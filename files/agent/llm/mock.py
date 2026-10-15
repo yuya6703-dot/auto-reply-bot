@@ -65,6 +65,8 @@ class MockProvider:
             cancel.wait(self.delay_seconds)
         if request.purpose == PURPOSE_DECIDE:
             item = self.script_decide.pop(0) if self.script_decide else self.mode
+            if request.hints.get("combined"):       # 判断と文を1回で（呼ばれたとき）
+                return self._respond(item, lambda mode: self._decide_with_text(mode, request.hints))
             return self._respond(item, lambda mode: self._decide(mode, request.hints))
         if request.purpose == PURPOSE_GENERATE:
             item = self.script_generate.pop(0) if self.script_generate else None
@@ -109,6 +111,14 @@ class MockProvider:
         return {"action": mode, "reason": reasons.get(mode, "（模擬）"),
                 "urgency": 0.8 if mode == MODE_ENGAGE else 0.3,
                 "target": target, "hold_seconds": 3 if mode == MODE_HOLD else None}
+
+    def _decide_with_text(self, mode, hints):
+        decision = self._decide(mode, hints)
+        if decision["action"] in (MODE_REACT, MODE_ENGAGE):
+            decision.update(self._generate({"action": decision["action"], "target": decision.get("target")}))
+        else:
+            decision.update(text=None, emotion=None)
+        return decision
 
     def _generate(self, hints):
         target = hints.get("target")

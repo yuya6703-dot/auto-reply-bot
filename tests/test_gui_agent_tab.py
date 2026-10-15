@@ -27,6 +27,26 @@ TMP = tempfile.mkdtemp()
 A.AGENT_DB_FILE = os.path.join(TMP, "agent_data.db")
 
 
+class FakeWorker:
+    """監視ワーカーの代わり（橋を受け取る・AIの文を積む）"""
+    is_running = False
+
+    def __init__(self):
+        self.bridge = None
+        self.agent_texts = []
+
+    def set_agent_bridge(self, bridge):
+        self.bridge = bridge
+
+    def enqueue_agent_text(self, text):
+        self.agent_texts.append(text)
+        return True, ""
+
+    def discard_agent_texts(self):
+        dropped, self.agent_texts = len(self.agent_texts), []
+        return dropped
+
+
 class Harness(ctk.CTk):
     """AIタブだけを組み立てる器。検証したいメソッドは本物を借りる"""
 
@@ -57,6 +77,23 @@ class Harness(ctk.CTk):
     _read_agent_persona = A.App._read_agent_persona
     save_agent_persona = A.App.save_agent_persona
     reset_agent_persona = A.App.reset_agent_persona
+    AGENT_GRAVITY_SETTING = A.App.AGENT_GRAVITY_SETTING
+    AGENT_GRAVITY_CONSENT_SETTING = A.App.AGENT_GRAVITY_CONSENT_SETTING
+    _agent_gravity_active = A.App._agent_gravity_active
+    _confirm_agent_gravity_consent = A.App._confirm_agent_gravity_consent
+    on_agent_gravity_toggled = A.App.on_agent_gravity_toggled
+    _on_gravity_events = A.App._on_gravity_events
+    AGENT_OUTPUT_LABELS = A.App.AGENT_OUTPUT_LABELS
+    AGENT_CHAT_SEND_LABELS = A.App.AGENT_CHAT_SEND_LABELS
+    _set_agent_config_value = A.App._set_agent_config_value
+    on_agent_output_selected = A.App.on_agent_output_selected
+    on_agent_chat_send_selected = A.App.on_agent_chat_send_selected
+    _agent_post_chat = A.App._agent_post_chat
+    _show_agent_chat_draft = A.App._show_agent_chat_draft
+    _apply_window_icon = staticmethod(A.App._apply_window_icon)
+
+    def get_manual_char_limit(self):
+        return 30
 
     def __init__(self, db):
         super().__init__()
@@ -69,6 +106,7 @@ class Harness(ctk.CTk):
             default_voice=lambda: "voicevox:3", default_volume=lambda: 50)
         self.tab_agent = ctk.CTkFrame(self)
         self.tab_agent.pack(fill="both", expand=True)
+        self.worker = FakeWorker()
 
     def _fake_play(self, wav, volume, cancel, device):
         self.played.append((wav.decode(), device))
@@ -175,6 +213,19 @@ h.agent_limit_entry.delete(0, "end"); h.agent_limit_entry.insert(0, "5")
 h.save_agent_settings()
 check("保存する（settings 表の agent.〜）", db.get_setting("agent.ai_name") == "アイ" and db.get_setting("agent.daily_call_limit") == "5")
 check("動いているエージェントにもすぐ効く", h.agent_runtime.config.ai_name == "アイ" and h.agent_runtime.config.daily_call_limit == 5)
+h.agent_name_entry.delete(0, "end"); h.agent_name_entry.insert(0, "テストちゃん、@テスト👼")
+h.agent_self_names_entry.insert(0, "テスト👼")
+h.save_agent_settings()
+check("呼ばれ方を複数・自分のアカウント名を保存する", db.get_setting("agent.ai_name") == "テストちゃん、@テスト👼"
+      and db.get_setting("agent.self_names") == "テスト👼")
+check("自分のアカウント名は、監視スレッドが読む値にもすぐ入る（橋が使う）", h.agent_bridge.self_names() == ["テスト👼"])
+check("動いているエージェントの呼ばれ方も変わる", h.agent_runtime.config.ai_names == ["テストちゃん", "@テスト👼"])
+h.agent_self_names_entry.delete(0, "end"); h.agent_self_names_entry.insert(0, "あ" * 61)
+h.save_agent_settings()
+check("長すぎれば保存しない", dialogs[-1][0] == "warning" and db.get_setting("agent.self_names") == "テスト👼")
+h.agent_self_names_entry.delete(0, "end"); h.agent_self_names_entry.insert(0, "テスト👼")
+h.agent_name_entry.delete(0, "end"); h.agent_name_entry.insert(0, "アイ")
+h.save_agent_settings()
 check("上限の表示も変わる", "/ 5回" in h.agent_usage_label.cget("text"), h.agent_usage_label.cget("text"))
 
 print("■ モデルと費用の上限")
@@ -218,6 +269,120 @@ h.reset_agent_persona()
 check("はいなら欄が既定に戻る（保存はしない）", h.agent_persona_widgets["name"].get() == ""
       and h.agent_store.load_persona("default").name == "ミント")
 
+print("■ GRAVITYのチャットを渡す（段階5）")
+check("既定はOFF・橋は監視ワーカーに渡してある", h.agent_gravity_var.get() is False and h.worker.bridge is h.agent_bridge)
+check("OFFなら渡さない（動いていても）", h.agent_runtime.running and not h._agent_gravity_active())
+asks = len([d for d in dialogs if d[0] == "ask"])
+h.agent_gravity_var.set(True)
+h.on_agent_gravity_toggled()
+check("模擬なら外へ送らないので聞かない", len([d for d in dialogs if d[0] == "ask"]) == asks)
+check("ONにすると渡す（保存もする）", h._agent_gravity_active() and db.get_setting("agent.gravity_bridge") == "1")
+from agent_harness import make_event
+before = len(h.agent_runtime.window.recent_events())
+h._on_gravity_events([make_event("前からの発言", speaker="伏せ字3", backlog=True),
+                      make_event("新しい発言", speaker="伏せ字7")])
+check("AIタブのログ: 前からあった件数と、新しい行", pump(h, lambda: "📥 [GRAVITY] 伏せ字7: 新しい発言" in agent_log(h))
+      and "📜 画面にあった1件を" in agent_log(h), agent_log(h)[-300:])
+h.emergency_stop_agent()
+check("緊急停止中は渡さない", not h._agent_gravity_active())
+h.resume_agent()
+pump(h)
+
+print("■ 応答のしかた（声 / チャット。段階5b）")
+check("既定は声", h.agent_output_var.get() == h.AGENT_OUTPUT_LABELS["voice"]
+      and h.agent_chat_send_var.get() == h.AGENT_CHAT_SEND_LABELS["approve"])
+answers.append(False)
+h.agent_output_var.set(h.AGENT_OUTPUT_LABELS["chat"])
+h.on_agent_output_selected(h.AGENT_OUTPUT_LABELS["chat"])
+check("チャットにするときは確かめる（全員に見えると書く）", dialogs[-1][0] == "ask" and "ルームの全員に見えます" in dialogs[-1][2])
+check("「いいえ」なら声のまま", h.agent_output_var.get() == h.AGENT_OUTPUT_LABELS["voice"]
+      and db.get_setting("agent.output_mode") != "chat", db.get_setting("agent.output_mode"))
+answers.append(True)
+h.agent_output_var.set(h.AGENT_OUTPUT_LABELS["chat"])
+h.on_agent_output_selected(h.AGENT_OUTPUT_LABELS["chat"])
+check("「はい」ならチャットにする（動いているエージェントにもすぐ効く）", db.get_setting("agent.output_mode") == "chat"
+      and h.agent_runtime.config.output_mode == "chat")
+answers.append(False)
+h.agent_chat_send_var.set(h.AGENT_CHAT_SEND_LABELS["auto"])
+h.on_agent_chat_send_selected(h.AGENT_CHAT_SEND_LABELS["auto"])
+check("「確認せずに送る」も確かめる。「いいえ」なら毎回確認のまま", h.agent_chat_send_var.get() == h.AGENT_CHAT_SEND_LABELS["approve"]
+      and db.get_setting("agent.chat_send_mode") != "auto", db.get_setting("agent.chat_send_mode"))
+
+print("■ 下書きを見せてから送る")
+import threading
+from agent.cancel import CancelToken
+from agent.generation import Utterance
+
+
+def post_in_thread(text, cancel=None):
+    """エージェントのスレッドの代わり。結果は box[0] に入る"""
+    box = []
+    th = threading.Thread(target=lambda: box.append(h._agent_post_chat(Utterance(text, "calm", "t"), cancel or CancelToken())))
+    th.start()
+    return th, box
+
+
+def draft_button(label):
+    stack = [h._agent_draft_dialog]
+    while stack:
+        widget = stack.pop()
+        if isinstance(widget, ctk.CTkButton) and widget.cget("text") == label:
+            return widget
+        stack.extend(widget.winfo_children())
+    return None
+
+
+h.worker.is_running = False
+th, box = post_in_thread("監視していない")
+th.join(2.0)
+check("監視していなければ、下書きを見せずに「送れない」", box == ["chat_failed"] and getattr(h, "_agent_draft_dialog", None) is None)
+h.worker.is_running = True
+th, box = post_in_thread("こんばんは")
+check("下書きを見せる", pump(h, lambda: getattr(h, "_agent_draft_dialog", None) is not None))
+draft = [w for w in h._agent_draft_dialog.winfo_children() if isinstance(w, ctk.CTkTextbox)][0]
+check("下書きに AI の文", draft.get("1.0", "end").strip() == "こんばんは")
+draft.delete("1.0", "end"); draft.insert("1.0", "あ" * 31)
+draft_button("📨 送る").invoke()
+check("1通の上限を超えるように直したら送らない（窓は閉じない）", dialogs[-1][0] == "warning" and "30文字" in dialogs[-1][2]
+      and h._agent_draft_dialog is not None)
+draft.delete("1.0", "end"); draft.insert("1.0", "こんばんは！\nよろしく")
+draft_button("📨 送る").invoke()
+th.join(2.0)
+check("送ると、直した文（改行は空白に）を送信待ちへ", box == ["posted"] and h.worker.agent_texts == ["こんばんは！ よろしく"],
+      (box, h.worker.agent_texts))
+th, box = post_in_thread("捨てられる文")
+pump(h, lambda: getattr(h, "_agent_draft_dialog", None) is not None)
+draft_button("🗑 捨てる").invoke()
+th.join(2.0)
+check("捨てたら送らない", box == ["discarded"] and h.worker.agent_texts == ["こんばんは！ よろしく"])
+h.agent_runtime.config.chat_approval_seconds = 1
+th, box = post_in_thread("放っておかれる文")
+check("時間が過ぎたら捨てる", pump(h, lambda: bool(box), timeout=5.0) and box == ["discarded"]
+      and "時間が過ぎたので捨てました" in agent_log(h))
+h.agent_runtime.config.chat_approval_seconds = 60
+token = CancelToken()
+th, box = post_in_thread("緊急停止される文", token)
+pump(h, lambda: getattr(h, "_agent_draft_dialog", None) is not None)
+token.cancel()
+t0 = time.time()
+check("緊急停止（取り消し）で下書きをすぐ閉じる（1秒の見回りを待たない）",
+      pump(h, lambda: bool(box) and h._agent_draft_dialog is None, timeout=3.0) and box == ["cancelled"]
+      and time.time() - t0 < 0.8, (box, h._agent_draft_dialog, round(time.time() - t0, 2)))
+answers.append(True)
+h.agent_chat_send_var.set(h.AGENT_CHAT_SEND_LABELS["auto"])
+h.on_agent_chat_send_selected(h.AGENT_CHAT_SEND_LABELS["auto"])
+th, box = post_in_thread("確認せずに送る文")
+th.join(2.0)
+check("確認せずに送るなら、下書きを見せずに送信待ちへ", box == ["posted"] and h.worker.agent_texts[-1] == "確認せずに送る文")
+h.emergency_stop_agent()
+check("緊急停止で、送信待ちの AI の文を捨てる", h.worker.agent_texts == [] and any("AIの文2件を捨てました" in m for m in h.logs),
+      h.logs[-2:])
+h.resume_agent()
+h.worker.is_running = False
+for key, value in (("output_mode", "voice"), ("chat_send_mode", "approve")):
+    h._set_agent_config_value(key, value)
+pump(h)
+
 print("■ 停止")
 h.stop_agent()
 check("止まる", h.agent_runtime.join(2.0))
@@ -227,8 +392,21 @@ h.agent_event_text_entry.insert(0, "止まった？")
 h.submit_agent_manual_event()
 check("止まっていたら開始を促す", dialogs[-1][0] == "info" and "開始" in dialogs[-1][2])
 
-print("■ Gemini（キーが無ければ始めない）")
+print("■ Gemini（キーが無ければ始めない・チャットを渡す了解）")
 db.save_setting("ai_api_provider", "gemini")
+answers.append(False)
+h.start_agent()
+check("渡すスイッチがONのまま Gemini にしたら、始める前に聞き直す", dialogs[-2][0] == "ask" and "無料枠" in dialogs[-2][2]
+      and "他の人の名前と発言" in dialogs[-2][2], dialogs[-2:])
+check("了解が無ければスイッチを切る", h.agent_gravity_var.get() is False and db.get_setting("agent.gravity_bridge") == "0")
+answers.append(True)
+h.agent_gravity_var.set(True)
+h.on_agent_gravity_toggled()
+check("了解したら、提供元ごとに覚える", db.get_setting("agent.gravity_consent") == "gemini" and h._agent_gravity_on)
+asks = len([d for d in dialogs if d[0] == "ask"])
+h.agent_gravity_var.set(False); h.on_agent_gravity_toggled()
+h.agent_gravity_var.set(True); h.on_agent_gravity_toggled()
+check("同じ提供元なら聞き直さない", len([d for d in dialogs if d[0] == "ask"]) == asks)
 h._refresh_agent_provider_label()
 check("使うAIにモデルと無料枠の注意を出す", "Gemini（Google）（gemini-3.1-flash-lite）" in h.agent_provider_label.cget("text")
       and "無料枠" in h.agent_provider_label.cget("text"), h.agent_provider_label.cget("text"))

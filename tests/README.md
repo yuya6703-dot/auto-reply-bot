@@ -12,7 +12,7 @@
 | `test_daily_task_worker.py` | 不要 | タスク・ルーレットの実行役 `GravityTaskWorker` を「にせのMuMu」で通しで動かす。守り（広告・音声ルーム・ポイント消費ボタンの近くでは何も送らない）と、各タスクの流れ |
 | `test_chat_rows.py` | 不要 | 音声ルームのチャット欄を「意味で読む」関数（`parse_chat_rows`）。発言・お知らせ・アナウンスの見分け方。⚠️ 今の自動返信はまだ使っていない |
 | `test_gui_daily_task.py` | 不要 | メインタブのタスク・ルーレットのボタンと、設定タブの区画。監視と同時に動かさないこと（画面が一瞬出る） |
-| `test_keyword_targets.py` | 不要 | キーワードのペアの「対象」（すべての文字／人の発言の本文だけ／お知らせの行だけ／［参加したとき］など）と返信ワードの `{名前}`。監視の本体を、伏せ字にした実物の音声ルームの画面で何周か回す |
+| `test_keyword_targets.py` | 不要 | キーワードのペアの「対象」（すべての文字／人の発言の本文だけ／お知らせの行だけ／［参加したとき］など）と返信ワードの `{名前}`。監視の本体を、伏せ字にした実物の音声ルームの画面で何周か回す。チャットの入力欄のシートが開いてチャット欄が隠れたときの案内（`fixtures/voiceroom_input_sheet.xml`） |
 | `test_gui_keyword_target.py` | 不要 | キーワード設定タブの「対象」の欄（選ぶと検知ワードの欄がどう変わるか、保存・選択・一覧の印）。画面が一瞬出る |
 | `test_agent_api_keys.py` | 不要 | AI API のキーの保存（DPAPI の暗号文だけが残る、DB・WAL・ログ・error_log.txt にキーが出ない、壊れた暗号文で止まらない、環境変数の優先、伏せ字、提供元の一覧、模擬の接続確認） |
 | `test_gui_ai_api.py` | 不要 | 設定タブの「🤖 AI API」区画（隠す・👁・保存・削除・接続確認・提供元の切り替え）。ボットがキーをログへ渡していないことも確かめる。画面が一瞬出る |
@@ -23,6 +23,9 @@
 | `test_gui_agent_tab.py` | 不要 | AIタブ（開始・停止・緊急停止・再開・手入力の出来事・設定・判断のログ）。AIの声がスピーカー（読み上げの出力先ではない）に行くことも。画面が一瞬出る |
 | `test_agent_gemini.py` | 不要 | Gemini のアダプター（にせの HTTP。**通信しない**）: 送る形（キーはヘッダーだけ・URL に入れない、responseJsonSchema、役割）、返事の読み方（考えた中身を除く・拒否・途中切れ）、失敗の種類とやり直してよいか、接続確認、費用の見積もり |
 | `run_agent_scenarios.py` | **`--live` のとき必要** | AIの判断の場面集（`fixtures/agent_scenarios.json`）を流して、喋るべき/黙るべきと合う割合を出す。ふつうは模擬で流す。`--live` は本物の Gemini（**費用がかかる。本人の了解をとってから**） |
+| `test_agent_gravity_bridge.py` | 不要 | GRAVITYのチャット欄の行をAIの出来事にする橋（段階5）: 同じ画面を何周読んでも1回だけ（T30）、始めた時点・上へ戻した昔の行は「前からあった」、自分の発言、AIへつないで前からの行には反応しないこと。監視の本体を にせの端末で回し、キーワード自動返信が今まで通りなことも |
+| `test_agent_chat_output.py` | 不要 | AIがチャットに書き込む（段階5b）: チャットに返す・声は使わない（T45）、捨てた下書きは数えない（T46）、長すぎる文（T47）、自分の文に反応しない（T48）、監視していないとき（T49）、緊急停止（T50）、1分1通、監視ワーカーの送信待ち（AIの文だけ捨てる・送った文は自分の発言） |
+| `test_fast_input.py` | 不要 | 入力欄へ文字を入れる・消すのを、今選ばれている部品を直接さわるやり方にした（MuMu では uiautomator2 の文字入力の切り替えが止められ、1回の送信で約17秒待っていた）。遅いやり方を呼ばないこと・入らないときは前のやり方へ戻ること |
 | `agent_harness.py` | ― | 上のAIのテストが共通で使う器（模擬のAI・にせの声・一時フォルダの `agent_data.db`）。テストそのものではない |
 
 ## 実行
@@ -44,6 +47,9 @@ python tests/test_agent_guards.py
 python tests/test_agent_lifecycle.py
 python tests/test_gui_agent_tab.py
 python tests/test_agent_gemini.py
+python tests/test_agent_gravity_bridge.py
+python tests/test_agent_chat_output.py
+python tests/test_fast_input.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方

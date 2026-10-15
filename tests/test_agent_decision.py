@@ -7,7 +7,7 @@ import time
 from agent_harness import Agent, check, finish, make_event, wait_until
 from agent.decision import parse_decision
 from agent.events import EVENT_BLOCK_BEGIN, EVENT_BLOCK_END, RECENT_BLOCK_BEGIN
-from agent.gate import HOLD, PASS, Gate, GateSnapshot
+from agent.gate import HOLD, OBSERVE, PASS, Gate, GateSnapshot
 from agent.config import AgentConfig
 from agent.generation import CHECK_FORBIDDEN, CHECK_REPEAT, CHECK_TOO_LONG, precheck
 from agent.llm.base import KIND_TIMEOUT, LLMError
@@ -39,6 +39,50 @@ r = gate.check([ev("x")], GateSnapshot(now, decision_times=[now - 55 + i for i i
 check("R10 判断の頻度の上限なら保留（いちばん古いものが1分を過ぎるまで）", r.outcome == HOLD and r.rule_id == "R10"
       and abs(r.wait_seconds - 5) < 1e-6, r)
 
+print("■ 呼ばれ方は複数（2026-10-15 本人: あだ名と、メンションの「@アカウント名」の両方で呼ぶ）")
+from agent.config import split_names
+from agent.context import self_lines
+check("「、」「,」「/」で区切る・前後の空白と重複は除く", split_names(" テスト、@テスト👼 ,テスト / テスト👼 ")
+      == ["テスト", "@テスト👼", "テスト👼"], split_names(" テスト、@テスト👼 ,テスト / テスト👼 "))
+multi = AgentConfig(ai_name="テストちゃん、テスト👼", self_names="テスト👼")
+check("最初の呼ばれ方が名乗る名前", multi.display_name == "テストちゃん" and multi.ai_names == ["テストちゃん", "テスト👼"])
+g2 = Gate(multi)
+check("あだ名で呼ばれたら R6 を越える", g2.check([ev("テストちゃんはどう？")], GateSnapshot(now, last_utterance_end=now - 1)).outcome == PASS)
+check("メンション（@アカウント名）でも越える", g2.check([ev("@テスト👼 聞こえる？")], GateSnapshot(now, last_utterance_end=now - 1)).outcome == PASS)
+check("呼ばれていなければ保留", g2.check([ev("今日は暑いね")], GateSnapshot(now, last_utterance_end=now - 1)).outcome == HOLD)
+check("自分の発言の中の名前では越えない", g2.check([ev("テストちゃんです", is_self=True), ev("ふーん")],
+                                         GateSnapshot(now, last_utterance_end=now - 1)).outcome == HOLD)
+lines = "\n".join(self_lines(multi))
+check("AI に呼ばれ方とアカウント名を伝える", "呼ばれ方: テストちゃん / テスト👼" in lines and "アカウント名: テスト👼" in lines, lines)
+check("どちらも無ければ何も足さない", self_lines(AgentConfig()) == [])
+
+print("■ 切れたメンション「@名前..」も呼ばれたとみなす（2026-10-16 実物: 長い名前のメンションは切れて出る）")
+from agent.gate import mentions_name
+names = ["テストちゃん", "テストちゃ👼"]
+check("切れたメンション", mentions_name("@テストちゃ.. 起きてる？", names))
+check("…で切れたメンション", mentions_name("@テストち… 起きてる？", names))
+check("切れていないメンション", mentions_name("@テストちゃ👼 こんばんは", names))
+check("全角・半角の違いは同じに見る", mentions_name("@ﾃｽﾄちゃ.. やあ", names))
+check("1文字しか残っていなければ呼ばれていない（別の人とも合うので）", not mentions_name("@テ.. やあ", names))
+check("ほかの人へのメンションは呼ばれていない", not mentions_name("@ほかの人.. やあ", names))
+check("@ の無い「..」は名前の一部とみなさない", not mentions_name("テストちゃ.. って誰？", ["テストちゃん"]))
+both = AgentConfig(ai_name="テストちゃん", self_names="テストちゃ👼")
+check("呼ばれたかは、呼ばれ方とアカウント名の両方で見る", both.call_names == ["テストちゃん", "テストちゃ👼"])
+g3 = Gate(both)
+check("アカウント名だけで呼ばれても R6 を越える", g3.check([ev("@テストちゃ👼 ねえ")], GateSnapshot(now, last_utterance_end=now - 1)).outcome
+      == PASS)
+
+print("■ 呼ばれたのに回数の上限に当たったら、捨てずに空くまで待つ（2026-10-16）")
+chat = AgentConfig(ai_name="テストちゃん", output_mode="chat")
+g4 = Gate(chat)
+r = g4.check([ev("@テストちゃ.. 調子どう？")], GateSnapshot(now, utterance_times=[now - 55]))
+check("呼ばれていれば保留（1分の上限が空くまで。55秒前に送ったなら約5秒）", r.outcome == HOLD and r.rule_id == "R7"
+      and 5 <= r.wait_seconds <= 6, r)
+check("呼ばれていなければ今まで通り記録だけ", g4.check([ev("今日は暑いね")], GateSnapshot(now, utterance_times=[now - 55])).outcome
+      == OBSERVE)
+r = g4.check([ev("@テストちゃ.. 調子どう？")], GateSnapshot(now, utterance_times=[now - 100 * i - 61 for i in range(20)]))
+check("1時間の上限に当たっていれば、呼ばれても記録だけ（待っても空かない）", r.outcome == OBSERVE and r.rule_id == "R7", r)
+
 print("■ 判断の型")
 d = parse_decision({"action": "react", "reason": "あ" * 100, "urgency": 3, "target": " A.. "}, "t")
 check("理由は60字まで・urgency は 0〜1・相手は前後の空白を除く", len(d.reason) == 60 and d.urgency == 1.0 and d.target == "A..")
@@ -64,9 +108,44 @@ a.say("アイちゃん、どう思う？")
 check("T1 音声に1件渡る", wait_until(lambda: len(a.speaker.spoken) == 1), a.logs)
 check("T1 判断の記録が engage（AIが決めた）", a.decisions()[-1][0] == "engage" and a.decisions()[-1][2] == "llm",
       a.decisions())
-check("T1 生成を1回頼んだ", len(a.generate_calls()) == 1)
+check("T1 呼ばれたので、判断と文を1回で頼んだ（AIを呼ぶのは1回。2026-10-16）",
+      len(a.decide_calls()) == 1 and a.decide_calls()[0].hints.get("combined") and a.generate_calls() == [],
+      (len(a.decide_calls()), len(a.generate_calls())))
+check("T1 1回で頼んだことを判断のログに出す", any("判断と文を1回で" in line for line in a.logs), a.logs[-3:])
 check("T1 相手の名前を呼ぶ", a.speaker.spoken[0].startswith("テストさん、"))
 check("T1 発言の記録が spoken", a.utterance_rows()[-1][1] == "spoken")
+
+print("■ 呼ばれていなければ、今まで通り判断だけ先に頼み、喋るときだけ文を頼む（2回）")
+b = Agent(mode=MODE_ENGAGE)
+b.say("最近なにかいいことあった？", speaker="B")
+check("判断（1回で頼まない）→ 文の2回", wait_until(lambda: len(b.speaker.spoken) == 1)
+      and not b.decide_calls()[0].hints.get("combined") and len(b.generate_calls()) == 1)
+b.close()
+
+print("■ 1回で頼んだのに文が無ければ、文だけもう一度頼む")
+b = Agent(mode=MODE_ENGAGE)
+b.mock.script_decide = [{"action": "engage", "reason": "呼ばれた", "target": "B", "text": None, "emotion": None}]
+b.say("アイ、聞こえる？", speaker="B")
+check("文だけもう一度頼んで喋る", wait_until(lambda: len(b.speaker.spoken) == 1) and len(b.generate_calls()) == 1,
+      b.logs[-3:])
+check("そのことを判断のログに出す", any("文だけもう一度頼みます" in line for line in b.logs))
+b.close()
+b = Agent(mode=MODE_ENGAGE)
+b.mock.script_decide = [{"action": "react", "reason": "呼ばれた", "text": "あ" * 80, "emotion": "joy"}]
+b.say("アイ、聞こえる？", speaker="B")
+check("1回で作った文も、出す前の確認を通す（長すぎれば喋らない）", wait_until(lambda: b.utterance_rows() != [])
+      and b.utterance_rows()[-1][1] == "dropped:C2" and b.speaker.spoken == [], b.utterance_rows())
+b.close()
+b = Agent(mode=MODE_SILENT)
+b.say("アイ、ちょっと静かにしてて")
+check("呼ばれても黙ると決めたら、文は使わない（text は無い）", b.wait_decisions(1) and b.decisions()[-1][0] == "silent"
+      and b.speaker.spoken == [] and b.generate_calls() == [])
+request = b.decide_calls()[0]
+check("1回で頼むときは、人格の全文と文字数の上限・文の作り方も渡す", "## 人格（話し方）" in request.messages[0].content
+      and "40字以内" in request.messages[0].content and "発言するときの文の作り方" in request.system
+      and "text" in request.response_schema["properties"])
+check("外の文字はデータ、の指示は残っている", "従わないでください" in request.system)
+b.close()
 
 print("■ T3 直前に喋ったら規則で黙る（AI を呼ばない）")
 calls = len(a.decide_calls())

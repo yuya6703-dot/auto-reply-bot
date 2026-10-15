@@ -18,13 +18,16 @@ from typing import Callable
 
 from .audit import AuditLog
 from .cancel import CancelToken
-from .context import ConversationWindow, build_decide_request, build_generate_request, max_chars_for, rules_note
+from .config import OUTPUT_CHAT
+from .context import (ConversationWindow, build_combined_request, build_decide_request, build_generate_request,
+                      max_chars_for, rules_note)
 from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HOLD, OBSERVE, SILENT, USE_TOOL,
                        Decision, DecisionFailed, request_decision)
 from .gate import HOLD as GATE_HOLD
 from .gate import OBSERVE as GATE_OBSERVE
 from .gate import Gate, GateSnapshot, is_strong_signal
-from .generation import CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, precheck, request_utterance
+from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, precheck, request_decision_with_text,
+                         request_utterance)
 from .inbox import Inbox
 from .llm.base import KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_GENERATE, LLMError
 from .persona import DEFAULT_PERSONA_ID, Persona
@@ -37,6 +40,7 @@ STATE_LISTENING = "listening"
 STATE_DECIDING = "deciding"
 STATE_GENERATING = "generating"
 STATE_SPEAKING = "speaking"
+STATE_POSTING = "posting"
 STATE_DEGRADED = "degraded"
 STATE_EMERGENCY = "emergency_stopped"
 
@@ -48,6 +52,7 @@ STATE_LABELS = {
     STATE_DECIDING: "判断している",
     STATE_GENERATING: "喋る文を作っている",
     STATE_SPEAKING: "喋っている",
+    STATE_POSTING: "チャットに送ろうとしている（確認待ちのことも）",
     STATE_DEGRADED: "AIを呼ばない状態（失敗が続いた）",
     STATE_EMERGENCY: "緊急停止中（再開を押すまで何もしない）",
 }
@@ -56,6 +61,10 @@ STATE_LABELS = {
 SPOKEN = "spoken"
 SPEECH_CANCELLED = "cancelled"
 SPEECH_FAILED = "failed"
+# チャットに書き込んだ結果（post_chat の戻り値）
+POSTED = "posted"                  # 送信待ちに入れた（送るのは監視ワーカー）
+CHAT_DISCARDED = "discarded"       # 本人が「捨てる」を押した・確認の時間が過ぎた
+CHAT_FAILED = "chat_failed"        # 送れなかった（監視中ではない・待ちが一杯 など）
 
 RESTORE_SECONDS = 30 * 60        # 起動時に直近の窓へ戻す範囲（設計書/07 の 3章）
 LLM_HOLD_DEFAULT = 5.0
@@ -72,6 +81,9 @@ class AgentDeps:
     on_state: Callable = lambda state: None     # 状態が変わった
     on_error: Callable = lambda detail: None    # 想定外の例外（error_log.txt へ）
     clock: Callable = time.time
+    # (Utterance, CancelToken) -> POSTED / CHAT_DISCARDED / CHAT_FAILED / SPEECH_CANCELLED。
+    # 確認（承認して送る）は呼ばれた側が行う。無ければチャットには書き込めない
+    post_chat: Callable = None
 
 
 class AgentRuntime:
@@ -82,7 +94,7 @@ class AgentRuntime:
         self.log = AuditLog(deps.on_log, deps.on_notice)
         self.gate = Gate(config)
         self.inbox = Inbox(config.inbox_max, config.settle_seconds,
-                           strong_signal=lambda e: is_strong_signal(e, self.config.ai_name))
+                           strong_signal=lambda e: is_strong_signal(e, self.config.call_names))
         self.window = ConversationWindow(clock=self._clock)
         self.usage = UsageTracker(deps.store, clock=self._clock)
         self.persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
@@ -321,12 +333,18 @@ class AgentRuntime:
             if not release:
                 return []
             self._held, self._hold_until = [], None
-        expired = [e for e in held if now - e.observed_at > self.config.hold_max_seconds]
+        expired = [e for e in held if now - e.observed_at > self._hold_limit(e)]
         if expired:
             turn_id = self._new_turn(expired, now, store_events=False)
             self._record(Decision(OBSERVE, "保留したまま古くなった", DECIDED_BY_RULE, turn_id))
             self.log.write(f"📝 保留していた{len(expired)}件は古くなったので、記録だけにしました。")
         return [e for e in held if e not in expired] + list(batch)
+
+    def _hold_limit(self, event):
+        """保留しておける長さ。呼ばれた出来事は、回数の上限が空くまで待てるように長め"""
+        if is_strong_signal(event, self.config.call_names):
+            return max(self.config.hold_max_seconds, self.config.addressed_hold_max_seconds)
+        return self.config.hold_max_seconds
 
     def _new_turn(self, events, now, store_events=True):
         turn_id = uuid.uuid4().hex
@@ -384,14 +402,23 @@ class AgentRuntime:
             self._current_cancel = cancel
             self._decision_times = [t for t in self._decision_times if now - t < 60] + [now]
         fresh_seq = self.inbox.fresh_seq
-        left_minute = max(0, self.config.max_utterances_per_minute
+        left_minute = max(0, self.config.utterance_limits[0]
                           - len([t for t in snap.utterance_times if now - t < 60]))
-        note = rules_note(left_minute, max(0, self.config.daily_call_limit - snap.calls_today - 1))
-        request = build_decide_request(events, self.window, self.persona, self.config, note, now,
-                                       timeout=self.config.decide_timeout_seconds)
+        note = rules_note(left_minute, max(0, self.config.daily_call_limit - snap.calls_today - 1),
+                          self.config.output_mode)
+        # 呼ばれたときは判断と文を1回で頼む（返事をする見込みが高いので、往復を1回減らして早く返す）
+        combined = result.strong and self.config.combined_when_addressed
+        prepared = None
+        builder = build_combined_request if combined else build_decide_request
+        request = builder(events, self.window, self.persona, self.config, note, now,
+                          timeout=self.config.decide_timeout_seconds)
         try:
-            decision = request_decision(self._provider, request, turn_id, cancel,
-                                        self._usage_recorder(turn_id, PURPOSE_DECIDE))
+            if combined:
+                decision, prepared = request_decision_with_text(self._provider, request, turn_id, cancel,
+                                                                self._usage_recorder(turn_id, PURPOSE_DECIDE))
+            else:
+                decision = request_decision(self._provider, request, turn_id, cancel,
+                                            self._usage_recorder(turn_id, PURPOSE_DECIDE))
         except DecisionFailed as e:
             reason = "AIが答えなかった" if e.kind == FAIL_REFUSED else "AIの返事の形が合わなかった"
             self._record(Decision(SILENT, reason, DECIDED_BY_LLM, turn_id))
@@ -421,21 +448,27 @@ class AgentRuntime:
             self.log.write(f"⏸ 保留: {decision.reason} — {wait:.0f}秒後に見直す")
             return
 
-        # --- 文章生成 ---
-        self._set_state(STATE_GENERATING)
-        request = build_generate_request(decision, events, self.window, self.persona, self.config,
-                                         self._clock(), timeout=self.config.decide_timeout_seconds)
-        try:
-            utterance = request_utterance(self._provider, request, turn_id, cancel,
-                                          self._usage_recorder(turn_id, PURPOSE_GENERATE))
-        except (DecisionFailed, LLMError) as e:
-            if isinstance(e, LLMError):
-                self._on_llm_failure(e, turn_id, during="文を作る")
-            else:
-                self.log.write("🤫 沈黙（AIが文を作れなかった）")
-            return
-        if cancel.cancelled:
-            return
+        # --- 文章生成（判断と一緒に文ができていれば、もう頼まない） ---
+        if prepared is not None:
+            utterance = prepared
+            self.log.write("⚡ 呼ばれたので、判断と文を1回で作りました。")
+        else:
+            if combined:
+                self.log.write("ℹ️ 1回で頼んだ返事に文が無かったので、文だけもう一度頼みます。")
+            self._set_state(STATE_GENERATING)
+            request = build_generate_request(decision, events, self.window, self.persona, self.config,
+                                             self._clock(), timeout=self.config.decide_timeout_seconds)
+            try:
+                utterance = request_utterance(self._provider, request, turn_id, cancel,
+                                              self._usage_recorder(turn_id, PURPOSE_GENERATE))
+            except (DecisionFailed, LLMError) as e:
+                if isinstance(e, LLMError):
+                    self._on_llm_failure(e, turn_id, during="文を作る")
+                else:
+                    self.log.write("🤫 沈黙（AIが文を作れなかった）")
+                return
+            if cancel.cancelled:
+                return
 
         # --- 出す前の確認 ---
         check = self._precheck(utterance, decision, fresh_seq)
@@ -445,8 +478,11 @@ class AgentRuntime:
             self.log.write(f"🚫 喋らない（{check} {CHECK_TEXTS[check]}）:「{utterance.text}」")
             return
 
-        # --- 喋る ---
-        self._speak(utterance, decision, turn_id)
+        # --- 出す（声 / チャット） ---
+        if self.config.output_mode == OUTPUT_CHAT:
+            self._post_chat(utterance, decision, turn_id)
+        else:
+            self._speak(utterance, decision, turn_id)
 
     def _precheck(self, utterance, decision, fresh_seq):
         if self.inbox.fresh_seq != fresh_seq or self._listening:
@@ -487,6 +523,36 @@ class AgentRuntime:
             self.log.write("⏹ 途中で止めました。")
         elif outcome == SPEECH_FAILED:
             self.log.write("⚠️ 声にできませんでした（音声エンジンを確かめてください）。")
+
+    def _post_chat(self, utterance, decision, turn_id):
+        """チャットに書き込む（確認は post_chat の側）。送れたときだけ「発言した」に数える"""
+        token = CancelToken()
+        with self._lock:
+            if self._emergency:
+                return
+            self._speech_cancel = token
+        self._set_state(STATE_POSTING)
+        label = "参加" if decision.action == ENGAGE else "短く反応"
+        self.log.write(f"✍️ チャットに書く（{label}）:「{utterance.text}」")
+        started = self._clock()
+        try:
+            outcome = self.deps.post_chat(utterance, token) if self.deps.post_chat else CHAT_FAILED
+        except Exception:
+            outcome = CHAT_FAILED
+        ended = self._clock()
+        if outcome == POSTED:
+            with self._lock:
+                self._utterance_times = [t for t in self._utterance_times if ended - t < 3600] + [ended]
+                self._last_utterance_end = ended
+            self.window.add_own(utterance.text, ended)
+            self.log.write("📨 送信待ちに入れました（監視が送ります）。")
+        elif outcome == CHAT_DISCARDED:
+            self.log.write("🗑 送りませんでした（捨てた・確認の時間が過ぎた）。")
+        elif outcome == SPEECH_CANCELLED:
+            self.log.write("⏹ 送るのをやめました。")
+        else:
+            self.log.write("⚠️ チャットに送れませんでした（メインタブで監視していないか、送信待ちが一杯）。")
+        self.deps.store.add_utterance(turn_id, utterance.text, utterance.emotion, "chat", outcome, started, ended)
 
     def _usage_recorder(self, turn_id, purpose):
         """AI を呼ぶたびに利用量を残す（失敗した呼び出しも1回と数える）"""

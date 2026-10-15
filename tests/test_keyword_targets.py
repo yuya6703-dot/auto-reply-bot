@@ -119,13 +119,15 @@ class FakeRoom:
         self.reads += 1
         if self.reads > self.rounds:
             self.worker.is_running = False
+        if isinstance(self.xml, list):        # 画面が順に変わる（最後の画面を繰り返す）
+            return self.xml[min(self.reads - 1, len(self.xml) - 1)]
         return self.xml
 
     def window_size(self):
         return 540, 960
 
 
-def run_monitor(pairs, rounds=3, xml=GUEST, auto=False):
+def run_monitor(pairs, rounds=3, xml=GUEST, auto=False, notes=None):
     """
     pairs: [(検知ワード, 返信ワード, 対象)]。送った文の一覧とログを返す。
     auto=True なら範囲を選ばずに開始する（チャット欄の枠を監視範囲にする）
@@ -154,6 +156,8 @@ def run_monitor(pairs, rounds=3, xml=GUEST, auto=False):
         sent.append(text)
         return fc, True
     w._execute_reply = fake_execute
+    if notes is not None:
+        w.agent_note = notes.append
     if auto:
         w._run_monitor(None, None, None, None)
     else:
@@ -213,6 +217,30 @@ print("■ 範囲を選ばずに開始: チャット欄が無い画面では、�
 sent, logs, w = run_monitor([("伏せ字", "x", A.KEYWORD_TARGET_ANY)], xml=fixture("voiceroom_minimized.xml"), auto=True)
 check("何も送らない（前の枠のまま、ホーム画面の文字に反応しない）", sent == [], sent)
 check("待っていることを1回だけログに出す", sum("チャット欄が見つかりません" in m for m in logs) == 1,
+      [m for m in logs if "チャット欄" in m])
+
+print("■ チャットの入力欄が開いていてチャット欄が隠れたとき（2026-10-16 本人「チャット欄が見つかりませんと表示される」）")
+# 実物（伏せ字済み）: 入力欄のシートが開いていると、読み取りにはシートの部品（etText・btnSend）しか出ない
+SHEET = fixture("voiceroom_input_sheet.xml")
+check("入力欄が開いているとチャット欄は見つからない", A.find_chat_list_bounds(SHEET, 2) is None)
+check("案内: 入力欄が開いている", A.chat_missing_message(SHEET, 2) == A.CHAT_HIDDEN_BY_INPUT)
+check("案内: 入力欄の無いシート（人の情報など）", A.chat_missing_message(SHEET.replace(":id/etText", ":id/x"), 2)
+      == A.CHAT_HIDDEN_BY_SHEET)
+check("案内: ルームの外（小さくした）", A.chat_missing_message(fixture("voiceroom_minimized.xml"), 2) == A.CHAT_NOT_IN_ROOM)
+none = [("出てこない言葉", "x", A.KEYWORD_TARGET_ANY)]
+notes = []
+sent, logs, w = run_monitor(none, xml=[GUEST, SHEET, SHEET, SHEET, GUEST, GUEST], rounds=6, auto=True, notes=notes)
+about = [m for m in logs if "チャット欄" in m]
+check("AIタブの判断のログにも、隠れた・見えるようになったを出す（2026-10-16 本人）",
+      notes == [A.CHAT_HIDDEN_BY_INPUT, "💬 チャット欄が見えるようになったので、また読み始めます。"], notes)
+check("入力欄が開いたら、そう案内する（1回だけ。「ルームを開くと」とは言わない）",
+      sum(m == A.CHAT_HIDDEN_BY_INPUT for m in logs) == 1 and A.CHAT_NOT_IN_ROOM not in logs, about)
+check("閉じたら「見えるようになった」と出して読み始める", any("チャット欄が見えるようになったので" in m for m in logs), about)
+sent, logs, w = run_monitor(none, xml=[SHEET, SHEET, SHEET, GUEST], rounds=5, auto=True)
+check("始めたときに入力欄が開いていても、その案内を1回だけ", sum(m == A.CHAT_HIDDEN_BY_INPUT for m in logs) == 1,
+      [m for m in logs if "チャット欄" in m])
+sent, logs, w = run_monitor(none, xml=[SHEET, fixture("voiceroom_minimized.xml")], rounds=4, auto=True)
+check("理由が変わったら（入力欄 → ルームの外）案内し直す", A.CHAT_HIDDEN_BY_INPUT in logs and A.CHAT_NOT_IN_ROOM in logs,
       [m for m in logs if "チャット欄" in m])
 
 print("■ 入力欄は部品の名前(etText)で探す（チャット欄の発言を押さない）")
