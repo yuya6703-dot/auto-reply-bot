@@ -224,7 +224,6 @@ result = {}
 
 
 def run_long():
-    t0 = time.monotonic()
     result["ok"] = player7.play(long_wav, 100, "", token)
     result["end"] = time.monotonic()
 
@@ -256,7 +255,7 @@ class Recorder:
     def __init__(self, play_seconds=0.0, fail_texts=()):
         self.play_seconds = play_seconds
         self.fail_texts = set(fail_texts)
-        self.synth_calls, self.played, self.events = [], [], []
+        self.synth_calls, self.played, self.events, self.devices = [], [], [], []
         self.active = 0
         self.max_active = 0
         self.lock = threading.Lock()
@@ -269,7 +268,8 @@ class Recorder:
             raise RuntimeError("エンジンが応答しない")
         return f"WAV[{voice}]{text}".encode()
 
-    def play(self, wav, volume, cancel):
+    def play(self, wav, volume, cancel, device=None):
+        self.devices.append(device)
         with self.lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
@@ -383,6 +383,32 @@ SV.SpeechService(rec.synthesize, rec.play, lambda: "", lambda: 0).shutdown()
 check("一度も使わずに終了しても止まらない", True)
 
 
+print("■ 終わりを待てる印と出力先（段階3。AI の声はスピーカーだけ）")
+rec = Recorder()
+svc = rec.service()
+job = SV.SpeechJob(text="AIの声", device="")
+svc.enqueue(job)
+check("終わったら finished が立つ", job.finished.wait(2.0) and job.outcome == SV.EVENT_DONE, job.outcome)
+check("出力先を用件ごとに渡す（\"\" = PCの既定）", rec.devices[-1] == "")
+svc.enqueue(SV.SpeechJob(text="読み上げ"))
+check("出力先を決めない用件は None（読み上げの出力先）", wait_until(lambda: len(rec.devices) == 2) and rec.devices[-1] is None)
+rec = Recorder(play_seconds=10.0)
+svc = rec.service()
+first, second = SV.SpeechJob(text="鳴っている"), SV.SpeechJob(text="待っている")
+svc.enqueue(first)
+svc.enqueue(second)
+wait_until(lambda: svc.is_busy())
+svc.stop_all()
+check("止めた用件も finished が立つ（取り消し）", first.finished.wait(1.0) and first.outcome == SV.EVENT_CANCELLED
+      and second.finished.is_set() and second.outcome == SV.EVENT_CANCELLED, (first.outcome, second.outcome))
+rec = Recorder(fail_texts={"失敗"})
+svc = rec.service()
+bad = SV.SpeechJob(text="失敗")
+svc.enqueue(bad)
+check("合成に失敗した用件は failed", bad.finished.wait(2.0) and bad.outcome == SV.EVENT_FAILED)
+svc.shutdown(timeout=1.0)
+
+
 # ---------------------------------------------------------------
 print("■ App の読み上げ（本物のメソッドを借りる）")
 
@@ -425,7 +451,7 @@ class Harness:
             default_voice=lambda: self.voice, default_volume=lambda: 60,
             on_event=self._on_speech_event, max_queue=A.MAX_SPEECH_QUEUE_SIZE)
 
-    def _fake_play(self, wav, volume, cancel):
+    def _fake_play(self, wav, volume, cancel, device=None):
         cancel.wait(self.play_seconds)
         self.played.append((wav, volume, cancel.cancelled))
         return True

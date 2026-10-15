@@ -79,8 +79,19 @@ from agent.speech.audio import apply_volume
 from agent.speech.voicevox_compat import VoicevoxCompatibleEngine
 from agent.speech.playback import AudioPlayer
 from agent.speech.service import (SpeechService, SpeechJob,
+                                  EVENT_DONE as SPEECH_EVENT_DONE,
+                                  EVENT_CANCELLED as SPEECH_EVENT_CANCELLED,
                                   EVENT_FAILED as SPEECH_EVENT_FAILED,
                                   EVENT_QUEUE_CHANGED as SPEECH_EVENT_QUEUE_CHANGED)
+# AIのエージェント（段階3: 骨組み。模擬のAIと手入力の出来事で試す。設計書/09 の S3）
+from agent.config import AgentConfig
+from agent.events import make_manual_event, KIND_CHAT_MESSAGE as AGENT_KIND_MESSAGE, KIND_CHAT_NOTICE as AGENT_KIND_NOTICE
+from agent.llm.mock import MockProvider, MODE_LABELS as MOCK_MODE_LABELS, MODE_SCRIPT as MOCK_MODE_SCRIPT
+from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN_RESTORED, OPEN_RECREATED
+from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
+                           STATE_STOPPED as AGENT_STOPPED, STATE_EMERGENCY as AGENT_EMERGENCY,
+                           SPOKEN as AGENT_SPOKEN, SPEECH_CANCELLED as AGENT_SPEECH_CANCELLED,
+                           SPEECH_FAILED as AGENT_SPEECH_FAILED)
 
 # ====================================================
 # 📁 パス設定
@@ -92,6 +103,8 @@ else:
 
 DB_FILE = os.path.join(BASE_DIR, "app_data.db")
 DB_FILE_NAME = os.path.basename(DB_FILE)
+# AIのエージェントの記録（出来事・判断・発言・利用量）。他の人の名前・発言が入るので app_data.db とは分ける（設計書/07）
+AGENT_DB_FILE = os.path.join(BASE_DIR, AGENT_DB_FILE_NAME)
 
 # アプリのアイコン（窓・タスクバー・exe・ショートカットで共通）。
 # ⚠️ exe（--onedir）では同梱したファイルが exe の横ではなく _internal(sys._MEIPASS) に入る。
@@ -2403,6 +2416,9 @@ class UpdateManager:
         db_name_q = self._ps_quote(DB_FILE_NAME)
         error_log_name_q = self._ps_quote(ERROR_LOG_FILE_NAME)
         error_log_path_q = self._ps_quote(ERROR_LOG_FILE)
+        # AIの記録（agent_data.db と -wal・-shm）も上書きしない。配布物にうっかり入っても消えないように（設計書/07 の 1章）
+        agent_db_name = os.path.basename(AGENT_DB_FILE)
+        agent_db_q = " ".join(f"'{self._ps_quote(agent_db_name + suffix)}'" for suffix in ("", "-wal", "-shm", "-journal"))
         self_path_q = self._ps_quote(ps1_path)
 
         # 再起動する場合のみ新しいexeを起動する。しない場合も、何が起きたかは画面に残しておく。
@@ -2433,7 +2449,7 @@ while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
 }}
 Start-Sleep -Seconds 1
 
-robocopy '{source_dir_q}' '{target_dir_q}' /E /XF '{db_name_q}' '{error_log_name_q}' /XD 'backup' /R:3 /W:1 | Out-Null
+robocopy '{source_dir_q}' '{target_dir_q}' /E /XF '{db_name_q}' '{error_log_name_q}' {agent_db_q} /XD 'backup' /R:3 /W:1 | Out-Null
 $copyExit = $LASTEXITCODE
 
 if ($copyExit -ge 8) {{
@@ -7175,8 +7191,9 @@ class App(ctk.CTk):
             on_device_failed=self._warn_output_device_once)
         self.speech_service = SpeechService(
             synthesize=self.synthesize_voice_wav,
-            play=lambda wav, volume, cancel: self.audio_player.play(
-                wav, volume, self.get_audio_output_device(), cancel),
+            # 用件に出力先が無ければ読み上げの出力先へ。AI の声は "" （PCの既定＝スピーカー。ルームへは流さない）
+            play=lambda wav, volume, cancel, device: self.audio_player.play(
+                wav, volume, self.get_audio_output_device() if device is None else device, cancel),
             default_voice=self.get_speech_speaker_id,
             default_volume=self.get_speech_volume,
             on_event=self._on_speech_event,
@@ -7273,12 +7290,14 @@ class App(ctk.CTk):
         self.tab_keywords = self.tabview.add("キーワード設定")
         self.tab_timer = self.tabview.add("タイマー")
         self.tab_speech = self.tabview.add("読み上げ")
+        self.tab_agent = self.tabview.add("AI")
         self.tab_settings = self.tabview.add("設定")
 
         self.build_main_tab()
         self.build_keywords_tab()
         self.build_timer_tab()
         self.build_speech_tab()
+        self.build_agent_tab()      # ⚠️ 読み上げタブの後（伝言板 _ui_queue は読み上げタブで作る）
         self.build_settings_tab()
 
     # --- メインタブ ---
@@ -9403,6 +9422,317 @@ class App(ctk.CTk):
 
         self.after(0, show_alarm_dialog)
 
+    # ====================================================
+    # 🤖 AIタブ（段階3: エージェントの骨組み。設計書/09 の S3）
+    # ====================================================
+    # ⚠️ 今は「テスト用（模擬）」のAIと、手で入れた出来事だけで動く。GRAVITYのチャットとはまだつながない（S5）。
+    #    AIの声はPCの既定の出力（スピーカー）にだけ鳴らす。読み上げの出力先（VB-CABLE など）には流さない（設計書/06 の 9章）
+    AGENT_LOG_MAX_LINES = 500
+
+    def build_agent_tab(self):
+        self.agent_runtime = None      # 初めて使うときに作る（使わない人の PC に agent_data.db を作らない）
+        self.agent_store = None
+        self._agent_mock = None
+
+        frame = ctk.CTkScrollableFrame(self.tab_agent, fg_color="transparent")
+        frame.pack(fill="both", expand=True, padx=20, pady=15)
+
+        ctk.CTkLabel(frame, text="🤖 AI（会話に加わるエージェント）",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", pady=(0, 3))
+        ctk.CTkLabel(
+            frame,
+            text="今は試すための段階です。手で入れた出来事に対して、AIが「黙る」か「喋る」かを決める流れを確かめられます。\n"
+                 "GRAVITYのチャットとはまだつながっていません。AIの声はPCのスピーカーにだけ鳴り、ルームには流しません。",
+            justify="left", text_color="gray70"
+        ).pack(anchor="w", pady=(0, 10))
+
+        # --- 状態と操作 ---
+        control = ctk.CTkFrame(frame)
+        control.pack(fill="x", pady=(0, 10))
+        self.agent_state_label = ctk.CTkLabel(control, text="状態: 停止中", font=ctk.CTkFont(weight="bold"))
+        self.agent_state_label.pack(anchor="w", padx=12, pady=(10, 4))
+        self.agent_provider_label = ctk.CTkLabel(control, text="", justify="left", text_color="gray70")
+        self.agent_provider_label.pack(anchor="w", padx=12, pady=(0, 6))
+
+        buttons = ctk.CTkFrame(control, fg_color="transparent")
+        buttons.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        self.agent_start_btn = ctk.CTkButton(buttons, text="▶ 開始", width=80, fg_color="green",
+                                             hover_color="darkgreen", command=self.start_agent)
+        self.agent_start_btn.pack(side="left", padx=(0, 5))
+        self.agent_stop_btn = ctk.CTkButton(buttons, text="■ 停止", width=80, command=self.stop_agent)
+        self.agent_stop_btn.pack(side="left", padx=5)
+        self.agent_emergency_btn = ctk.CTkButton(buttons, text="🛑 緊急停止", width=110, fg_color="#B00020",
+                                                 hover_color="#7A0016", command=self.emergency_stop_agent)
+        self.agent_emergency_btn.pack(side="left", padx=5)
+        self.agent_resume_btn = ctk.CTkButton(buttons, text="↩ 再開", width=80, fg_color="#555555",
+                                              hover_color="#3a3a3a", command=self.resume_agent)
+        self.agent_resume_btn.pack(side="left", padx=5)
+        ctk.CTkButton(buttons, text="⏹ 音声を止める", width=120, fg_color="#8B0000", hover_color="#5C0000",
+                      command=self.stop_speech).pack(side="left", padx=5)
+
+        self.agent_usage_label = ctk.CTkLabel(control, text="", text_color="gray70")
+        self.agent_usage_label.pack(anchor="w", padx=12, pady=(0, 10))
+
+        # --- 設定（段階3は AI の名前と回数の上限だけ） ---
+        settings = ctk.CTkFrame(frame)
+        settings.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(settings, text="⚙️ 設定", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(10, 4))
+        config = AgentConfig.load(self.db.get_setting)
+        row = ctk.CTkFrame(settings, fg_color="transparent")
+        row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(row, text="AIの名前:", width=110, anchor="w").pack(side="left")
+        self.agent_name_entry = ctk.CTkEntry(row, width=160, placeholder_text="（呼ばれたら返事をしやすくなる）")
+        self.agent_name_entry.pack(side="left", padx=(0, 12))
+        if config.ai_name:      # ⚠️ 空を入れると、薄く出る説明（placeholder）が消える
+            self.agent_name_entry.insert(0, config.ai_name)
+        ctk.CTkLabel(row, text="1日にAIを呼ぶ上限:", anchor="w").pack(side="left", padx=(0, 6))
+        self.agent_limit_entry = ctk.CTkEntry(row, width=70)
+        self.agent_limit_entry.pack(side="left", padx=(0, 4))
+        self.agent_limit_entry.insert(0, str(config.daily_call_limit))
+        ctk.CTkLabel(row, text="回").pack(side="left", padx=(0, 12))
+        ctk.CTkButton(row, text="💾 保存", width=70, command=self.save_agent_settings).pack(side="left")
+
+        mock_row = ctk.CTkFrame(settings, fg_color="transparent")
+        mock_row.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
+        ctk.CTkLabel(mock_row, text="模擬AIの返事:", width=110, anchor="w").pack(side="left")
+        self.agent_mock_mode_var = ctk.StringVar(value=MOCK_MODE_LABELS[MOCK_MODE_SCRIPT])
+        ctk.CTkOptionMenu(mock_row, variable=self.agent_mock_mode_var, values=list(MOCK_MODE_LABELS.values()),
+                          command=self.on_agent_mock_mode_selected, width=280).pack(side="left")
+
+        # --- 手で出来事を入れる ---
+        manual = ctk.CTkFrame(frame)
+        manual.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(manual, text="📥 出来事を入れて試す", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(manual, text="ルームで誰かが発言した、という出来事を手で作ります。続けて入れると、まとめて1回だけ判断します。",
+                     justify="left", text_color="gray70").pack(anchor="w", padx=12, pady=(0, 6))
+        who_row = ctk.CTkFrame(manual, fg_color="transparent")
+        who_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(who_row, text="名前:", width=50, anchor="w").pack(side="left")
+        self.agent_event_name_entry = ctk.CTkEntry(who_row, width=140)
+        self.agent_event_name_entry.pack(side="left", padx=(0, 12))
+        self.agent_event_name_entry.insert(0, "テスト")
+        ctk.CTkLabel(who_row, text="種類:", anchor="w").pack(side="left", padx=(0, 6))
+        self.agent_event_kind_var = ctk.StringVar(value="発言")
+        ctk.CTkOptionMenu(who_row, variable=self.agent_event_kind_var, values=["発言", "お知らせ"],
+                          width=110).pack(side="left")
+        text_row = ctk.CTkFrame(manual, fg_color="transparent")
+        text_row.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
+        ctk.CTkLabel(text_row, text="本文:", width=50, anchor="w").pack(side="left")
+        self.agent_event_text_entry = ctk.CTkEntry(text_row, width=420, placeholder_text="例: 今日の晩ごはん何にした？")
+        self.agent_event_text_entry.pack(side="left", padx=(0, 6))
+        self.agent_event_text_entry.bind("<Return>", lambda e: self.submit_agent_manual_event())
+        self.agent_event_text_entry.bind("<Button-3>", self._show_entry_context_menu)
+        ctk.CTkButton(text_row, text="📥 入れる", width=80, command=self.submit_agent_manual_event).pack(side="left")
+
+        # --- 判断のログ ---
+        log_section = ctk.CTkFrame(frame)
+        log_section.pack(fill="x", pady=(0, 10))
+        log_head = ctk.CTkFrame(log_section, fg_color="transparent")
+        log_head.pack(anchor="w", fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(log_head, text="🧾 判断のログ", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkButton(log_head, text="🧹 消去", width=70, fg_color="gray", hover_color="#444444",
+                      command=self.clear_agent_log).pack(side="left", padx=(12, 0))
+        self.agent_log_textbox = ctk.CTkTextbox(log_section, height=220, state="disabled", wrap="word")
+        self.agent_log_textbox.pack(fill="x", padx=12, pady=(0, 12))
+
+        self._refresh_agent_provider_label()
+        self._refresh_agent_state()
+
+    # --- AIタブ: 中身 ---
+    def _ensure_agent_runtime(self):
+        """エージェントを（まだ無ければ）作る。作れなければ None（理由は画面に出す）"""
+        if self.agent_runtime is not None:
+            return self.agent_runtime
+        store = AgentStore(AGENT_DB_FILE)
+        try:
+            status = store.open()
+        except Exception as e:
+            write_error_log(f"AIの記録（{AGENT_DB_FILE_NAME}）を開けませんでした: {e}")
+            messagebox.showerror("AI", f"AIの記録（{AGENT_DB_FILE_NAME}）を開けませんでした。\n{e}")
+            return None
+        if status == OPEN_RESTORED:
+            self.append_log(f"⚠️ AIの記録（{AGENT_DB_FILE_NAME}）が壊れていたので、バックアップから戻しました。")
+        elif status == OPEN_RECREATED:
+            self.append_log(f"⚠️ AIの記録（{AGENT_DB_FILE_NAME}）が壊れていたので、空で作り直しました。")
+        deps = AgentDeps(
+            provider_factory=self._agent_provider,
+            speak=self._agent_speak,
+            stop_speech=self.speech_service.stop_all,
+            store=store,
+            on_log=lambda line: self._post_to_ui(lambda: self._append_agent_log(line)),
+            on_notice=self.append_log,
+            on_state=lambda state: self._post_to_ui(self._refresh_agent_state),
+            on_error=lambda detail: write_error_log(f"AIのエージェントで想定外のエラー:\n{detail}"),
+        )
+        self.agent_store = store
+        self.agent_runtime = AgentRuntime(deps, AgentConfig.load(self.db.get_setting))
+        return self.agent_runtime
+
+    def _agent_provider(self):
+        """設定タブ「🤖 AI API」で選んだ提供元を作る。まだ使えなければ None"""
+        info = provider_by_id(self.db.get_setting("ai_api_provider", DEFAULT_PROVIDER_ID) or DEFAULT_PROVIDER_ID)
+        if info.factory is None:
+            return None
+        try:
+            key = self.api_keys.load(info.provider_id, info.env_var) or ""
+        except SecretStoreError:
+            key = ""
+        provider = info.factory(key)
+        if isinstance(provider, MockProvider):
+            provider.mode = self._selected_agent_mock_mode()
+            self._agent_mock = provider
+        return provider
+
+    def _selected_agent_mock_mode(self):
+        label = self.agent_mock_mode_var.get()
+        return next((mode for mode, text in MOCK_MODE_LABELS.items() if text == label), MOCK_MODE_SCRIPT)
+
+    def on_agent_mock_mode_selected(self, _label):
+        if self._agent_mock is not None:
+            self._agent_mock.mode = self._selected_agent_mock_mode()
+        self._append_agent_log(f"🎭 模擬AIの返事: {self.agent_mock_mode_var.get()}")
+
+    def _agent_speak(self, utterance, cancel):
+        """
+        AIの発言を音声サービスへ。鳴り終わる（止められる・失敗する）まで戻らない（エージェントのスレッドから呼ばれる）。
+        ⚠️ 出力先は ""（PCの既定＝スピーカー）。読み上げの出力先（VB-CABLE でルームへ）には流さない
+        """
+        persona = self.agent_runtime.persona if self.agent_runtime is not None else None
+        job = SpeechJob(text=utterance.text, source="AI", voice=getattr(persona, "voice", None),
+                        priority=utterance.priority, cancel=cancel, device="")
+        if not self.speech_service.enqueue(job):
+            return AGENT_SPEECH_FAILED
+        while not job.finished.wait(0.5):
+            if self.speech_service.closed:
+                break
+        return {SPEECH_EVENT_DONE: AGENT_SPOKEN,
+                SPEECH_EVENT_CANCELLED: AGENT_SPEECH_CANCELLED}.get(job.outcome, AGENT_SPEECH_FAILED)
+
+    def _append_agent_log(self, line):
+        box = getattr(self, "agent_log_textbox", None)
+        if box is None or not box.winfo_exists():
+            return
+        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        box.configure(state="normal")
+        box.insert("end", f"{stamp} {line}\n")
+        lines = int(box.index("end-1c").split(".")[0])
+        if lines > self.AGENT_LOG_MAX_LINES:
+            box.delete("1.0", f"{lines - self.AGENT_LOG_MAX_LINES}.0")
+        box.configure(state="disabled")
+        box.yview("end")
+
+    def clear_agent_log(self):
+        self.agent_log_textbox.configure(state="normal")
+        self.agent_log_textbox.delete("1.0", "end")
+        self.agent_log_textbox.configure(state="disabled")
+
+    def _refresh_agent_provider_label(self):
+        info = provider_by_id(self.db.get_setting("ai_api_provider", DEFAULT_PROVIDER_ID) or DEFAULT_PROVIDER_ID)
+        if info.factory is None:
+            text = (f"使うAI: {info.label} — 設定タブの「🤖 AI API」で提供元を選ぶと始められます"
+                    "（今選べるのは「テスト用（模擬）」だけです）。")
+        else:
+            text = f"使うAI: {info.label}"
+        self.agent_provider_label.configure(text=text)
+
+    def _refresh_agent_state(self):
+        runtime = self.agent_runtime
+        state = runtime.state if runtime is not None else AGENT_STOPPED
+        self.agent_state_label.configure(text=f"状態: {AGENT_STATE_LABELS.get(state, state)}",
+                                         text_color="#FF6B6B" if state == AGENT_EMERGENCY else ("gray90" if state == AGENT_STOPPED else "#7CFC9A"))
+        running = runtime is not None and runtime.running
+        emergency = state == AGENT_EMERGENCY
+        self.agent_start_btn.configure(state="normal" if not running and not emergency else "disabled")
+        self.agent_stop_btn.configure(state="normal" if running else "disabled")
+        self.agent_resume_btn.configure(state="normal" if emergency else "disabled")
+        self._refresh_agent_usage()
+
+    def _refresh_agent_usage(self):
+        config = AgentConfig.load(self.db.get_setting)
+        if self.agent_runtime is None:
+            self.agent_usage_label.configure(text=f"今日AIを呼んだ回数: 0 / {config.daily_call_limit}回")
+            return
+        try:
+            calls, _cost = self.agent_runtime.today_usage()
+        except Exception:
+            return
+        self.agent_usage_label.configure(text=f"今日AIを呼んだ回数: {calls} / {config.daily_call_limit}回")
+
+    def start_agent(self):
+        runtime = self._ensure_agent_runtime()
+        if runtime is None:
+            return
+        runtime.config = AgentConfig.load(self.db.get_setting)
+        runtime.gate.config = runtime.config
+        try:
+            runtime.deps.store.backup_daily()
+        except Exception as e:
+            write_error_log(f"AIの記録のバックアップに失敗しました: {e}")
+        ok, message = runtime.start()
+        if not ok:
+            messagebox.showinfo("AI", message)
+        self._refresh_agent_state()
+
+    def stop_agent(self):
+        if self.agent_runtime is not None:
+            self.agent_runtime.stop()
+        self._refresh_agent_state()
+
+    def emergency_stop_agent(self):
+        """どの状態からでも。AIも音声もすぐ止め、「再開」を押すまで何もしない"""
+        if self.agent_runtime is not None:
+            self.agent_runtime.emergency_stop()
+        else:
+            self.speech_service.stop_all()
+            self.append_log("🛑 緊急停止: 音声を止めました（AIは動いていませんでした）。")
+        self._refresh_agent_state()
+
+    def resume_agent(self):
+        if self.agent_runtime is not None:
+            self.agent_runtime.resume()
+        self._refresh_agent_state()
+
+    def save_agent_settings(self):
+        config = AgentConfig.load(self.db.get_setting)
+        name = self.agent_name_entry.get().strip()
+        if len(name) > 20:
+            messagebox.showwarning("AI", "AIの名前は20文字までにしてください。")
+            return
+        try:
+            limit = int(self.agent_limit_entry.get().strip())
+        except ValueError:
+            messagebox.showwarning("AI", "1日にAIを呼ぶ上限は、0以上の数で入れてください。")
+            return
+        if limit < 0:
+            messagebox.showwarning("AI", "1日にAIを呼ぶ上限は、0以上の数で入れてください。")
+            return
+        config.ai_name, config.daily_call_limit = name, limit
+        config.save(self.db.save_setting)
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.ai_name = name
+            self.agent_runtime.config.daily_call_limit = limit
+        self._append_agent_log(f"⚙️ 設定を保存しました（AIの名前: {name or '（なし）'}、1日の上限: {limit}回）")
+        self._refresh_agent_usage()
+
+    def submit_agent_manual_event(self):
+        text = self.agent_event_text_entry.get().strip()
+        if not text:
+            return
+        runtime = self.agent_runtime
+        if runtime is None or not runtime.running:
+            messagebox.showinfo("AI", "先に「▶ 開始」を押してください。")
+            return
+        kind = AGENT_KIND_NOTICE if self.agent_event_kind_var.get() == "お知らせ" else AGENT_KIND_MESSAGE
+        speaker = self.agent_event_name_entry.get().strip() if kind == AGENT_KIND_MESSAGE else ""
+        event = make_manual_event(text[:200], speaker=speaker, kind=kind)
+        if runtime.submit(event):
+            who = f"{speaker}: " if speaker else "お知らせ: "
+            self._append_agent_log(f"📥 {who}{event.text}")
+            self.agent_event_text_entry.delete(0, "end")
+        else:
+            self._append_agent_log("⚠️ 受け付けられませんでした（止まっている・緊急停止中・待ちが一杯）。")
+
     # --- 設定タブ（送信クールダウン） ---
     def build_settings_tab(self):
         # ⚠️ 中身を tab_settings へ直接置かないこと。
@@ -11322,6 +11652,8 @@ class App(ctk.CTk):
     def on_ai_provider_selected(self, label):
         info = self._selected_ai_provider()
         self.db.save_setting("ai_api_provider", info.provider_id)
+        if getattr(self, "agent_provider_label", None) is not None:
+            self._refresh_agent_provider_label()
         # 別の提供元のキーを打ちかけのまま、こちらへ保存しないよう欄を空にする
         self.ai_api_key_entry.delete(0, "end")
         self._set_ai_key_reveal(False)
@@ -12405,8 +12737,15 @@ class App(ctk.CTk):
         self.phone_bridge.stop()
         # マイクの転送も止める。開いたままだと音声デバイスを掴み続けてしまう
         self.stop_input_passthrough()
+        # AIを止める（新しい出来事を受け付けない）。喋っている途中の分は、次の読み上げの停止で止まる
+        runtime = getattr(self, "agent_runtime", None)
+        if runtime is not None:
+            runtime.stop()
         # 読み上げも途中で止める（出力デバイスを掴んだまま閉じない。待つのは短く）
         self.speech_service.shutdown(timeout=0.5)
+        if runtime is not None:
+            runtime.join(timeout=1.0)
+            self.agent_store.close()
         self._cancel_scheduled_jobs()
         self._check_thread_and_destroy()
 

@@ -1,0 +1,72 @@
+# -*- coding: utf-8 -*-
+"""
+文章生成と、出す前の確認（設計書/04 の 2.4・4章）。
+
+出す前の確認で落ちたら、切ったり直したりせずに沈黙する（途中で切った文は喋らない）。
+"""
+import difflib
+import re
+from dataclasses import dataclass
+
+from .context import EMOTIONS
+from .decision import request_structured
+
+PRIORITY_AI = 50      # 音声サービスの優先度（読み上げと同じ。来た順に喋る）
+
+# 出す前の確認で落ちた理由
+CHECK_TOO_LONG = "C2"
+CHECK_FORBIDDEN = "C3"
+CHECK_REPEAT = "C4"
+CHECK_LIMIT = "C5"
+CHECK_STALE = "C1"
+CHECK_TEXTS = {
+    CHECK_STALE: "判断の間に新しい出来事が来た",
+    CHECK_TOO_LONG: "長すぎる",
+    CHECK_FORBIDDEN: "言わない言葉・個人情報らしいもの・URL",
+    CHECK_REPEAT: "直前の自分の発言とほぼ同じ",
+    CHECK_LIMIT: "発言の回数の上限",
+}
+
+_URL = re.compile(r"(https?://|www\.)", re.IGNORECASE)
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+_PHONE = re.compile(r"\d{2,4}[-‐ー−]\d{2,4}[-‐ー−]\d{3,4}|\d{10,11}")
+_POSTAL = re.compile(r"〒?\d{3}[-‐ー−]\d{4}")
+_REPEAT_RATIO = 0.9
+
+
+@dataclass
+class Utterance:
+    text: str
+    emotion: str
+    turn_id: str
+    priority: int = PRIORITY_AI
+
+
+def parse_utterance(data, turn_id):
+    if not isinstance(data, dict) or not isinstance(data.get("text"), str):
+        raise ValueError("text が無い")
+    text = " ".join(data["text"].split())       # 改行・続く空白は1つの空白に（声で読むため）
+    if not text:
+        raise ValueError("text が空")
+    emotion = data.get("emotion")
+    return Utterance(text=text, emotion=emotion if emotion in EMOTIONS else "neutral", turn_id=turn_id)
+
+
+def request_utterance(provider, request, turn_id, cancel, on_call):
+    """文を作ってもらう。型に合わなければ1回だけ作り直し。失敗は DecisionFailed / LLMError"""
+    return request_structured(provider, request, cancel, on_call,
+                              lambda r: parse_utterance(r.structured, turn_id))
+
+
+def precheck(text, max_chars, banned_words=(), recent_own=()):
+    """出す前の確認（C2〜C4）。通れば None、落ちたら理由の番号"""
+    if len(text) > max_chars:
+        return CHECK_TOO_LONG
+    if any(w and w in text for w in banned_words):
+        return CHECK_FORBIDDEN
+    if _URL.search(text) or _EMAIL.search(text) or _PHONE.search(text) or _POSTAL.search(text):
+        return CHECK_FORBIDDEN
+    for previous in recent_own[-1:]:
+        if difflib.SequenceMatcher(None, previous, text).ratio() >= _REPEAT_RATIO:
+            return CHECK_REPEAT
+    return None

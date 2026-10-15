@@ -17,6 +17,11 @@
 | `test_agent_api_keys.py` | 不要 | AI API のキーの保存（DPAPI の暗号文だけが残る、DB・WAL・ログ・error_log.txt にキーが出ない、壊れた暗号文で止まらない、環境変数の優先、伏せ字、提供元の一覧、模擬の接続確認） |
 | `test_gui_ai_api.py` | 不要 | 設定タブの「🤖 AI API」区画（隠す・👁・保存・削除・接続確認・提供元の切り替え）。ボットがキーをログへ渡していないことも確かめる。画面が一瞬出る |
 | `test_agent_speech.py` | 不要 | 音声（出す方。`files/agent/speech/`）: AivisSpeech・VOICEVOX のアダプター（にせの HTTP）、途中で止められる再生（にせの sounddevice。10秒の音を0.2秒以内に止める）、読み上げの待ち行列（順番・失敗しても次へ・同時に鳴らない・優先度・上限・終了）、App の読み上げ・「⏹ 止める」・スマホの解析・アラーム。**音は鳴らない** |
+| `test_agent_decision.py` | 不要 | AIの判断（段階3）: 規則の関所 R2〜R10、判断の型、出す前の確認 C2〜C4、発言すべき/沈黙すべき場面（T1〜T9）、外の文字を命令として扱わない（T34）。本物の `AgentRuntime` を模擬のAIで動かす |
+| `test_agent_guards.py` | 不要 | 同じ出来事を2度処理しない（T29）、1日の回数の上限（T31）、発言の頻度の上限（T32）、判断の間に上限に達したら喋らない（C5）、保留、AIの失敗が続いたら呼ばない状態へ・回復・認証の失敗（T10〜T13 の基本） |
+| `test_agent_lifecycle.py` | 不要 | 止める・緊急停止・再開（T36・T37）、再起動で直近の出来事と人格が戻る（T38）、`agent_data.db` が壊れていたらバックアップから戻す/作り直す（T39）、保存期間 |
+| `test_gui_agent_tab.py` | 不要 | AIタブ（開始・停止・緊急停止・再開・手入力の出来事・設定・判断のログ）。AIの声がスピーカー（読み上げの出力先ではない）に行くことも。画面が一瞬出る |
+| `agent_harness.py` | ― | 上のAIのテストが共通で使う器（模擬のAI・にせの声・一時フォルダの `agent_data.db`）。テストそのものではない |
 
 ## 実行
 
@@ -32,6 +37,10 @@ python tests/test_gui_keyword_target.py
 python tests/test_agent_api_keys.py
 python tests/test_gui_ai_api.py
 python tests/test_agent_speech.py
+python tests/test_agent_decision.py
+python tests/test_agent_guards.py
+python tests/test_agent_lifecycle.py
+python tests/test_gui_agent_tab.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方

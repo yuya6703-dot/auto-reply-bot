@@ -9,6 +9,7 @@
    - スレッドは最初の用件が来たときに1本だけ起こす（複数のスレッドから同時に呼ばれても2本にならない）
    - 声と音量は「合成・再生する時点」の設定を読む（呼び出し側の default_voice / default_volume）
 足したこと: 今の再生を止める・待ち行列を空にする・優先度（小さいほど先。同じなら来た順）
+段階3で足したこと: 用件ごとの出力先（AI の声はスピーカーだけに鳴らすため）、終わりを待てる印（finished・outcome）
 """
 import itertools
 import queue
@@ -38,13 +39,23 @@ class SpeechJob:
     priority: int = PRIORITY_NORMAL
     job_id: int = 0
     cancel: CancelToken = field(default_factory=CancelToken)
+    # 出力先の名前。None なら呼び出し側の既定（読み上げの出力先）、"" ならPCの既定の出力（スピーカー）
+    device: Optional[str] = None
+    # 終わったら立つ（鳴り終わった・止めた・失敗した・捨てた）。outcome にどれだったかが入る
+    finished: threading.Event = field(default_factory=threading.Event)
+    outcome: Optional[str] = None
+
+    def finish(self, outcome):
+        if self.outcome is None:
+            self.outcome = outcome
+        self.finished.set()
 
 
 class SpeechService:
     def __init__(self, synthesize, play, default_voice, default_volume, on_event=None, max_queue=20):
         """
         synthesize(text, voice) -> wav(bytes)。失敗は例外
-        play(wav, volume, cancel) -> bool
+        play(wav, volume, cancel, device) -> bool（device は SpeechJob.device。None なら呼び出し側の既定）
         default_voice() / default_volume(): 用件に指定が無いときに使う（ワーカーのスレッドから呼ばれる）
         on_event(kind, job, detail): 状態の知らせ（ワーカーのスレッドから呼ばれる。画面に触るなら伝言板を通すこと）
         """
@@ -76,6 +87,10 @@ class SpeechService:
     def pending_count(self):
         return self._queue.qsize()
 
+    @property
+    def closed(self):
+        return self._closed
+
     def is_busy(self):
         return self._current is not None
 
@@ -94,6 +109,7 @@ class SpeechService:
             except queue.Empty:
                 break
             job.cancel.cancel()
+            job.finish(EVENT_CANCELLED)
             self._queue.task_done()
             dropped += 1
             self._emit(EVENT_CANCELLED, job, "待ち行列から捨てた")
@@ -139,6 +155,7 @@ class SpeechService:
             self._current = job
             try:
                 if job.cancel.cancelled:
+                    job.finish(EVENT_CANCELLED)
                     self._emit(EVENT_CANCELLED, job, "始める前に止められた")
                     continue
                 self._emit(EVENT_STARTED, job)
@@ -148,15 +165,22 @@ class SpeechService:
                     job.voice = voice
                     wav = self._synthesize(job.text, voice)
                 if job.cancel.cancelled:
+                    job.finish(EVENT_CANCELLED)
                     self._emit(EVENT_CANCELLED, job, "合成の後に止められた")
                     continue
                 volume = self._default_volume() if job.volume is None else job.volume
-                self._play(wav, volume, job.cancel)
+                played = self._play(wav, volume, job.cancel, job.device)
+                if job.cancel.cancelled:
+                    job.finish(EVENT_CANCELLED)
+                else:
+                    job.finish(EVENT_DONE if played is not False else EVENT_FAILED)
                 self._emit(EVENT_CANCELLED if job.cancel.cancelled else EVENT_DONE, job)
             except Exception as e:
                 # ⚠️ ここで例外が漏れるとワーカーごと止まり、以後まったく喋らなくなる（既存と同じ考え）
+                job.finish(EVENT_FAILED)
                 self._emit(EVENT_FAILED, job, e)
             finally:
+                job.finish(EVENT_DONE)        # 念のため（上で決まっていれば変わらない）
                 self._current = None
                 try:
                     self._queue.task_done()

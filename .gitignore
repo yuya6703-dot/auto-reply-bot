@@ -13,6 +13,11 @@
 **/app_data.db-shm
 **/error_log.txt
 **/.deps_installed
+# AIの記録。他の人の名前・発言がそのまま入るので追跡しない（設計書/07）。壊れて退避したものとバックアップも
+**/agent_data.db
+**/agent_data.db-*
+**/agent_data.db.broken_*
+**/backup/agent_data_*.db
 
 # 実行ファイル・配布用アーカイブ
 *.exe
