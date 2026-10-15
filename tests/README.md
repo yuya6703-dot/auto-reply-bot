@@ -93,3 +93,28 @@ PYTHONIOENCODING=utf-8 python tests/test_manual_send.py
 
 `test_live_newline.py` は **GRAVITYの音声ルームが表示されていること**が前提。
 表示されていないと「入力欄が見つかりません」と出て止まる。これは失敗ではなく前提不足。
+
+## リリースのときの配布物の確かめ（`release_*.py`）
+
+ふつうのテスト（`test_*.py`）とは別に、リリースの前後で使う。前の版のソースは
+`git show v1.8.0:files/auto_reply_app.py > 前の版/auto_reply_app.py` のように取り出しておく。
+
+| ファイル | いつ | 内容 |
+|---|---|---|
+| `release_db_upgrade.py` | タグの前 | 前の版の DatabaseManager で作った `app_data.db` を今のコードで開き、利用者のデータ（セット・ペアの有効/無効・改行・設定・タイマー・定型文）が変わらないか。2回開いても変わらないか。画面は出ない |
+| `release_verify_dist.py` | タグの前（手元のビルド）と、公開の後（CIのzip） | zipの形（exe名・UTF-8の印・アイコン）、利用者のデータ・秘密・開発用のファイル・手元のパスが入っていないか、exe の中に今回の機能の名前と `files/agent/` の全モジュールがあるか、分離した環境で起動して版・`error_log.txt`・前の版の設定の引き継ぎ。**PyInstaller の入った Python で動かす。窓が10秒ほど出る** |
+| `release_update_e2e.py` | 公開の後 | 公開中の前の版を分離した環境で起動し、自動アップデートで新しい版に入れ替わるか（裏での用意・終了時の差し替え・バックアップ・設定の引き継ぎ）。**窓が1〜2分出る**。ログインなしの GitHub API を使う |
+
+```bash
+python tests/release_db_upgrade.py 前の版 作業フォルダ
+python tests/release_verify_dist.py auto_reply_app.zip 作業フォルダ 1.9.0 --strict-paths --old-src 前の版 --allow-error-log "keywordsテーブルにtarget列を追加しました"
+python tests/release_update_e2e.py 前の版のzip 新しい版のzip 作業フォルダ 前の版 1.8.0 1.9.0 --allow-error-log "keywordsテーブルにtarget列を追加しました"
+```
+
+⚠️ 起動は `LOCALAPPDATA`・`APPDATA`・`TEMP`・`USERPROFILE`・`PATH` を差し替えた環境で行う（スクリプトがやる）。アプリは起動時に、
+適用待ちでない `%LOCALAPPDATA%\AutoReplyTool\pending_update` を消すので、差し替えずに起動すると本人のアプリの準備物を消しうる。
+
+⚠️ `release_verify_dist.py` の `--symbols` は、リリースのたびにその版で足した機能の名前に差し替える（既定は v1.9.0 のもの）。
+
+⚠️ リリースしたコミットを取り出したフォルダ（`git worktree add`）から動かす。作業中のフォルダから動かすと、まだコミットしていない
+`files/agent/` のモジュールまで「入っているはず」として数え、今のコードでの確かめになってしまう。
