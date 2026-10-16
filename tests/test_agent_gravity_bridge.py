@@ -97,7 +97,16 @@ rooms = []
 b2 = A.GravityChatBridge(lambda events: None, on_room=rooms.append)
 info = A.read_room_info(GUEST, 2)
 check("ルームの画面から読む（押さない）", info == {"name": "伏せ字1", "permission": "プライベート音声ルーム",
-                                                 "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2}, info)
+                                                 "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2,
+                                                 "muted_seats": 1, "my_mic": "on"}, info)
+muted_screen = GUEST.replace('roomerBtnMicrophone" class="android.widget.ImageButton" package="anonymous.sns.community.gravity" '
+                             'content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" '
+                             'focused="false" scrollable="false" long-clickable="false" password="false" selected="false"',
+                             'roomerBtnMicrophone" class="android.widget.ImageButton" package="anonymous.sns.community.gravity" '
+                             'content-desc="" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" '
+                             'focused="false" scrollable="false" long-clickable="false" password="false" selected="true"')
+check("下の帯のマイクのボタンが selected なら、AIのマイクはミュート（2026-10-16）", muted_screen != GUEST
+      and A.read_room_info(muted_screen, 2)["my_mic"] == "muted")
 check("ルームの画面でなければ読まない", A.read_room_info(fixture("voiceroom_minimized.xml"), 2) is None)
 announce_rows = A.parse_chat_rows(fixture("voiceroom_announcement.xml"), 2)
 b2.on_room(info, announce_rows)

@@ -32,6 +32,9 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 # cryptography はHTTPS配信用の証明書を作るのに使う。
 tmp_ret = collect_all('cryptography')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# PyAudioWPatch は PCのスピーカーの音をループバックで取るのに使う（AI が声を聞く）。中の PortAudio を同梱する。
+tmp_ret = collect_all('pyaudiowpatch')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(

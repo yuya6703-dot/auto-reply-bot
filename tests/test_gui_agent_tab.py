@@ -131,6 +131,8 @@ class Harness(ctk.CTk):
     unmute_agent = A.App.unmute_agent
     on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
     on_agent_filler_toggled = A.App.on_agent_filler_toggled
+    on_agent_mute_chat_toggled = A.App.on_agent_mute_chat_toggled
+    _warn_if_own_cable = A.App._warn_if_own_cable
     on_agent_mention_toggled = A.App.on_agent_mention_toggled
     on_agent_emoji_toggled = A.App.on_agent_emoji_toggled
     _agent_voice_style_map = A.App._agent_voice_style_map
@@ -752,6 +754,12 @@ check("OFFにできる（動いているエージェントにもすぐ効く）"
 h.agent_conversation_var.set(True)
 h.on_agent_conversation_toggled()
 check("ONに戻せる", h.agent_runtime.config.conversation_enabled is True)
+check("ミュートのときはチャットで返すは既定ON", h.agent_mute_chat_var.get() is True)
+h.agent_mute_chat_var.set(False)
+h.on_agent_mute_chat_toggled()
+check("OFFにできる", db.get_setting("agent.mute_fallback_chat") == "0" and h.agent_runtime.config.mute_fallback_chat is False)
+h.agent_mute_chat_var.set(True)
+h.on_agent_mute_chat_toggled()
 check("考え中のつなぎ言葉は既定ON", h.agent_filler_var.get() is True)
 h.agent_filler_var.set(False)
 h.on_agent_filler_toggled()
@@ -859,6 +867,12 @@ check("しきい値を変えると、聞いている途中でも効く・保存�
 h._poll_voice_level()
 check("今の音量を出す", abs(h.agent_hearing_level.get() - 0.25) < 0.01, h.agent_hearing_level.get())
 check("話し始め・終わりを AI に知らせる（話している間は喋り始めない）", listener.on_activity == h.agent_runtime.on_voice_activity)
+check("聞いている間は、AI に「ルームの声も届く」と伝える", h.agent_runtime.config.hearing_active is True)
+db.save_setting("audio_output_device", "CABLE Input (VB-Audio Virtual C")
+check("読み上げと同じ仮想ケーブルの出口を選んだら知らせる（自分の読み上げしか聞こえない）",
+      h._warn_if_own_cable("CABLE Output (VB-Audio Virtual ") is True and "PCのスピーカーの音" in dialogs[-1][2]
+      and h._warn_if_own_cable("🔊 PCのスピーカーの音（今の既定の出力）") is False)
+db.save_setting("audio_output_device", "")
 h.agent_hearing_hints_entry.insert(0, "ポテチ、深夜ラジオ")
 h.save_agent_hearing_hints()
 check("聞き取りのヒントを保存する（動いているエージェントにもすぐ効く）", db.get_setting("agent.hearing_hints") == "ポテチ、深夜ラジオ"
@@ -883,7 +897,7 @@ del h.agent_runtime.hear
 check("オーナーのマイクの声は、オーナーの名前で渡す", got == ["伏せ字9"], got)
 h.stop_agent()
 check("AIを止めたら聞くのもやめる（オーナーのマイクも）", FakeListener.made[-1].stopped and h._voice_listener is None
-      and h._owner_mic_listener is None)
+      and h._owner_mic_listener is None and h.agent_runtime.config.hearing_active is False)
 h.agent_owner_mic_var.set("（使わない）")
 h.on_agent_owner_mic_selected()
 h.start_agent()

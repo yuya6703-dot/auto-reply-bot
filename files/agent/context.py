@@ -207,11 +207,22 @@ def scene_lines(config, room, now):
         if room.get("guests"):
             inside.append(f"人数: {room['guests']}")
         if room.get("seated") is not None:
-            inside.append(f"席: {room['seated']}人が座っている（空き{room.get('empty_seats', 0)}）")
+            muted = f"・そのうちミュート{room['muted_seats']}人" if room.get("muted_seats") else ""
+            inside.append(f"席: {room['seated']}人が座っている（空き{room.get('empty_seats', 0)}{muted}）")
         if room.get("announcement"):
             inside.append(f"アナウンス: {room['announcement']}")
         if inside:
             lines += [ROOM_BLOCK_BEGIN, *inside, ROOM_BLOCK_END]
+    if room and (room.get("my_mic") == "muted" or (room.get("my_mic") and config.output_mode != OUTPUT_CHAT)):
+        lines.append("あなたのマイク: " + ("ミュートではない（席に座っていれば、あなたの声はルームに届く）" if room["my_mic"] == "on"
+                                         else "ミュート（あなたの声はルームに届かない。声で答える設定でも、今はチャットで返す）"))
+    # 受け取れるもの（2026-10-16 本人「ミュートしてて話ができないのに声が聞こえるとか言ってるし」）
+    if config.hearing_active:
+        lines.append("あなたが受け取れるもの: チャットの文字と、ルームの声を文字にしたもの（「声（だれか）」。誰の声かは分からない。"
+                     "ミュートの人の声は届かない）")
+    else:
+        lines.append("あなたが受け取れるもの: チャットの文字だけ。ルームの声は聞こえていない"
+                     "（「声が聞こえた」「いい声」などと、聞こえたように言わない）")
     return lines
 
 

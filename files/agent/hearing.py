@@ -150,11 +150,26 @@ class VoiceSegmenter:
         return done
 
 
+# PCのスピーカーの音（今の既定の出力）をループバックで取る（2026-10-16 本人が選んだ「PCのスピーカーの音をそのまま取る」）。
+# MuMu はルームの声を既定の出力（スピーカー）に出している。読み上げ・AI の声は VB-CABLE へ出すので、ここには入らない
+LOOPBACK_DEFAULT = "🔊 PCのスピーカーの音（今の既定の出力）"
+
+
+def loopback_available():
+    import importlib.util
+    return importlib.util.find_spec("pyaudiowpatch") is not None
+
+
 def list_input_devices():
     """
-    音声入力の名前の一覧（MME のものだけ。⚠️ 出す側で DirectSound は音が消えることがあった。聞く側も MME にそろえる）。
-    sounddevice が無い・機材が読めなければ空
+    音声入力の名前の一覧。いちばん上に「PCのスピーカーの音（ループバック）」、続けて MME の入力
+    （⚠️ 出す側で DirectSound は音が消えることがあった。聞く側も MME にそろえる）。機材が読めなければ空
     """
+    names = [LOOPBACK_DEFAULT] if loopback_available() else []
+    return names + _mme_input_devices()
+
+
+def _mme_input_devices():
     try:
         import sounddevice as sd
         devices, apis = sd.query_devices(), sd.query_hostapis()
@@ -165,6 +180,62 @@ def list_input_devices():
         if d.get("max_input_channels", 0) > 0 and apis[d["hostapi"]]["name"] == "MME" and d["name"] not in names:
             names.append(d["name"])
     return names
+
+
+class _LoopbackStream:
+    """PyAudioWPatch の流れを、sounddevice の流れと同じに止められるようにまとめたもの"""
+
+    def __init__(self, audio, stream):
+        self._audio, self._stream = audio, stream
+
+    def stop(self):
+        try:
+            self._stream.stop_stream()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self._stream.close()
+        finally:
+            self._audio.terminate()
+
+
+def _open_loopback(push):
+    """
+    今の既定の出力（スピーカー）のループバックを開く。何チャンネルでも1チャンネル（モノラル）にして push へ渡す。
+    戻り値: (止められる流れ, サンプルレート)
+    """
+    import pyaudiowpatch as pyaudio
+    audio = pyaudio.PyAudio()
+    try:
+        wasapi = audio.get_host_api_info_by_type(pyaudio.paWASAPI)
+        speakers = audio.get_device_info_by_index(wasapi["defaultOutputDevice"])
+        loop = next((d for d in audio.get_loopback_device_info_generator() if speakers["name"] in d["name"]), None)
+        if loop is None:
+            raise ValueError(f"「{speakers['name']}」のループバックが見つかりません")
+        rate, channels = int(loop["defaultSampleRate"]), max(1, int(loop["maxInputChannels"]))
+
+        def callback(data, frames, info, status):
+            push(to_mono(data, channels))
+            return (None, pyaudio.paContinue)
+        stream = audio.open(format=pyaudio.paInt16, channels=channels, rate=rate, input=True,
+                            input_device_index=loop["index"], frames_per_buffer=int(rate * FRAME_SECONDS),
+                            stream_callback=callback)
+        stream.start_stream()
+        return _LoopbackStream(audio, stream), rate
+    except Exception:
+        audio.terminate()
+        raise
+
+
+def to_mono(pcm, channels):
+    """int16 の何チャンネルかの PCM（交互に並ぶ）を、平均して1チャンネルにする"""
+    if channels <= 1:
+        return pcm
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - len(pcm) % (2 * channels)])
+    return array("h", (sum(samples[i:i + channels]) // channels for i in range(0, len(samples), channels))).tobytes()
 
 
 class VoiceListener:
@@ -229,6 +300,8 @@ class VoiceListener:
     def _open(self):
         if self._stream_factory is not None:
             return self._stream_factory(self._push)
+        if self.device_name == LOOPBACK_DEFAULT:
+            return _open_loopback(self._push)
         import sounddevice as sd
         index = None
         for i, d in enumerate(sd.query_devices()):

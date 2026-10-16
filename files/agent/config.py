@@ -123,6 +123,9 @@ class AgentConfig:
     active_account: str = ""                      # 今チャットしている GRAVITY のアカウント（エージェントが入れる）
     active_account_named: bool = False            # そのアカウントの名前が分かっているか（「本体のGRAVITY」などの仮の呼び名でない）
     self_voice: str = ""                          # 今の AI の声（キャラ名・スタイル。エージェントが入れる。自分の声を知る）
+    hearing_active: bool = False                  # 今ルームの声を聞いているか（画面が入れる。AI が「聞こえていない声」を聞こえたと言わないように）
+    # 「声で答える（ルームへ）」なのに AI のマイクがミュートのときは、チャットで返す（2026-10-16 本人「マイクをミュートにしていることをAIが把握できるように」）
+    mute_fallback_chat: bool = True
     react_max_chars: int = 40              # C2: 短い反応の上限（声）
     engage_max_chars: int = 120            # C2: 参加の上限（声）
     chat_react_max_chars: int = 60         # C2: チャットの短い反応の上限（チャットは読むので声より長くてよい）
@@ -138,7 +141,7 @@ class AgentConfig:
     # 画面で変える項目
     EDITABLE = ("ai_name", "self_names", "owner_names", "ignored_people", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
-                "conversation_enabled", "chat_mention", "chat_emoji", "thinking_fillers",
+                "conversation_enabled", "chat_mention", "chat_emoji", "thinking_fillers", "mute_fallback_chat",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
                 "lookup_enabled", "lookup_wait_text", "digest_enabled", "hearing_enabled", "hearing_device",
                 "hearing_threshold", "hearing_hints", "hearing_owner_device", "owner_profile_enabled",

@@ -77,6 +77,14 @@ check("BGM が止まって静かになったら、下地も下がる（小さな
 w = wave.open(io.BytesIO(to_wav(pcm, RATE)))
 check("AI へ送る形（WAV・モノラル・16bit）", w.getnchannels() == 1 and w.getsampwidth() == 2 and w.getframerate() == RATE)
 
+print("■ PCのスピーカーの音（ループバック。2026-10-16 本人が選んだ取り方）")
+from agent.hearing import LOOPBACK_DEFAULT, list_input_devices, loopback_available, to_mono
+stereo = array("h", [100, 300, -200, -400, 32000, 32000]).tobytes()
+check("2チャンネルを平均して1チャンネルにする", array("h", to_mono(stereo, 2)).tolist() == [200, -300, 32000])
+check("1チャンネルはそのまま", to_mono(stereo, 1) == stereo)
+check("部品（PyAudioWPatch）があれば、入力のいちばん上に「PCのスピーカーの音」", not loopback_available()
+      or list_input_devices()[0] == LOOPBACK_DEFAULT)
+
 print("■ 聞き続ける（にせの音声入力）")
 got = []
 holder = {}
@@ -196,6 +204,29 @@ check("ルームの音（だれか）の「静かにして」は合図にしな�
       or a.runtime.muted_until is None)
 time.sleep(0.5)
 check("（合図にならない）", a.runtime.muted_until is None)
+a.close()
+
+print("■ 受け取れるもの・マイクのミュート（2026-10-16 本人「ミュートしてて話ができないのに声が聞こえるとか言ってる」）")
+a = Agent(mode=MODE_ENGAGE, output_mode="voice_room", ai_name="アイ", chat_send_mode="auto")
+a.say("アイ、私の声どう？", speaker="たろう")
+check("声を聞いていないときは「チャットの文字だけ。聞こえたように言わない」と伝える", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+      and "ルームの声は聞こえていない" in a.decide_calls()[-1].messages[0].content)
+a.runtime.config.hearing_active = True
+a.runtime.set_room_info({"name": "x", "seated": 4, "empty_seats": 2, "muted_seats": 1, "my_mic": "on"})
+a.say("アイ、聞こえる？", speaker="はなこ")
+check("聞いているときは「ルームの声を文字にしたもの（誰の声かは分からない）」と伝える", wait_until(
+    lambda: len(a.decide_calls()) >= 2, 5.0) and "ルームの声を文字にしたもの" in a.decide_calls()[-1].messages[0].content)
+check("席のミュートの人数・自分のマイクを伝える", "そのうちミュート1人" in a.decide_calls()[-1].messages[0].content
+      and "あなたのマイク: ミュートではない" in a.decide_calls()[-1].messages[0].content)
+a.runtime.set_room_info({"name": "x", "seated": 4, "empty_seats": 2, "muted_seats": 2, "my_mic": "muted"})
+spoken = len(a.speaker.spoken)
+a.say("アイ、もう一回", speaker="はなこ")
+check("自分のマイクがミュートなら、声の代わりにチャットで返す", wait_until(lambda: len(a.chat.posted) >= 1, 5.0)
+      and len(a.speaker.spoken) == spoken and any("マイクがミュートなので" in line for line in a.logs), a.logs[-3:])
+check("AI にも「ミュート（声は届かない）」と伝える", "あなたのマイク: ミュート" in a.decide_calls()[-1].messages[0].content)
+a.runtime.config.mute_fallback_chat = False
+a.say("アイ、さらにもう一回", speaker="はなこ")
+check("OFFなら声のまま", wait_until(lambda: len(a.speaker.spoken) > spoken, 5.0) and len(a.chat.posted) == 1)
 a.close()
 
 print("■ 会話の回数の上限と、裏の仕事（文字起こしなど）の上限は別に数える")

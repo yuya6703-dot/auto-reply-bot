@@ -1083,7 +1083,11 @@ def find_by_id(xml_dump, resource_name, display=None, text=None):
 def read_room_info(xml_dump, display=None):
     """
     音声ルームの画面から、ルームの様子を読む（押さない。読むだけ）。ルームの画面でなければ None。
-    {"name": ルーム名, "permission": 公開設定, "guests": 「ゲスト（N人）」, "seated": 座っている席の数, "empty_seats": 空いた席の数}
+    {"name": ルーム名, "permission": 公開設定, "guests": 「ゲスト（N人）」, "seated": 座っている席の数, "empty_seats": 空いた席の数,
+     "muted_seats": ミュートの席の数, "my_mic": このアカウントのマイク（"on" / "muted" / ""＝分からない）}
+    ⚠️ マイクは下の帯の roomerBtnMicrophone の selected で見る。2026-10-16 実機で、席に座ってマイクONのとき selected=false。
+       ただしゲスト（席にいない）の画面も selected=false で、ボタンの中身もまったく同じ（見分けられない）。
+       selected=true をミュートとみるのは、記録した画面からの推測（実機ではまだ確かめていない）。席のミュートは ivMuted（話せる席は ivVolume）
     ⚠️ 席に座っている人の名前は画面に出ていない（アイコンだけ）。tvTitle は「ミッションへ」にも使われているので、
        上の帯（llTitle）の中のものだけをルーム名にする（GRAVITY画面部品.md）
     """
@@ -1092,7 +1096,7 @@ def read_room_info(xml_dump, display=None):
     nodes = _display_nodes(root, display)
     if not any(_resource_name(n) == CHAT_LIST_ID for n in nodes):
         return None
-    info = {"name": "", "permission": "", "guests": "", "seated": 0, "empty_seats": 0}
+    info = {"name": "", "permission": "", "guests": "", "seated": 0, "empty_seats": 0, "muted_seats": 0, "my_mic": ""}
     for node in nodes:
         rid, text = _resource_name(node), (node.get("text") or "").strip()
         if rid == "tvTitle" and text and not info["name"] and _has_ancestor(node, parent, "llTitle"):
@@ -1105,6 +1109,10 @@ def read_room_info(xml_dump, display=None):
             info["seated"] += 1
         elif rid == "ivAdd":
             info["empty_seats"] += 1
+        elif rid == "ivMuted" and _has_ancestor(node, parent, "rvSeats"):
+            info["muted_seats"] += 1
+        elif rid == "roomerBtnMicrophone":
+            info["my_mic"] = "muted" if node.get("selected") == "true" else "on"
     return info
 
 
@@ -9847,6 +9855,11 @@ class App(ctk.CTk):
         ctk.CTkSwitch(control, text="💬 話しかけられたら続けて話す（呼ばれた・話している相手には1分に4回まで。3秒はあける）",
                       variable=self.agent_conversation_var, command=self.on_agent_conversation_toggled).pack(
             anchor="w", padx=12, pady=(0, 6))
+        # AI のマイクがミュートなら、声の代わりにチャットで返す（2026-10-16 本人「マイクをミュートにしていることをAIが把握できるように」）
+        self.agent_mute_chat_var = ctk.BooleanVar(value=AgentConfig.load(self.db.get_setting).mute_fallback_chat)
+        ctk.CTkSwitch(control, text="🎙 AIのマイクがミュートのときは、声の代わりにチャットで返す（声でルームへ答えるとき）",
+                      variable=self.agent_mute_chat_var, command=self.on_agent_mute_chat_toggled).pack(
+            anchor="w", padx=12, pady=(0, 6))
         # 考え中のつなぎ言葉（2026-10-16 本人「考えてる最中にあーとか、えーととかをいうとか、うーんとかもね」。既定ON）
         self.agent_filler_var = ctk.BooleanVar(value=AgentConfig.load(self.db.get_setting).thinking_fillers)
         ctk.CTkSwitch(control, text="🤔 考え中に「えーと」「うーん」などを言う（声で答えるとき。返事に2秒以上かかったら）",
@@ -10255,8 +10268,23 @@ class App(ctk.CTk):
             self.agent_runtime.config.hearing_hints = hints
         self._append_agent_log(f"👂 聞き取りのヒントを保存しました（{hints or 'なし'}）。")
 
+    def _warn_if_own_cable(self, device):
+        """
+        聞く入力が、読み上げを流している仮想ケーブルの出口なら知らせる（自分の読み上げしか聞こえない）。
+        2026-10-16 実物: 読み上げの出力先が「CABLE Input」、聞く入力が「CABLE Output」で、ルームの声が聞こえていなかった
+        """
+        output = (self.db.get_setting("audio_output_device", "") or "")
+        if device.startswith("CABLE Output") and output.startswith("CABLE Input"):
+            messagebox.showwarning(
+                "声を聞く", "この入力は、読み上げをルームへ流している仮想ケーブル（VB-CABLE）の出口です。\n"
+                          "ここを聞くと、ルームの人の声ではなく、このアプリの読み上げを聞いてしまいます。\n\n"
+                          "ルームの声は「🔊 PCのスピーカーの音」を選ぶと聞けます（MuMu がスピーカーに出している音）。")
+            return True
+        return False
+
     def on_agent_hearing_device_selected(self, _value=None):
         device = self._selected_hearing_device()
+        self._warn_if_own_cable(device)
         self.db.save_setting("agent.hearing_device", device)
         if self.agent_runtime is not None:
             self.agent_runtime.config.hearing_device = device
@@ -10300,6 +10328,7 @@ class App(ctk.CTk):
             self.agent_hearing_status.configure(text=why)
             return
         self._voice_listener = listener
+        runtime.config.hearing_active = True       # AI に「ルームの声も届く」と伝える
         self.agent_hearing_status.configure(text=f"聞いています（{device}）")
         self._start_owner_mic(runtime)
         self._poll_voice_level()
@@ -10331,6 +10360,8 @@ class App(ctk.CTk):
         if owner_mic is not None:
             owner_mic.stop()
         listener, self._voice_listener = self._voice_listener, None
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.hearing_active = False    # AI に「声は聞こえていない」と伝える
         if listener is not None:
             listener.stop()
             if self.agent_runtime is not None:
@@ -10869,6 +10900,14 @@ class App(ctk.CTk):
             self.agent_runtime.config.chat_emoji = on
         self._append_agent_log("😊 チャットで気持ちを絵文字で表します。" if on else "😊 チャットで絵文字は使いません。")
 
+    def on_agent_mute_chat_toggled(self):
+        on = bool(self.agent_mute_chat_var.get())
+        self.db.save_setting("agent.mute_fallback_chat", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.mute_fallback_chat = on
+        self._append_agent_log("🎙 AIのマイクがミュートのときは、チャットで返します。" if on
+                               else "🎙 AIのマイクがミュートでも、声で返します（ルームには届きません）。")
+
     def on_agent_filler_toggled(self):
         on = bool(self.agent_filler_var.get())
         self.db.save_setting("agent.thinking_fillers", "1" if on else "0")
@@ -11017,7 +11056,9 @@ class App(ctk.CTk):
         if runtime is not None:
             runtime.set_room_info(info)
         parts = [f"「{info['name']}」" if info.get("name") else "", info.get("guests", ""),
-                 f"席{info.get('seated', 0)}人" if info.get("seated") else ""]
+                 f"席{info.get('seated', 0)}人" if info.get("seated") else "",
+                 f"ミュート{info['muted_seats']}人" if info.get("muted_seats") else "",
+                 "AIのマイクはミュート" if info.get("my_mic") == "muted" else ""]
         line = "🏠 ルームの様子: " + "・".join(p for p in parts if p)
         if info.get("announcement"):
             line += "（アナウンスあり）"

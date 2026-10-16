@@ -616,18 +616,25 @@ class AgentRuntime:
             self._current_cancel = cancel
             self._decision_times = [t for t in self._decision_times if now - t < 60] + [now]
         fresh_seq = self.inbox.fresh_seq
+        with self._lock:
+            room = dict(self._room_info) if self._room_info else None
+        # この回の設定。「声で答える（ルームへ）」なのに AI のマイクがミュートなら、この回はチャットで返す（声は届かない。
+        # 2026-10-16 本人「マイクをミュートにしていることをAIが把握できるように」）。⚠️ self.config は差し替えない（関所なども持っている）
+        cfg = self.config
+        if (cfg.output_mode == OUTPUT_VOICE_ROOM and cfg.mute_fallback_chat and room
+                and room.get("my_mic") == "muted"):
+            cfg = replace(cfg, output_mode=OUTPUT_CHAT)
+            self.log.write("🎙 AIのマイクがミュートなので、この返事はチャットで返します。")
         left_minute = max(0, self.config.utterance_limits[0]
                           - len([t for t in snap.utterance_times if now - t < 60]))
         note = rules_note(left_minute, max(0, self.config.daily_call_limit - snap.calls_today - 1),
-                          self.config.output_mode)
+                          cfg.output_mode)
         # 呼ばれたときは判断と文を1回で頼む（返事をする見込みが高いので、往復を1回減らして早く返す）
         combined = result.strong and self.config.combined_when_addressed
         prepared = None
         voice_styles = self._voice_styles()
         builder = build_combined_request if combined else build_decide_request
-        with self._lock:
-            room = dict(self._room_info) if self._room_info else None
-        keep_newlines = self.config.output_mode == OUTPUT_CHAT
+        keep_newlines = cfg.output_mode == OUTPUT_CHAT
         # 記憶: 覚えていること（事実）・久しぶり（時間の感覚）・オーナーのメモ・前のやりとり（ファイルから）
         memory_lines = {"facts": self.memory.recall(events), **self._journal_recall(events)}
         pending = self._pending_lines(now)
@@ -645,8 +652,8 @@ class AgentRuntime:
             except Exception:
                 self.config.self_voice = ""
         extra = {"voice_styles": voice_styles} if combined else {}
-        filler = self._start_filler(turn_id) if result.strong else None
-        request = builder(events, self.window, self.persona, self.config, note, now,
+        filler = self._start_filler(turn_id) if result.strong and cfg.output_mode != OUTPUT_CHAT else None
+        request = builder(events, self.window, self.persona, cfg, note, now,
                           timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines, **extra)
         try:
             if combined:
@@ -709,7 +716,7 @@ class AgentRuntime:
             if combined and lookup is None:
                 self.log.write("ℹ️ 1回で頼んだ返事に文が無かったので、文だけもう一度頼みます。")
             self._set_state(STATE_GENERATING)
-            request = build_generate_request(decision, events, self.window, self.persona, self.config,
+            request = build_generate_request(decision, events, self.window, self.persona, cfg,
                                              self._clock(), timeout=self.config.decide_timeout_seconds, room=room,
                                              memory_lines=memory_lines, lookup=lookup, voice_styles=voice_styles)
             try:
@@ -727,7 +734,8 @@ class AgentRuntime:
         self._stop_filler(filler)
         # --- 出す前の確認 ---
         # ⚠️ 調べた答えは、調べている間に会話が進んでも出す（頼まれたことの答えなので古くならない）
-        check = self._precheck(utterance, decision, fresh_seq, allow_stale=lookup is not None, strong=result.strong)
+        check = self._precheck(utterance, decision, fresh_seq, allow_stale=lookup is not None, strong=result.strong,
+                               cfg=cfg)
         if check == CHECK_STALE:
             self._keep_pending(utterance.text, "会話が進んだので出さなかった")
         if check:
@@ -737,7 +745,7 @@ class AgentRuntime:
             return
 
         # --- 出す（声 / チャット） ---
-        if self.config.output_mode == OUTPUT_CHAT:
+        if cfg.output_mode == OUTPUT_CHAT:
             delivered = self._post_chat(utterance, decision, turn_id)
         else:
             delivered = self._speak(utterance, decision, turn_id)
@@ -751,13 +759,13 @@ class AgentRuntime:
                 self._partners[decision.target] = self._clock() + self.config.conversation_partner_seconds
         if delivered:
             self._journal("record_reply", self._account, decision.target, utterance.text,
-                          self.config.output_mode, self.config.display_name)
+                          cfg.output_mode, self.config.display_name)
 
-    def _precheck(self, utterance, decision, fresh_seq, allow_stale=False, strong=False):
+    def _precheck(self, utterance, decision, fresh_seq, allow_stale=False, strong=False, cfg=None):
         if (self.inbox.fresh_seq != fresh_seq and not allow_stale) or self._heard_talking():
             return CHECK_STALE
         own = [u.text for u in self.window.own_utterances()]
-        check = precheck(utterance.text, max_chars_for(decision.action, self.config),
+        check = precheck(utterance.text, max_chars_for(decision.action, cfg or self.config),
                          self.config.banned_words, own)
         if check:
             return check

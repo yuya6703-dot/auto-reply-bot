@@ -11,6 +11,9 @@ Pillow==12.1.0
 # 出力デバイスを選んで鳴らすために使う（winsoundは既定デバイスにしか鳴らせない）。
 # PortAudioのDLLを同梱する必要があるため、specファイルでも collect_all しておくこと。
 sounddevice==0.5.1
+# PCのスピーカーの音（MuMu が鳴らしているルームの声）を「ループバック」で取るのに使う（AI が声を聞く。2026-10-16）。
+# sounddevice（PortAudio）には WASAPI のループバックが無い。specファイルでも collect_all しておくこと。
+PyAudioWPatch==0.2.12.9
 # スマホ連携をHTTPSで配信するための証明書を作るのに使う。
 # HTTPSでないと、スマホのブラウザがマイク（音声認識）を開かせてくれない。
 cryptography==46.0.5
