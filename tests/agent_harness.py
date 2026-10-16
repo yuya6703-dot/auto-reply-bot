@@ -84,10 +84,12 @@ class FakeChat:
         self.answer = answer
         self.posted = []
         self.asked = []
+        self.utterances = []        # 受け取った Utterance（確かめずに送る一言か、なども見る）
         self.waiting = threading.Event()
 
     def post(self, utterance, cancel):
         self.asked.append(utterance.text)
+        self.utterances.append(utterance)
         if self.answer == "wait":           # 確認の画面で本人が迷っている（緊急停止で止まる）
             self.waiting.set()
             cancel.wait(10.0)

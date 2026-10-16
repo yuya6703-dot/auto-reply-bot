@@ -40,6 +40,7 @@ class Utterance:
     emotion: str
     turn_id: str
     priority: int = PRIORITY_AI
+    skip_approval: bool = False     # 下書きを見せずに送る（調べる前の「待って」の一言だけ。本人の決定 2026-10-16）
 
 
 MAX_CHAT_LINES = 3      # チャットは改行2つ（3行）まで

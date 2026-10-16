@@ -85,6 +85,7 @@ from agent.speech.service import (SpeechService, SpeechJob,
                                   EVENT_QUEUE_CHANGED as SPEECH_EVENT_QUEUE_CHANGED)
 # AIのエージェント（段階3: 骨組み。模擬のAIと手入力の出来事で試す。設計書/09 の S3）
 from agent.config import (AgentConfig, NAMES_MAX_CHARS as AGENT_NAMES_MAX_CHARS,
+                          WAIT_TEXT_MAX_CHARS as AGENT_WAIT_TEXT_MAX_CHARS,
                           load_account_profiles, save_account_profiles,
                           OUTPUT_VOICE as AGENT_OUTPUT_VOICE, OUTPUT_CHAT as AGENT_OUTPUT_CHAT,
                           CHAT_APPROVE as AGENT_CHAT_APPROVE, CHAT_AUTO as AGENT_CHAT_AUTO)
@@ -95,6 +96,7 @@ from agent.llm.mock import MockProvider, MODE_LABELS as MOCK_MODE_LABELS, MODE_S
 from agent.llm.gemini import GeminiProvider, MODELS as GEMINI_MODELS, DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
 from agent.persona import Persona
 from agent.memory.journal import ConversationJournal, FOLDER_NAME as AGENT_JOURNAL_FOLDER
+from agent.tools.lookup import Lookup as AgentLookup, user_agent as lookup_user_agent
 from agent.generation import tidy_text as agent_tidy_text
 from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN_RESTORED, OPEN_RECREATED
 from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
@@ -9828,6 +9830,22 @@ class App(ctk.CTk):
                       variable=self.agent_initiative_var, command=self.on_agent_initiative_toggled).pack(
             anchor="w", padx=12, pady=(0, 6))
 
+        # 頼まれたら調べる（2026-10-16 本人「調べるからちょっと待っててねみたいな一言」「チャットの中の話ね」）
+        lookup_config = AgentConfig.load(self.db.get_setting)
+        self.agent_lookup_var = ctk.BooleanVar(value=lookup_config.lookup_enabled)
+        ctk.CTkSwitch(control, text="🔎 頼まれたら調べる（Wikipedia・天気。調べる前に「待って」の一言を出す）",
+                      variable=self.agent_lookup_var, command=self.on_agent_lookup_toggled).pack(
+            anchor="w", padx=12, pady=(0, 4))
+        wait_row = ctk.CTkFrame(control, fg_color="transparent")
+        wait_row.pack(anchor="w", fill="x", padx=40, pady=(0, 6))
+        ctk.CTkLabel(wait_row, text="待っての一言:").pack(side="left", padx=(0, 6))
+        self.agent_wait_text_entry = ctk.CTkEntry(wait_row, width=260, placeholder_text="空なら一言は出さない")
+        self.agent_wait_text_entry.pack(side="left", padx=(0, 6))
+        self.agent_wait_text_entry.bind("<Button-3>", self._show_entry_context_menu)
+        if lookup_config.lookup_wait_text:
+            self.agent_wait_text_entry.insert(0, lookup_config.lookup_wait_text)
+        ctk.CTkButton(wait_row, text="💾", width=40, command=self.save_agent_wait_text).pack(side="left")
+
         self.agent_usage_label = ctk.CTkLabel(control, text="", text_color="gray70", justify="left")
         self.agent_usage_label.pack(anchor="w", padx=12, pady=(0, 10))
 
@@ -10478,6 +10496,35 @@ class App(ctk.CTk):
             self.agent_runtime.config.initiative_enabled = on
         self._append_agent_log("💭 静かなときに自分から話しかけます。" if on else "💭 自分から話しかけるのをやめました。")
 
+    def on_agent_lookup_toggled(self):
+        on = bool(self.agent_lookup_var.get())
+        wait = self.agent_wait_text_entry.get().strip()
+        if on and not messagebox.askyesno(
+                "頼まれたら調べる",
+                "チャットで頼まれたら、AIが Wikipedia（日本語版）と天気（Open-Meteo）を調べて答えます。\n"
+                "調べる言葉（作品名・地名など）は AI が決めて、Wikipedia・Open-Meteo へ送ります"
+                "（ルームの人のことは調べないように指示しています）。調べるのは1時間に10回までです。\n"
+                + (f"調べる前に「{wait}」と出します。下書きを見せる設定でも、この一言だけは確かめずに送ります。\n"
+                   if wait else "")
+                + "\n頼まれたら調べるようにしますか？"):
+            self.agent_lookup_var.set(False)
+            return
+        self.db.save_setting("agent.lookup_enabled", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.lookup_enabled = on
+        self._append_agent_log("🔎 頼まれたら調べます（Wikipedia・天気）。" if on else "🔎 調べるのをやめました。")
+
+    def save_agent_wait_text(self):
+        """調べる前の「待って」の一言（空なら出さない）"""
+        text = " ".join(self.agent_wait_text_entry.get().split())
+        if len(text) > AGENT_WAIT_TEXT_MAX_CHARS:
+            messagebox.showwarning("AI", f"待っての一言は{AGENT_WAIT_TEXT_MAX_CHARS}文字までにしてください。")
+            return
+        self.db.save_setting("agent.lookup_wait_text", text)
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.lookup_wait_text = text
+        self._append_agent_log(f"🔎 待っての一言を「{text}」にしました。" if text else "🔎 待っての一言は出さないようにしました。")
+
     AGENT_ACCOUNT_NAMES_SETTING = "agent.account_names"
 
     def _load_task_account_names(self):
@@ -10656,7 +10703,8 @@ class App(ctk.CTk):
         if not self.worker.is_running:
             return AGENT_CHAT_FAILED       # 送れないのに下書きを見せても仕方ない
         text = utterance.text
-        if config.chat_send_mode != AGENT_CHAT_AUTO:
+        # ⚠️ 調べる前の「待って」の一言だけは、下書きを見せずに送る（本人の決定 2026-10-16。中身の決まった短い一言）
+        if config.chat_send_mode != AGENT_CHAT_AUTO and not getattr(utterance, "skip_approval", False):
             holder, done = {"ok": False, "text": text}, threading.Event()
             self._post_to_ui(lambda: self._show_agent_chat_draft(text, holder, done, cancel,
                                                                  config.chat_approval_seconds))
@@ -10764,6 +10812,9 @@ class App(ctk.CTk):
             speak=self._agent_speak,
             post_chat=self._agent_post_chat,
             journal=ConversationJournal(AGENT_JOURNAL_DIR, enabled_getter=lambda: True),
+            # 頼まれたら調べる（Wikipedia・天気）。⚠️ Wikimedia の決まりで、User-Agent にアプリ名と連絡先（公開リポジトリ）を入れる
+            lookup=AgentLookup(lookup_user_agent("GraHojoTool", APP_VERSION,
+                                                 f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")).run,
             stop_speech=self.speech_service.stop_all,
             store=store,
             on_log=lambda line: self._post_to_ui(lambda: self._append_agent_log(line)),

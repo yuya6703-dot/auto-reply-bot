@@ -122,6 +122,8 @@ class Harness(ctk.CTk):
     _refresh_agent_persona_target = A.App._refresh_agent_persona_target
     edit_common_agent_persona = A.App.edit_common_agent_persona
     on_agent_initiative_toggled = A.App.on_agent_initiative_toggled
+    on_agent_lookup_toggled = A.App.on_agent_lookup_toggled
+    save_agent_wait_text = A.App.save_agent_wait_text
     AGENT_OUTPUT_LABELS = A.App.AGENT_OUTPUT_LABELS
     AGENT_CHAT_SEND_LABELS = A.App.AGENT_CHAT_SEND_LABELS
     _set_agent_config_value = A.App._set_agent_config_value
@@ -425,6 +427,43 @@ h.worker.is_running = False
 for key, value in (("output_mode", "voice"), ("chat_send_mode", "approve")):
     h._set_agent_config_value(key, value)
 pump(h)
+
+print("■ 頼まれたら調べる（既定OFF。2026-10-16）")
+check("既定はOFF", h.agent_lookup_var.get() is False)
+check("待っての一言の欄（既定の一言）", h.agent_wait_text_entry.get() == "ちょっと調べるね、待ってて！")
+answers.append(False)
+h.agent_lookup_var.set(True)
+h.on_agent_lookup_toggled()
+check("ONにするときは、送る先・確かめずに送る一言・上限を書いて確かめる。「いいえ」ならOFF",
+      dialogs[-1][0] == "ask" and "Wikipedia" in dialogs[-1][2] and "Open-Meteo" in dialogs[-1][2]
+      and "確かめずに送ります" in dialogs[-1][2] and "1時間に10回" in dialogs[-1][2]
+      and h.agent_lookup_var.get() is False, dialogs[-1])
+answers.append(True)
+h.agent_lookup_var.set(True)
+h.on_agent_lookup_toggled()
+check("「はい」ならON（動いているエージェントにもすぐ効く）", db.get_setting("agent.lookup_enabled") == "1"
+      and h.agent_runtime.config.lookup_enabled is True)
+check("調べる道具がエージェントに渡っている", callable(h.agent_runtime.deps.lookup))
+h.agent_wait_text_entry.delete(0, "end")
+h.agent_wait_text_entry.insert(0, "ちょっと待っててね〜")
+h.save_agent_wait_text()
+check("待っての一言を変えられる", db.get_setting("agent.lookup_wait_text") == "ちょっと待っててね〜"
+      and h.agent_runtime.config.lookup_wait_text == "ちょっと待っててね〜")
+h.agent_wait_text_entry.insert("end", "あ" * 40)
+h.save_agent_wait_text()
+check("長すぎる一言は保存しない", dialogs[-1][0] == "warning" and db.get_setting("agent.lookup_wait_text") == "ちょっと待っててね〜")
+h.worker.is_running = True
+box = []
+th = threading.Thread(target=lambda: box.append(h._agent_post_chat(
+    Utterance("ちょっと待っててね〜", "neutral", "t", skip_approval=True), CancelToken())))
+th.start()
+th.join(2.0)
+check("下書きを見せる設定でも、待っての一言だけは下書きを見せずに送信待ちへ", box == ["posted"]
+      and h.worker.agent_texts[-1] == "ちょっと待っててね〜" and getattr(h, "_agent_draft_dialog", None) is None, box)
+h.worker.is_running = False
+h.agent_lookup_var.set(False)
+h.on_agent_lookup_toggled()
+check("OFFに戻せる（確かめない）", db.get_setting("agent.lookup_enabled") == "0")
 
 print("■ 静かなときに自分から話しかける（既定OFF）")
 check("既定はOFF", h.agent_initiative_var.get() is False)

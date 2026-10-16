@@ -35,6 +35,8 @@ ROOM_BLOCK_BEGIN = "<<<ルームの様子ここから>>>"     # ルーム名・�
 ROOM_BLOCK_END = "<<<ルームの様子ここまで>>>"
 PAST_BLOCK_BEGIN = "<<<前のやりとりここから>>>"    # 長期記憶ファイルから読んだ、前にその人と話したこと（人が書いたもの＝データ）
 PAST_BLOCK_END = "<<<前のやりとりここまで>>>"
+LOOKUP_BLOCK_BEGIN = "<<<調べた結果ここから>>>"    # Wikipedia・天気から読んだ文（外の文字＝データ）
+LOOKUP_BLOCK_END = "<<<調べた結果ここまで>>>"
 TRUNCATION_MARKS = ("..", "…")
 
 _manual_counter = itertools.count(1)

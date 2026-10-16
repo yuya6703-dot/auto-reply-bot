@@ -21,6 +21,7 @@ CHAT_AUTO = "auto"            # 確かめずに送る（本人が選んだとき
 CHAT_SEND_MODES = (CHAT_APPROVE, CHAT_AUTO)
 NAME_SEPARATORS = re.compile(r"[、,，/／]")
 NAMES_MAX_CHARS = 60
+WAIT_TEXT_MAX_CHARS = 40
 # GRAVITYのアカウントごとの設定（呼ばれ方・オーナーの名前）。{アカウント名: {"ai_name": ..., "owner_names": ...}}
 ACCOUNT_PROFILES_SETTING = SETTING_PREFIX + "account_profiles"
 PROFILE_KEYS = ("ai_name", "owner_names")
@@ -75,6 +76,11 @@ class AgentConfig:
     journal_enabled: bool = False
     recall_past_lines: int = 6                    # 話しかけてきた人との前のやりとりを、ファイルから何行まで渡すか（ファイルがONのとき）
     returning_after_days: float = 3.0             # これだけ間が空いて来た人は「久しぶり」（会話を覚えるがONのとき）
+    # 頼まれたら調べる（Wikipedia・天気。既定OFF。2026-10-16 本人「調べるからちょっと待っててね…チャットの中の話ね」）
+    lookup_enabled: bool = False
+    lookup_wait_text: str = "ちょっと調べるね、待ってて！"   # 調べる前に出す一言（空なら出さない）。⚠️ 下書きを見せる設定でも確かめずに送る（本人の決定）
+    lookup_max_per_hour: int = 10
+    lookup_timeout_seconds: float = 8.0
     # GRAVITYのアカウントごとの設定（2026-10-16 本人「全部やろうか」）。空の項目は共通の設定を使う
     account_profiles: dict = field(default_factory=dict)
     active_account: str = ""                      # 今チャットしている GRAVITY のアカウント（エージェントが入れる）
@@ -94,7 +100,8 @@ class AgentConfig:
     # 画面で変える項目
     EDITABLE = ("ai_name", "self_names", "owner_names", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
-                "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled")
+                "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
+                "lookup_enabled", "lookup_wait_text")
 
     def profile_value(self, key):
         """今のアカウントの設定（無い・空なら共通の設定）"""
@@ -169,6 +176,7 @@ class AgentConfig:
             config.chat_send_mode = CHAT_APPROVE
         config.self_names = config.self_names.strip()[:NAMES_MAX_CHARS]
         config.owner_names = config.owner_names.strip()[:NAMES_MAX_CHARS]
+        config.lookup_wait_text = " ".join(config.lookup_wait_text.split())[:WAIT_TEXT_MAX_CHARS]
         config.account_profiles = load_account_profiles(get_setting)
         return config
 

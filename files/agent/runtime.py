@@ -26,7 +26,7 @@ from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HO
 from .gate import HOLD as GATE_HOLD
 from .gate import OBSERVE as GATE_OBSERVE
 from .gate import Gate, GateSnapshot, is_strong_signal
-from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, precheck, request_decision_with_text,
+from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, Utterance, precheck, request_decision_with_text,
                          request_utterance)
 from .events import KIND_SYSTEM, SOURCE_GRAVITY, SOURCE_SYSTEM, AgentEvent, new_event_id
 from .inbox import Inbox
@@ -34,6 +34,7 @@ from .memory.recall import MemoryKeeper
 from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_GENERATE, PURPOSE_SUMMARIZE,
                        LLMError)
 from .persona import DEFAULT_PERSONA_ID, Persona, account_persona_id
+from .tools.lookup import TOOL_LABELS, TOOLS, LookupResult
 from .usage import UsageTracker
 
 STATE_STOPPED = "stopped"
@@ -44,6 +45,7 @@ STATE_DECIDING = "deciding"
 STATE_GENERATING = "generating"
 STATE_SPEAKING = "speaking"
 STATE_POSTING = "posting"
+STATE_LOOKING_UP = "looking_up"
 STATE_DEGRADED = "degraded"
 STATE_EMERGENCY = "emergency_stopped"
 
@@ -56,6 +58,7 @@ STATE_LABELS = {
     STATE_GENERATING: "喋る文を作っている",
     STATE_SPEAKING: "喋っている",
     STATE_POSTING: "チャットに送ろうとしている（確認待ちのことも）",
+    STATE_LOOKING_UP: "調べている",
     STATE_DEGRADED: "AIを呼ばない状態（失敗が続いた）",
     STATE_EMERGENCY: "緊急停止中（再開を押すまで何もしない）",
 }
@@ -89,6 +92,8 @@ class AgentDeps:
     post_chat: Callable = None
     # 長期記憶ファイル（memory/journal.py の ConversationJournal）。無ければ書かない
     journal: object = None
+    # 調べる (tool, 調べる言葉, CancelToken) -> tools.lookup.LookupResult。無ければ調べない
+    lookup: Callable = None
 
 
 class AgentRuntime:
@@ -104,6 +109,7 @@ class AgentRuntime:
         self.usage = UsageTracker(deps.store, clock=self._clock)
         self._persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
         self._account_personas = {}     # GRAVITYのアカウントごとの人格（読んだもの。無ければ None＝共通の人格）
+        self._lookup_times = []         # 調べた時刻（1時間の上限）
         # 今チャットしている GRAVITY のアカウント（出来事の meta["account"] から。監視が見分けて付ける）
         self._account = ""
         self._turn_in_gravity = False       # 今の回が GRAVITY のチャットの出来事か（AIタブの手入力は記憶に入れない）
@@ -543,10 +549,18 @@ class AgentRuntime:
             return          # 止めた・緊急停止した。結果は捨てる
         self._record(decision)
 
-        if decision.action in (SILENT, OBSERVE, USE_TOOL):
-            reason = decision.reason + ("（ツールはまだ使えない）" if decision.action == USE_TOOL else "")
+        # --- 調べる（頼まれたとき。「待って」の一言を出してから調べ、調べた結果で答える） ---
+        lookup = None
+        if decision.action == USE_TOOL:
+            lookup = self._look_up(decision, turn_id, cancel)
+            if lookup is None:
+                return          # 止めた・緊急停止
+            decision = replace(decision, action=ENGAGE)
+            prepared = None
+
+        if decision.action in (SILENT, OBSERVE):
             mark = "📝 記録だけ" if decision.action == OBSERVE else "🤫 沈黙"
-            self.log.write(f"{mark}: {reason}")
+            self.log.write(f"{mark}: {decision.reason}")
             return
         if decision.action == HOLD:
             ids = {e.event_id for e in events}
@@ -564,12 +578,12 @@ class AgentRuntime:
             utterance = prepared
             self.log.write("⚡ 呼ばれたので、判断と文を1回で作りました。")
         else:
-            if combined:
+            if combined and lookup is None:
                 self.log.write("ℹ️ 1回で頼んだ返事に文が無かったので、文だけもう一度頼みます。")
             self._set_state(STATE_GENERATING)
             request = build_generate_request(decision, events, self.window, self.persona, self.config,
                                              self._clock(), timeout=self.config.decide_timeout_seconds, room=room,
-                                             memory_lines=memory_lines)
+                                             memory_lines=memory_lines, lookup=lookup)
             try:
                 utterance = request_utterance(self._provider, request, turn_id, cancel,
                                               self._usage_recorder(turn_id, PURPOSE_GENERATE), keep_newlines)
@@ -583,7 +597,8 @@ class AgentRuntime:
                 return
 
         # --- 出す前の確認 ---
-        check = self._precheck(utterance, decision, fresh_seq)
+        # ⚠️ 調べた答えは、調べている間に会話が進んでも出す（頼まれたことの答えなので古くならない）
+        check = self._precheck(utterance, decision, fresh_seq, allow_stale=lookup is not None)
         if check:
             self.deps.store.add_utterance(turn_id, utterance.text, utterance.emotion, self.persona.voice,
                                           f"dropped:{check}", None, None)
@@ -601,8 +616,8 @@ class AgentRuntime:
             self._journal("record_reply", self._account, decision.target, utterance.text,
                           self.config.output_mode, self.config.display_name)
 
-    def _precheck(self, utterance, decision, fresh_seq):
-        if self.inbox.fresh_seq != fresh_seq or self._listening:
+    def _precheck(self, utterance, decision, fresh_seq, allow_stale=False):
+        if (self.inbox.fresh_seq != fresh_seq and not allow_stale) or self._listening:
             return CHECK_STALE
         own = [u.text for u in self.window.own_utterances()]
         check = precheck(utterance.text, max_chars_for(decision.action, self.config),
@@ -641,6 +656,86 @@ class AgentRuntime:
         elif outcome == SPEECH_FAILED:
             self.log.write("⚠️ 声にできませんでした（音声エンジンを確かめてください）。")
         return outcome == SPOKEN
+
+    def _look_up(self, decision, turn_id, cancel):
+        """
+        頼まれて調べる（2026-10-16）。調べている間に「待って」の一言を出す。
+        調べた結果（調べられなかったときは、そのわけ）を返す。止めた・緊急停止なら None
+        """
+        c = self.config
+        tool, query = decision.tool, decision.tool_query or ""
+        if not c.lookup_enabled or self.deps.lookup is None:
+            return LookupResult(False, tool or "", query, note="調べる機能はOFF")
+        if tool not in TOOLS or not query:
+            return LookupResult(False, tool or "", query, note="何をどこで調べるかが分からない")
+        now = self._clock()
+        with self._lock:
+            self._lookup_times = [t for t in self._lookup_times if now - t < 3600]
+            over = len(self._lookup_times) >= c.lookup_max_per_hour
+            if not over:
+                self._lookup_times.append(now)
+        if over:
+            self.log.write(f"🔎 調べる回数の上限（1時間に{c.lookup_max_per_hour}回）なので、調べずに答えます。")
+            return LookupResult(False, tool, query, note="調べる回数の上限に達した")
+        self.log.write(f"🔎 {TOOL_LABELS.get(tool, tool)}で「{query}」を調べます。")
+        self._set_state(STATE_LOOKING_UP)
+        holder = {}
+
+        def job():
+            try:
+                holder["result"] = self.deps.lookup(tool, query, cancel)
+            except Exception:
+                self.deps.on_error(traceback.format_exc())
+                holder["result"] = LookupResult(False, tool, query, note="調べる途中でエラー")
+
+        worker = threading.Thread(target=job, name="agent-lookup", daemon=True)
+        worker.start()
+        self._say_wait(turn_id)          # 調べている間に「待って」の一言（声なら鳴り終わるまで）
+        worker.join(c.lookup_timeout_seconds + 5.0)
+        if cancel.cancelled:
+            return None
+        result = holder.get("result") or LookupResult(False, tool, query, note="時間内に答えが来なかった")
+        self.log.write(f"🔎 {result.source}を読みました。" if result.ok else f"🔎 調べられませんでした（{result.note}）。")
+        return result
+
+    def _say_wait(self, turn_id):
+        """
+        調べる前の「待って」の一言。⚠️ 下書きを見せる設定でも確かめずに送る（本人の決定。決まった文だけ）。
+        発言の回数の上限には数えない（数えると、チャットの1分1通に当たって答えが出せなくなる）
+        """
+        text = (self.config.lookup_wait_text or "").strip()
+        if not text:
+            return
+        chat = self.config.output_mode == OUTPUT_CHAT
+        token = CancelToken()
+        with self._lock:
+            if self._emergency:
+                return
+            self._speech_cancel = token
+        utterance = Utterance(text=text, emotion="neutral", turn_id=turn_id, skip_approval=True)
+        started = self._clock()
+        if chat:
+            self.log.write(f"✍️ チャットに書く（待っての一言・確かめずに送る）:「{text}」")
+            try:
+                outcome = self.deps.post_chat(utterance, token) if self.deps.post_chat else CHAT_FAILED
+            except Exception:
+                outcome = CHAT_FAILED
+            delivered = outcome == POSTED
+        else:
+            self.log.write(f"🗣️ 待っての一言:「{text}」")
+            with self._lock:
+                self._speaking = True
+            try:
+                outcome = self.deps.speak(utterance, token)
+            except Exception:
+                outcome = SPEECH_FAILED
+            with self._lock:
+                self._speaking = False
+            delivered = outcome == SPOKEN
+        if delivered:
+            self.window.add_own(text, started)
+        self.deps.store.add_utterance(turn_id, text, "neutral", "chat" if chat else self.persona.voice,
+                                      f"wait:{outcome}", started, self._clock())
 
     def _post_chat(self, utterance, decision, turn_id):
         """チャットに書き込む（確認は post_chat の側）。送れたときだけ「発言した」に数える"""

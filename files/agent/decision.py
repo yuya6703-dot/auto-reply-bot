@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 from .llm.base import STOP_REFUSAL, LLMError, LLMMessage
+from .tools.lookup import TOOLS
 
 SILENT = "silent"
 OBSERVE = "observe"
@@ -40,6 +41,9 @@ DECISION_SCHEMA = {
         "topic": {"type": "string"},
         "mood": {"type": "string"},
         "hold_seconds": {"type": ["number", "null"]},
+        # 調べる（use_tool）とき。⚠️ null を混ぜた enum は書かない（本番で通った「null を許す型」だけ）。値は parse_decision が確かめる
+        "tool": {"type": ["string", "null"], "description": "use_tool のとき: wikipedia / weather"},
+        "tool_query": {"type": ["string", "null"], "description": "use_tool のとき: 調べる言葉・地名"},
     },
     "required": ["action", "reason"],
 }
@@ -61,6 +65,8 @@ class Decision:
     model: Optional[str] = None
     topic: str = ""
     mood: str = ""
+    tool: Optional[str] = None            # use_tool のとき: wikipedia / weather
+    tool_query: Optional[str] = None      # use_tool のとき: 調べる言葉・地名
 
 
 class DecisionFailed(Exception):
@@ -91,9 +97,13 @@ def parse_decision(data, turn_id, model=None):
             raise ValueError("hold_seconds が数ではない")
     target = data.get("target")
     target = target.strip()[:40] if isinstance(target, str) and target.strip() else None
+    tool = data.get("tool") if data.get("tool") in TOOLS else None
+    query = data.get("tool_query")
+    query = " ".join(query.split())[:60] if isinstance(query, str) and query.strip() else None
     return Decision(action=action, reason=reason.strip()[:60], decided_by=DECIDED_BY_LLM, turn_id=turn_id,
                     urgency=min(1.0, max(0.0, urgency)), target=target, hold_seconds=hold, model=model,
-                    topic=str(data.get("topic") or "")[:40], mood=str(data.get("mood") or "")[:20])
+                    topic=str(data.get("topic") or "")[:40], mood=str(data.get("mood") or "")[:20],
+                    tool=tool, tool_query=query)
 
 
 def call_llm(provider, request, cancel, on_call):
