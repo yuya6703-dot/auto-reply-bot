@@ -6,6 +6,7 @@
 ⚠️ ここに機密（APIキーなど）を入れない。キーは api_keys.py が暗号文で持つ。
 既定値は設計書の「既定の案」。実際の場で調整する（要検証）。
 """
+import json
 import re
 from dataclasses import dataclass, field, fields
 
@@ -20,6 +21,9 @@ CHAT_AUTO = "auto"            # 確かめずに送る（本人が選んだとき
 CHAT_SEND_MODES = (CHAT_APPROVE, CHAT_AUTO)
 NAME_SEPARATORS = re.compile(r"[、,，/／]")
 NAMES_MAX_CHARS = 60
+# GRAVITYのアカウントごとの設定（呼ばれ方・オーナーの名前）。{アカウント名: {"ai_name": ..., "owner_names": ...}}
+ACCOUNT_PROFILES_SETTING = SETTING_PREFIX + "account_profiles"
+PROFILE_KEYS = ("ai_name", "owner_names")
 
 
 def split_names(raw):
@@ -69,6 +73,12 @@ class AgentConfig:
     summarize_min_lines: int = 6                  # 他の人の発言がこれだけたまってから整理する
     # 長期記憶ファイル（GRAVITYのアカウントごと＋相手ごとに、会話の全文と要約を読めるファイルに残す。既定OFF。2026-10-16）
     journal_enabled: bool = False
+    recall_past_lines: int = 6                    # 話しかけてきた人との前のやりとりを、ファイルから何行まで渡すか（ファイルがONのとき）
+    returning_after_days: float = 3.0             # これだけ間が空いて来た人は「久しぶり」（会話を覚えるがONのとき）
+    # GRAVITYのアカウントごとの設定（2026-10-16 本人「全部やろうか」）。空の項目は共通の設定を使う
+    account_profiles: dict = field(default_factory=dict)
+    active_account: str = ""                      # 今チャットしている GRAVITY のアカウント（エージェントが入れる）
+    active_account_named: bool = False            # そのアカウントの名前が分かっているか（「本体のGRAVITY」などの仮の呼び名でない）
     react_max_chars: int = 40              # C2: 短い反応の上限（声）
     engage_max_chars: int = 120            # C2: 参加の上限（声）
     chat_react_max_chars: int = 60         # C2: チャットの短い反応の上限（チャットは読むので声より長くてよい）
@@ -86,10 +96,16 @@ class AgentConfig:
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled")
 
+    def profile_value(self, key):
+        """今のアカウントの設定（無い・空なら共通の設定）"""
+        profile = self.account_profiles.get(self.active_account) if self.active_account else None
+        value = (profile or {}).get(key) or ""
+        return value or getattr(self, key)
+
     @property
     def ai_names(self):
-        """呼ばれ方のリスト（最初のものが、AIが自分を名乗るときの名前）"""
-        return split_names(self.ai_name)
+        """呼ばれ方のリスト（最初のものが、AIが自分を名乗るときの名前）。アカウントごとの設定があればそちら"""
+        return split_names(self.profile_value("ai_name"))
 
     @property
     def display_name(self):
@@ -98,11 +114,15 @@ class AgentConfig:
 
     @property
     def self_name_list(self):
-        return split_names(self.self_names)
+        """自分のアカウント名（設定の名前＋今チャットしているアカウントの名前が分かっていればそれも）"""
+        names = split_names(self.self_names)
+        if self.active_account_named and self.active_account and self.active_account not in names:
+            names.append(self.active_account)
+        return names
 
     @property
     def owner_name_list(self):
-        return split_names(self.owner_names)
+        return split_names(self.profile_value("owner_names"))
 
     @property
     def call_names(self):
@@ -149,9 +169,29 @@ class AgentConfig:
             config.chat_send_mode = CHAT_APPROVE
         config.self_names = config.self_names.strip()[:NAMES_MAX_CHARS]
         config.owner_names = config.owner_names.strip()[:NAMES_MAX_CHARS]
+        config.account_profiles = load_account_profiles(get_setting)
         return config
 
     def save(self, save_setting):
         for name in self.EDITABLE:
             value = getattr(self, name)
             save_setting(SETTING_PREFIX + name, ("1" if value else "0") if isinstance(value, bool) else str(value))
+
+
+def load_account_profiles(get_setting):
+    """アカウントごとの設定を読む。壊れていたら空（共通の設定だけを使う）"""
+    try:
+        data = json.loads(get_setting(ACCOUNT_PROFILES_SETTING, "") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    profiles = {}
+    for account, profile in (data.items() if isinstance(data, dict) else []):
+        if isinstance(profile, dict) and account:
+            values = {k: str(profile.get(k) or "").strip()[:NAMES_MAX_CHARS] for k in PROFILE_KEYS}
+            if any(values.values()):
+                profiles[str(account)] = values
+    return profiles
+
+
+def save_account_profiles(save_setting, profiles):
+    save_setting(ACCOUNT_PROFILES_SETTING, json.dumps(profiles, ensure_ascii=False))

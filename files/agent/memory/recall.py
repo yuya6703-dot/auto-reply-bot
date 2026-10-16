@@ -105,12 +105,22 @@ def warmth_label(value):
     return "ふつう"
 
 
-ACCOUNT_SEPARATOR = "／"      # 人の目印は「GRAVITYのアカウント／相手の名前」（アカウントが違えば別の人として覚える）
+# 人の目印は「GRAVITYのアカウント／相手の名前」（アカウントが違えば別の人として覚える）。区切りは store と同じ
+from .store import ACCOUNT_SEPARATOR  # noqa: E402
+RETURNING_KEEP = 3600         # 「久しぶり」を渡し続ける時間（AIが話しかけたら、そこで終わり）
 
 
 def display_of(person_key):
     """人の目印から、相手の名前だけを取り出す"""
     return (person_key or "").split(ACCOUNT_SEPARATOR, 1)[-1]
+
+
+def returning_text(before, now):
+    """「久しぶり」の行。前に見た日と、どれくらい空いたか"""
+    days = int((now - before) // DAY)
+    when = "1か月以上前" if days >= 31 else f"{days}日前"
+    day = time.strftime("%m/%d", time.localtime(before)).lstrip("0")
+    return f"前にこの場で話していたのは{when}（{day}）。久しぶりに来た人"
 
 
 class MemoryKeeper:
@@ -123,6 +133,8 @@ class MemoryKeeper:
         self._lock = threading.Lock()
         self._last_summary_at = clock()
         self._pending_lines = 0           # 前の整理から増えた、他の人の発言の数
+        # 久しぶりに来た人 {人の目印: (前に見た時刻, 気づいた時刻)}。人間の「あ、久しぶり」にあたる（時間の感覚）
+        self._returning = {}
 
     # --- 人 ---
     def person_key(self, name):
@@ -162,15 +174,26 @@ class MemoryKeeper:
             return
         fresh = [e for e in events if self.in_current_account(e) and not e.is_self and not e.backlog
                  and e.kind != KIND_SYSTEM]
+        now = self._clock()
+        gap = self._config().returning_after_days * DAY
         for event in fresh:
             if event.speaker:
+                known = self._known_key(event.speaker)
+                before = self._store.last_seen(known) if known else None
+                if before and gap > 0 and now - before >= gap:
+                    with self._lock:
+                        self._returning[known] = (before, now)
                 self.person_key(event.speaker)
         with self._lock:
             self._pending_lines += len(fresh)
 
     def note_interaction(self, name, reason="話しかけた"):
-        """AI がその人に話しかけた（関係の値がONのとき、なじみを少し上げる）"""
+        """AI がその人に話しかけた（関係の値がONのとき、なじみを少し上げる）。「久しぶり」はここで終わり"""
         config = self._config()
+        known = self._known_key(name) if name else None
+        if known:
+            with self._lock:
+                self._returning.pop(known, None)
         if not (config.memory_enabled and config.relationships_enabled) or not name:
             return
         key = self.person_key(name)
@@ -331,8 +354,14 @@ class MemoryKeeper:
                 key = self._known_key(e.speaker)
                 if key and key not in speakers:
                     speakers.append(key)
+        now = self._clock()
+        with self._lock:
+            self._returning = {k: v for k, v in self._returning.items() if now - v[1] < RETURNING_KEEP}
+            returning = dict(self._returning)
         for key in speakers:
             name = display_of(key)
+            if key in returning:
+                lines.append(f"[{name}] {returning_text(returning[key][0], now)}")
             for mem_id, scope, _key, content, conf, _imp, _upd, _pin in self._store.memories(person_key=key, limit=4):
                 if scope == SCOPE_IMPRESSION and not config.impressions_enabled:
                     continue
@@ -346,7 +375,7 @@ class MemoryKeeper:
                 if rel:
                     lines.append(f"[{name}] あなたとは: {familiarity_label(rel['familiarity'])}・"
                                  f"やりとりは{warmth_label(rel['warmth'])}")
-        budget = MAX_RECALL_ITEMS - len([line for line in lines if "あなたとは:" not in line])
+        budget = MAX_RECALL_ITEMS - len([line for line in lines if "あなたとは:" not in line and "久しぶり" not in line])
         for mem_id, scope, key, content, _conf, _imp, _upd, _pin in sorted(
                 self._store.memories(limit=50, account=self._account() or ""), key=lambda r: (-(r[5] or 0), -(r[6] or 0))):
             if budget <= 0:

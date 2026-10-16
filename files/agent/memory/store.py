@@ -19,6 +19,7 @@ import time
 from ..events import AgentEvent
 from ..persona import Persona
 
+ACCOUNT_SEPARATOR = "／"      # 人の目印は「GRAVITYのアカウント／相手の名前」（アカウントが空なら名前だけ）
 SCHEMA_VERSION = 3     # 2: 記憶（persons・memories・relationships）を足した。3: GRAVITYのアカウントごとに分けた（account 列。2026-10-16）
 FILE_NAME = "agent_data.db"
 BACKUP_PREFIX = "agent_data_"
@@ -271,6 +272,49 @@ class AgentStore:
                 self._conn.execute(f"DELETE FROM {table}")
             self._conn.commit()
 
+    def last_seen(self, person_key):
+        """その人を最後に見た時刻（知らなければ None）"""
+        with self._lock:
+            row = self._conn.execute("SELECT last_seen FROM persons WHERE person_key = ?", (person_key,)).fetchone()
+        return row[0] if row else None
+
+    def memory_accounts(self):
+        """記憶がある GRAVITY のアカウント（空＝アカウントが分からない古い記憶）と、その件数 [(account, 件数)]"""
+        with self._lock:
+            return self._conn.execute("SELECT IFNULL(account, ''), COUNT(*) FROM memories GROUP BY IFNULL(account, '')"
+                                      " ORDER BY 1").fetchall()
+
+    def move_account(self, old, new):
+        """
+        old のアカウントの人・記憶・関係の値を new へ移す（同じ人がいれば1人にまとめる）。移した記憶の数を返す。
+        仮の呼び名（「本体のGRAVITY」）で覚えたあとで名前が分かったとき・アカウントが分からない古い記憶を移すときに使う
+        """
+        old, new = old or "", new or ""
+        if old == new:
+            return 0
+        with self._lock:
+            persons = self._conn.execute("SELECT person_key, display_name, first_seen, last_seen FROM persons"
+                                         " WHERE IFNULL(account, '') = ?", (old,)).fetchall()
+            for key, display, first, last in persons:
+                name = key.split(ACCOUNT_SEPARATOR, 1)[-1] if old else key
+                new_key = f"{new}{ACCOUNT_SEPARATOR}{name}" if new else name
+                there = self._conn.execute("SELECT display_name, first_seen, last_seen FROM persons WHERE person_key = ?",
+                                           (new_key,)).fetchone()
+                if there:
+                    keep = display if len(display or "") > len(there[0] or "") else there[0]
+                    self._conn.execute("UPDATE persons SET display_name = ?, first_seen = ?, last_seen = ? WHERE person_key = ?",
+                                       (keep, min(first or 0, there[1] or 0), max(last or 0, there[2] or 0), new_key))
+                    self._conn.execute("DELETE FROM persons WHERE person_key = ?", (key,))
+                    if self._conn.execute("SELECT 1 FROM relationships WHERE person_key = ?", (new_key,)).fetchone():
+                        self._conn.execute("DELETE FROM relationships WHERE person_key = ?", (key,))
+                else:
+                    self._conn.execute("UPDATE persons SET person_key = ?, account = ? WHERE person_key = ?", (new_key, new, key))
+                self._conn.execute("UPDATE relationships SET person_key = ? WHERE person_key = ?", (new_key, key))
+                self._conn.execute("UPDATE memories SET person_key = ? WHERE person_key = ?", (new_key, key))
+            moved = self._conn.execute("UPDATE memories SET account = ? WHERE IFNULL(account, '') = ?", (new, old)).rowcount
+            self._conn.commit()
+            return moved
+
     def relationship(self, person_key):
         with self._lock:
             row = self._conn.execute("SELECT familiarity, warmth, updated_at, history FROM relationships"
@@ -357,6 +401,11 @@ class AgentStore:
         with self._lock:
             self._conn.execute("INSERT OR REPLACE INTO persona (persona_id, json) VALUES (?, ?)",
                                (persona.persona_id, persona.to_json()))
+            self._conn.commit()
+
+    def delete_persona(self, persona_id):
+        with self._lock:
+            self._conn.execute("DELETE FROM persona WHERE persona_id = ?", (persona_id,))
             self._conn.commit()
 
     # --- 読む ---

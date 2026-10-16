@@ -33,6 +33,8 @@ RECENT_BLOCK_BEGIN = "<<<直近の会話ここから>>>"
 RECENT_BLOCK_END = "<<<直近の会話ここまで>>>"
 ROOM_BLOCK_BEGIN = "<<<ルームの様子ここから>>>"     # ルーム名・アナウンスも人が書いたもの（データ）
 ROOM_BLOCK_END = "<<<ルームの様子ここまで>>>"
+PAST_BLOCK_BEGIN = "<<<前のやりとりここから>>>"    # 長期記憶ファイルから読んだ、前にその人と話したこと（人が書いたもの＝データ）
+PAST_BLOCK_END = "<<<前のやりとりここまで>>>"
 TRUNCATION_MARKS = ("..", "…")
 
 _manual_counter = itertools.count(1)

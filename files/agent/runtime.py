@@ -13,7 +13,7 @@ import threading
 import time
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from .audit import AuditLog
@@ -33,7 +33,7 @@ from .inbox import Inbox
 from .memory.recall import MemoryKeeper
 from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_GENERATE, PURPOSE_SUMMARIZE,
                        LLMError)
-from .persona import DEFAULT_PERSONA_ID, Persona
+from .persona import DEFAULT_PERSONA_ID, Persona, account_persona_id
 from .usage import UsageTracker
 
 STATE_STOPPED = "stopped"
@@ -102,7 +102,8 @@ class AgentRuntime:
                            strong_signal=lambda e: is_strong_signal(e, self.config.call_names))
         self.window = ConversationWindow(clock=self._clock)
         self.usage = UsageTracker(deps.store, clock=self._clock)
-        self.persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
+        self._persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
+        self._account_personas = {}     # GRAVITYのアカウントごとの人格（読んだもの。無ければ None＝共通の人格）
         # 今チャットしている GRAVITY のアカウント（出来事の meta["account"] から。監視が見分けて付ける）
         self._account = ""
         self._turn_in_gravity = False       # 今の回が GRAVITY のチャットの出来事か（AIタブの手入力は記憶に入れない）
@@ -270,10 +271,57 @@ class AgentRuntime:
     def month_usage(self):
         return self.usage.this_month()
 
-    def set_persona(self, persona):
-        """人格を差し替えて保存する（次の判断・文から効く）"""
+    @property
+    def persona(self):
+        """今の人格。今チャットしている GRAVITY のアカウント用の人格があればそれ、無ければ共通の人格"""
+        account = self.config.active_account
+        if account:
+            if account not in self._account_personas:
+                self._account_personas[account] = self.deps.store.load_persona(account_persona_id(account))
+            if self._account_personas[account] is not None:
+                return self._account_personas[account]
+        return self._persona
+
+    def common_persona(self):
+        return self._persona
+
+    def account_persona(self, account):
+        """そのアカウント用の人格（無ければ None）"""
+        if account not in self._account_personas:
+            self._account_personas[account] = self.deps.store.load_persona(account_persona_id(account))
+        return self._account_personas[account]
+
+    def set_persona(self, persona, account=None):
+        """人格を差し替えて保存する（次の判断・文から効く）。account を渡すと、そのアカウント用の人格"""
+        if account:
+            persona = replace(persona, persona_id=account_persona_id(account))
+            self.deps.store.save_persona(persona)
+            self._account_personas[account] = persona
+            return
+        persona = replace(persona, persona_id=DEFAULT_PERSONA_ID)
         self.deps.store.save_persona(persona)
-        self.persona = persona
+        self._persona = persona
+
+    def clear_account_persona(self, account):
+        """そのアカウント用の人格を消す（共通の人格に戻る）"""
+        self.deps.store.delete_persona(account_persona_id(account))
+        self._account_personas[account] = None
+
+    def move_account(self, old, new):
+        """
+        GRAVITY のアカウントの記憶とファイルを old から new へ移す（どのスレッドからでもよい）。
+        仮の呼び名（「本体のGRAVITY」）で覚えたあとで、本当の名前が分かったときに使う。移した記憶の数を返す
+        """
+        moved = self.deps.store.move_account(old, new)
+        if self.deps.journal is not None:
+            try:
+                self.deps.journal.move_account(old, new)
+            except Exception:
+                self.deps.on_error(traceback.format_exc())
+        if old and self._account == old:
+            self._account = new
+            self.config.active_account = new
+        return moved
 
     # ================= スレッドの中 =================
     def _set_state(self, state):
@@ -427,9 +475,11 @@ class AgentRuntime:
         now = self._clock()
         turn_id = self._new_turn(events, now)
         self.window.add_events(events)      # 保留から戻った出来事は、窓が同じものを2度入れない
-        account = next((e.meta.get("account") for e in events if e.meta.get("account")), None)
-        if account:
-            self._account = account
+        named = next((e for e in events if e.meta.get("account")), None)
+        if named is not None:
+            self._account = named.meta["account"]
+            self.config.active_account = self._account
+            self.config.active_account_named = bool(named.meta.get("account_named", True))
         self._turn_in_gravity = any(e.source == SOURCE_GRAVITY for e in events)
         self.memory.observe(events)
         self._journal("record_events", events)
@@ -468,7 +518,8 @@ class AgentRuntime:
         with self._lock:
             room = dict(self._room_info) if self._room_info else None
         keep_newlines = self.config.output_mode == OUTPUT_CHAT
-        memory_lines = self.memory.recall(events)
+        # 記憶: 覚えていること（事実）・久しぶり（時間の感覚）・オーナーのメモ・前のやりとり（ファイルから）
+        memory_lines = {"facts": self.memory.recall(events), **self._journal_recall(events)}
         request = builder(events, self.window, self.persona, self.config, note, now,
                           timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines)
         try:
@@ -658,6 +709,28 @@ class AgentRuntime:
         self._journal("write_summaries", self._account, self.memory.summary_for_files())
         note = f"（繊細な事柄など{dropped}件は覚えなかった）" if dropped else ""
         self.log.write(f"🧠 覚えておくことを整理しました（新しく{kept}件）{note}。")
+
+    def _journal_recall(self, events):
+        """
+        長期記憶ファイルから、話しかけてきた人の「オーナーのメモ」と「前のやりとり」を読む（ファイルがONのときだけ）。
+        前のやりとりは、今の窓（直近の会話）より前のものだけ（同じ行を2度渡さない）
+        """
+        journal = self.deps.journal
+        if journal is None or not self.config.journal_enabled:
+            return {}
+        names = []
+        for e in events:
+            if self.memory.in_current_account(e) and e.speaker and not e.is_self and e.speaker not in names:
+                names.append(e.speaker)
+        if not names:
+            return {}
+        recent = self.window.recent_events()
+        before = min((e.observed_at for e in recent), default=self._clock())
+        try:
+            return journal.recall(self._account, names[:2], before, self.config.recall_past_lines)
+        except Exception:
+            self.deps.on_error(traceback.format_exc())
+            return {}
 
     def _journal(self, method, *args):
         """長期記憶ファイルに書く（ONのときだけ）。⚠️ 書けなくても（ファイルが開かれている など）エージェントは止めない"""

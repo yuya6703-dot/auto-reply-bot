@@ -9,6 +9,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 DEFAULT_PERSONA_ID = "default"
+ACCOUNT_PERSONA_PREFIX = "account:"     # GRAVITYのアカウントごとの人格（無ければ共通の人格を使う）
+
+
+def account_persona_id(account):
+    return ACCOUNT_PERSONA_PREFIX + (account or "")
 
 
 @dataclass

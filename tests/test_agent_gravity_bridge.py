@@ -222,6 +222,11 @@ new = acc.on_rows([msg("テストちゃ👼", "前からあった自分の文"),
 check("出来事に、今チャットしているGRAVITYのアカウントの名前を付ける",
       old[0].meta["account"] == "テスト垢" and all(e.meta["account"] == "テスト垢" for e in new))
 check("自分が送った文の新しい行の、名前と本文を知らせる", learned == [("テストちゃ👼", "送った文")], learned)
+tmp = A.GravityChatBridge(lambda events: None, account=lambda: ("本体のGRAVITY", False))
+tmp.on_rows([])
+ev = tmp.on_rows([msg("伏せ字5", "こんにちは")])
+check("名前がまだ分からない（仮の呼び名）ことも出来事に付ける", ev[0].meta["account"] == "本体のGRAVITY"
+      and ev[0].meta["account_named"] is False and new[0].meta["account_named"] is True)
 
 
 class FakeShell:

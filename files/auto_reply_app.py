@@ -85,6 +85,7 @@ from agent.speech.service import (SpeechService, SpeechJob,
                                   EVENT_QUEUE_CHANGED as SPEECH_EVENT_QUEUE_CHANGED)
 # AIのエージェント（段階3: 骨組み。模擬のAIと手入力の出来事で試す。設計書/09 の S3）
 from agent.config import (AgentConfig, NAMES_MAX_CHARS as AGENT_NAMES_MAX_CHARS,
+                          load_account_profiles, save_account_profiles,
                           OUTPUT_VOICE as AGENT_OUTPUT_VOICE, OUTPUT_CHAT as AGENT_OUTPUT_CHAT,
                           CHAT_APPROVE as AGENT_CHAT_APPROVE, CHAT_AUTO as AGENT_CHAT_AUTO)
 from agent.events import (AgentEvent, make_manual_event, new_event_id as new_agent_event_id,
@@ -1538,7 +1539,8 @@ class GravityChatBridge:
     def __init__(self, on_events, active=lambda: True, self_names=lambda: [], clock=time.time, on_room=None,
                  account=lambda: "", on_own_name=None):
         self._on_events = on_events     # (list[AgentEvent]) -> None
-        self.account = account          # () -> 今チャットしている GRAVITY のアカウントの名前（出来事の meta["account"] に付ける）
+        # () -> 今チャットしている GRAVITY のアカウントの名前か (名前, 名前が分かっているか)（出来事の meta["account"] に付ける）
+        self.account = account
         self._on_own_name = on_own_name  # (名前, 本文) -> None。自分が送った文の行の名前＝自分のアカウント名（覚えるため）
         self.active = active            # 渡してよいか（AIが動いていて、本人がスイッチをONにしている）
         self.self_names = self_names    # () -> このアカウントの表示名のリスト（監視スレッドから呼ばれる）
@@ -1586,7 +1588,9 @@ class GravityChatBridge:
 
         now = self._clock()
         my_names = list(self.self_names() or [])
-        account = self.account() or ""
+        info = self.account() or ""
+        account, account_named = info if isinstance(info, tuple) else (info, True)
+        account = account or ""
 
         def is_me(name):
             return bool(name) and any(friend_name_matches(name, mine) for mine in my_names)
@@ -1611,7 +1615,8 @@ class GravityChatBridge:
             events.append(AgentEvent(
                 event_id=new_agent_event_id(), kind=kind, source=AGENT_SOURCE_GRAVITY,
                 key=f"gravity:{mark[0]}#{self._seq}", speaker=speaker or None, text=text, observed_at=now,
-                meta={"backlog": backlog, "notice": row.get("notice", ""), "account": account}, is_self=is_self))
+                meta={"backlog": backlog, "notice": row.get("notice", ""), "account": account,
+                      "account_named": bool(account_named)}, is_self=is_self))
         if events:
             self._on_events(events)
         return events
@@ -9765,10 +9770,12 @@ class App(ctk.CTk):
             self._agent_account_names = {}
         self._agent_task_names = self._load_task_account_names()
         self._agent_account_votes = {}       # {ユーザー: {名前: 見た回数}}（覚える前の候補）
+        self._agent_profiles = load_account_profiles(self.db.get_setting)   # GRAVITYのアカウントごとの設定
+        self._agent_persona_target = None    # 人格の欄で編集しているもの（None＝共通の人格、名前＝そのアカウント用）
         self.agent_bridge = GravityChatBridge(self._on_gravity_events, active=self._agent_gravity_active,
                                               self_names=self._agent_my_names,
                                               on_room=self._on_gravity_room,
-                                              account=self._gravity_account_name,
+                                              account=self._gravity_account_info,
                                               on_own_name=self._learn_gravity_account_name)
         self.worker.set_agent_bridge(self.agent_bridge)
         # 監視ワーカーで起きた、AIに関わること（実際に送れたか・チャット欄が隠れたか）も判断のログに出す
@@ -9906,6 +9913,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(settings, text="チャットは1分に1通・1時間に20通まで。送るのはメインタブの監視です（監視していないと送れません）。",
                      text_color="gray70").pack(anchor="w", padx=12, pady=(0, 10))
 
+        self.build_agent_accounts_section(frame)
         self.build_agent_persona_section(frame)
         self.build_agent_memory_section(frame)
 
@@ -9948,8 +9956,9 @@ class App(ctk.CTk):
 
         # 前にAIを使ったことがあれば、保存した人格と記憶を出す（使ったことが無ければ記録のファイルは作らない）
         if os.path.exists(AGENT_DB_FILE) and self._ensure_agent_runtime() is not None:
-            self._fill_agent_persona(self.agent_runtime.persona)
+            self._fill_agent_persona(self.agent_runtime.common_persona())
         self.refresh_agent_memory_list()
+        self.refresh_agent_accounts()
         self._refresh_agent_provider_label()
         self._refresh_agent_state()
 
@@ -9991,18 +10000,196 @@ class App(ctk.CTk):
         add_entry("speaking_style", "話し方:")
         add_box("boundaries", "しないこと\n（1行に1つ）:", 70)
         add_box("example_lines", "口調の例\n（1行に1つ）:", 50)
+        self.agent_persona_target_label = ctk.CTkLabel(section, text="", anchor="w", text_color="#8ab4f8")
+        self.agent_persona_target_label.pack(anchor="w", padx=12, pady=(2, 0))
         buttons = ctk.CTkFrame(section, fg_color="transparent")
         buttons.pack(anchor="w", fill="x", padx=12, pady=(2, 10))
         ctk.CTkButton(buttons, text="💾 人格を保存", width=120, command=self.save_agent_persona).pack(side="left", padx=(0, 6))
         ctk.CTkButton(buttons, text="↺ 既定に戻す", width=110, fg_color="#555555", hover_color="#3a3a3a",
-                      command=self.reset_agent_persona).pack(side="left")
+                      command=self.reset_agent_persona).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(buttons, text="↩ 共通の人格を編集", width=140, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.edit_common_agent_persona).pack(side="left")
         self._fill_agent_persona(Persona())
+        self._refresh_agent_persona_target()
+
+    # --- GRAVITYのアカウントごとの設定（2026-10-16 本人「全部やろうか」。アカウントは GRAVITY のアカウントだけ） ---
+    MEMORY_FILTER_ALL = "すべて"
+    MEMORY_FILTER_UNKNOWN = "（アカウント不明）"
+    NO_ACCOUNT_YET = "（まだ分かりません）"
+
+    def build_agent_accounts_section(self, parent):
+        section = ctk.CTkFrame(parent)
+        section.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(section, text="🪪 GRAVITYのアカウント", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(section, text="AIを動かすGRAVITYのアカウントごとに、呼ばれ方・オーナーの名前・人格を変えられます。\n"
+                                   "空の欄は「⚙️ 設定」の値と、共通の人格を使います。記憶とファイルは、いつもアカウントごとに分かれます。",
+                     justify="left", text_color="gray70").pack(anchor="w", padx=12, pady=(0, 6))
+        self.agent_account_now_label = ctk.CTkLabel(section, text="", anchor="w")
+        self.agent_account_now_label.pack(anchor="w", padx=12, pady=(0, 4))
+        row = ctk.CTkFrame(section, fg_color="transparent")
+        row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(row, text="アカウント:", width=110, anchor="w").pack(side="left")
+        self.agent_account_var = ctk.StringVar(value=self.NO_ACCOUNT_YET)
+        self.agent_account_menu = ctk.CTkOptionMenu(row, variable=self.agent_account_var, values=[self.NO_ACCOUNT_YET],
+                                                    width=260, command=lambda _value: self._fill_agent_account_profile())
+        self.agent_account_menu.pack(side="left", padx=(0, 6))
+        ctk.CTkButton(row, text="🔄", width=40, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.refresh_agent_accounts).pack(side="left")
+        name_row = ctk.CTkFrame(section, fg_color="transparent")
+        name_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(name_row, text="AIの呼ばれ方:", width=110, anchor="w").pack(side="left")
+        self.agent_profile_name_entry = ctk.CTkEntry(name_row, width=260, placeholder_text="空なら「⚙️ 設定」の呼ばれ方")
+        self.agent_profile_name_entry.pack(side="left", padx=(0, 8))
+        self.agent_profile_name_entry.bind("<Button-3>", self._show_entry_context_menu)
+        owner_row = ctk.CTkFrame(section, fg_color="transparent")
+        owner_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(owner_row, text="オーナーの名前:", width=110, anchor="w").pack(side="left")
+        self.agent_profile_owner_entry = ctk.CTkEntry(owner_row, width=260, placeholder_text="空なら「⚙️ 設定」のオーナー")
+        self.agent_profile_owner_entry.pack(side="left", padx=(0, 8))
+        self.agent_profile_owner_entry.bind("<Button-3>", self._show_entry_context_menu)
+        ctk.CTkButton(owner_row, text="💾 このアカウントに保存", width=170,
+                      command=self.save_agent_account_profile).pack(side="left")
+        persona_row = ctk.CTkFrame(section, fg_color="transparent")
+        persona_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        self.agent_profile_persona_label = ctk.CTkLabel(persona_row, text="", width=260, anchor="w")
+        self.agent_profile_persona_label.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(persona_row, text="🎭 このアカウントの人格を編集", width=190,
+                      command=self.edit_agent_account_persona).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(persona_row, text="↺ 共通の人格に戻す", width=140, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.clear_agent_account_persona).pack(side="left")
+        move_row = ctk.CTkFrame(section, fg_color="transparent")
+        move_row.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
+        self.agent_unknown_memories_label = ctk.CTkLabel(move_row, text="", anchor="w", text_color="gray70")
+        self.agent_unknown_memories_label.pack(side="left", padx=(0, 8))
+        self.agent_unknown_memories_button = ctk.CTkButton(
+            move_row, text="📦 このアカウントの記憶にする", width=190, fg_color="#555555", hover_color="#3a3a3a",
+            command=self.move_unknown_agent_memories)
+        self.agent_unknown_memories_button.pack(side="left")
+
+    def _known_gravity_accounts(self):
+        """選べる GRAVITY のアカウント（覚えた名前・タスク機能の名前・設定の名前・アカウントごとの設定・記憶があるもの）"""
+        names = []
+
+        def add(name):
+            name = clean_display_name(name or "")
+            if name and name not in names:
+                names.append(name)
+        current, named = self._gravity_account_info()
+        if named:
+            add(current)
+        for name in list(self._agent_account_names.values()) + list(self._agent_task_names.values()):
+            add(name)
+        for name in self._agent_self_names:
+            add(name)
+        for name in self._agent_profiles:
+            add(name)
+        store = self.agent_store
+        if store is not None:
+            for account, _count in store.memory_accounts():
+                add(account)
+        return names
+
+    def _selected_agent_account(self):
+        account = self.agent_account_var.get()
+        return "" if account == self.NO_ACCOUNT_YET else account
+
+    def refresh_agent_accounts(self):
+        """アカウントの区画を今の状態にする（覚えた名前・設定・人格・アカウント不明の記憶）"""
+        current, named = self._gravity_account_info()
+        self.agent_account_now_label.configure(
+            text=f"今チャットしているアカウント: {current}" + ("" if named else "（名前はまだ分かりません）"))
+        accounts = self._known_gravity_accounts()
+        self.agent_account_menu.configure(values=accounts or [self.NO_ACCOUNT_YET])
+        if self.agent_account_var.get() not in accounts:
+            self.agent_account_var.set(accounts[0] if accounts else self.NO_ACCOUNT_YET)
+        self._fill_agent_account_profile()
+
+    def _fill_agent_account_profile(self):
+        account = self._selected_agent_account()
+        profile = self._agent_profiles.get(account, {})
+        for entry, key in ((self.agent_profile_name_entry, "ai_name"), (self.agent_profile_owner_entry, "owner_names")):
+            entry.delete(0, "end")
+            if profile.get(key):         # ⚠️ 空を入れると、薄く出る説明（placeholder）が消える
+                entry.insert(0, profile[key])
+        runtime = self.agent_runtime if self._agent_memory_store() is not None else None
+        own = runtime.account_persona(account) if (runtime is not None and account) else None
+        self.agent_profile_persona_label.configure(
+            text="人格: このアカウント用の人格" if own is not None else "人格: 共通の人格を使う")
+        store = self.agent_store
+        unknown = dict(store.memory_accounts()).get("", 0) if store is not None else 0
+        self.agent_unknown_memories_label.configure(
+            text=f"アカウントが分からない古い記憶: {unknown}件" if unknown else "アカウントが分からない記憶はありません")
+        self.agent_unknown_memories_button.configure(state="normal" if unknown and account else "disabled")
+
+    def save_agent_account_profile(self):
+        account = self._selected_agent_account()
+        if not account:
+            messagebox.showinfo("AI", "アカウントがまだ分かりません。GRAVITYのチャットにつないで、AIか自分が何か送ると分かります。")
+            return
+        name = self.agent_profile_name_entry.get().strip()
+        owner = self.agent_profile_owner_entry.get().strip()
+        if max(len(name), len(owner)) > AGENT_NAMES_MAX_CHARS:
+            messagebox.showwarning("AI", f"呼ばれ方・オーナーの名前は、それぞれ{AGENT_NAMES_MAX_CHARS}文字までにしてください。")
+            return
+        profiles = dict(self._agent_profiles)
+        if name or owner:
+            profiles[account] = {"ai_name": name, "owner_names": owner}
+        else:
+            profiles.pop(account, None)
+        save_account_profiles(self.db.save_setting, profiles)
+        self._agent_profiles = profiles
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.account_profiles = profiles
+        self._append_agent_log(f"🪪 「{account}」の設定を保存しました（呼ばれ方: {name or '共通'}、オーナー: {owner or '共通'}）。")
+
+    def edit_agent_account_persona(self):
+        """人格の欄に、このアカウント用の人格（無ければ共通の人格を写したもの）を出して、編集先をこのアカウントにする"""
+        account = self._selected_agent_account()
+        if not account:
+            messagebox.showinfo("AI", "アカウントがまだ分かりません。GRAVITYのチャットにつないで、AIか自分が何か送ると分かります。")
+            return
+        runtime = self._ensure_agent_runtime()
+        if runtime is None:
+            return
+        self._agent_persona_target = account
+        self._fill_agent_persona(runtime.account_persona(account) or runtime.common_persona())
+        self._refresh_agent_persona_target()
+        self._append_agent_log(f"🎭 下の「🎭 人格」の欄で、「{account}」用の人格を編集できます（保存するまで使われません）。")
+
+    def clear_agent_account_persona(self):
+        account = self._selected_agent_account()
+        runtime = self._ensure_agent_runtime() if account else None
+        if runtime is None or runtime.account_persona(account) is None:
+            messagebox.showinfo("AI", "このアカウント用の人格はありません（共通の人格を使っています）。")
+            return
+        if not messagebox.askyesno("AI", f"「{account}」用の人格を消して、共通の人格に戻しますか？"):
+            return
+        runtime.clear_account_persona(account)
+        if self._agent_persona_target == account:
+            self.edit_common_agent_persona()
+        self._append_agent_log(f"🎭 「{account}」は共通の人格に戻りました。")
+        self._fill_agent_account_profile()
+
+    def move_unknown_agent_memories(self):
+        """アカウントが分からない古い記憶（アカウントごとに分ける前に覚えたもの）を、選んだアカウントの記憶にする"""
+        account = self._selected_agent_account()
+        store = self._agent_memory_store()
+        count = dict(store.memory_accounts()).get("", 0) if store is not None else 0
+        if not account or not count:
+            return
+        if not messagebox.askyesno("記憶", f"アカウントが分からない記憶{count}件を、「{account}」の記憶にしますか？\n"
+                                           "（アカウントごとに分ける前に覚えたものです。あとから分け直すことはできません）"):
+            return
+        moved = self.agent_runtime.move_account("", account)
+        self._append_agent_log(f"📦 アカウントが分からない記憶{moved}件を「{account}」の記憶にしました。")
+        self.refresh_agent_memory_list()
+        self._fill_agent_account_profile()
 
     # --- 記憶（2026-10-16。⚠️ 他の人のことを覚える。どれも本人がONにしたときだけ・このPCの中だけ・見て消せる） ---
     AGENT_MEMORY_SWITCHES = (
         ("memory_enabled", "🧠 会話を覚える（人・この場・自分が言ったこと。GRAVITYのアカウントごと）",
          "GRAVITYのチャットの会話から、あとで役立つことをAIに選ばせて、このPCの記録（agent_data.db）に残します。\n"
-         "GRAVITYのアカウントごとに分けて覚えます（AIタブの手入力は覚えません）。\n"
+         "GRAVITYのアカウントごとに分けて覚えます（AIタブの手入力は覚えません）。何日も来ていなかった人に気づくと、AIに伝えます。\n"
          "ルームの他の人の名前と、その人について分かったこと（好きな話題など）も入ります。\n"
          "健康・信条・性的指向・犯罪歴・住所・本名などの繊細な事柄は覚えません。\n"
          "覚えたことは下の一覧で見られ、1件ずつ・全部消せます。使わない記憶は30〜180日で消えます。\n\n覚えるようにしますか？"),
@@ -10013,6 +10200,7 @@ class App(ctk.CTk):
         ("journal_enabled", "📒 会話をファイルに残す（GRAVITYのアカウントごと・相手ごと。メモ帳で読める）",
          "GRAVITYのチャットの会話の全文を、アプリのフォルダの「AIの記憶」に、GRAVITYのアカウントごと・話した相手ごとのファイルで残します。\n"
          "「会話を覚える」もONなら、相手ごとのファイルに、AIがまとめた「覚えていること」も書きます。\n"
+         "話しかけてきた人のファイルの「メモ（自分で書く）」と、前のやりとり（数行）は、AIも読んで会話に使います（AIの提供元へ送ります）。\n"
          "ルームの他の人の名前と発言がそのまま入ります。このPCの中だけで、自動では消しません（フォルダを開いて、読む・消すができます）。\n\n"
          "会話をファイルに残すようにしますか？"),
         ("relationships_enabled", "関係の値を持つ（なじみ・やりとりの温かさ）",
@@ -10037,7 +10225,15 @@ class App(ctk.CTk):
 
         lists = ctk.CTkFrame(section, fg_color="transparent")
         lists.pack(fill="x", padx=12, pady=(6, 4))
-        ctk.CTkLabel(lists, text="覚えていること:", anchor="w").pack(anchor="w")
+        head = ctk.CTkFrame(lists, fg_color="transparent")
+        head.pack(anchor="w", fill="x")
+        ctk.CTkLabel(head, text="覚えていること:", anchor="w").pack(side="left")
+        ctk.CTkLabel(head, text="表示するアカウント:", anchor="w", text_color="gray70").pack(side="left", padx=(16, 4))
+        self.agent_memory_filter_var = ctk.StringVar(value=self.MEMORY_FILTER_ALL)
+        self.agent_memory_filter_menu = ctk.CTkOptionMenu(head, variable=self.agent_memory_filter_var,
+                                                          values=[self.MEMORY_FILTER_ALL], width=200,
+                                                          command=lambda _value: self.refresh_agent_memory_list())
+        self.agent_memory_filter_menu.pack(side="left")
         self.agent_memory_listbox = tk.Listbox(lists, height=6, font=("", 10), bg="#2b2b2b", fg="#dce4ee",
                                                selectbackground="#1f6aa5", highlightthickness=0, bd=0,
                                                exportselection=False)
@@ -10091,9 +10287,19 @@ class App(ctk.CTk):
         if store is None:
             self.agent_memory_listbox.insert("end", "（まだありません）")
             return
+        accounts = [a for a, _count in store.memory_accounts()]
+        choices = [self.MEMORY_FILTER_ALL] + [a or self.MEMORY_FILTER_UNKNOWN for a in accounts]
+        self.agent_memory_filter_menu.configure(values=choices)
+        selected = self.agent_memory_filter_var.get()
+        if selected not in choices:
+            selected = self.MEMORY_FILTER_ALL
+            self.agent_memory_filter_var.set(selected)
+        wanted = None if selected == self.MEMORY_FILTER_ALL else ("" if selected == self.MEMORY_FILTER_UNKNOWN else selected)
         scope_labels = {"person": "人", "room": "この場", "self": "自分", "impression": "印象（推定）"}
-        for mem_id, account, scope, person, content, conf in store.memories_with_account(limit=200):
-            where = f"{account}／" if account else ""
+        for mem_id, account, scope, person, content, conf in store.memories_with_account(limit=500):
+            if wanted is not None and account != wanted:
+                continue
+            where = f"{account}／" if account and wanted is None else ""
             who = f"{person}・" if person and scope in ("person", "impression") else ""
             confidence = {"low": "低", "mid": "中", "high": "高"}.get(conf, "?")
             mark = f"・確からしさ{confidence}" if scope == "impression" else ""
@@ -10189,8 +10395,26 @@ class App(ctk.CTk):
         runtime = self._ensure_agent_runtime()
         if runtime is None:
             return
-        runtime.set_persona(persona)
-        self._append_agent_log("🎭 人格を保存しました（次の判断から使います）。")
+        account = self._agent_persona_target
+        runtime.set_persona(persona, account=account)
+        if account:
+            self._append_agent_log(f"🎭 「{account}」用の人格を保存しました（このアカウントでチャットするとき、次の判断から使います）。")
+        else:
+            self._append_agent_log("🎭 人格を保存しました（次の判断から使います）。")
+        self.refresh_agent_accounts()
+
+    def _refresh_agent_persona_target(self):
+        account = self._agent_persona_target
+        self.agent_persona_target_label.configure(
+            text=f"編集中: 「{account}」用の人格（保存すると、このアカウントでだけ使います）" if account
+            else "編集中: 共通の人格（アカウント用の人格が無いアカウントで使います）")
+
+    def edit_common_agent_persona(self):
+        """人格の欄を、共通の人格の編集に戻す"""
+        runtime = self._ensure_agent_runtime()
+        self._agent_persona_target = None
+        self._fill_agent_persona(runtime.common_persona() if runtime is not None else Persona())
+        self._refresh_agent_persona_target()
 
     def reset_agent_persona(self):
         if not messagebox.askyesno("人格", "人格の欄を既定に戻しますか？（保存するまでは使われません）"):
@@ -10269,18 +10493,30 @@ class App(ctk.CTk):
     def _current_account_user(self):
         return str(self.worker.agent_account_user or "0")
 
-    def _gravity_account_name(self):
+    def _gravity_account_info(self):
         """
-        監視スレッドから。今チャットしている GRAVITY のアカウントの名前。
+        監視スレッドから。今チャットしている GRAVITY のアカウント (名前, 名前が分かっているか)。
         見分け方の順: 自分が送った文の行から覚えた名前 → タスク機能が覚えた名前 → 設定の「自分のアカウント名」→ 「本体のGRAVITY」など
+        ⚠️ 設定の名前は、ほかの GRAVITY（本体・アプリ複製）の名前だと分かっているものは使わない（別のアカウントと混ぜない）
+        ⚠️ 「本体のGRAVITY」などは仮の呼び名（名前が分かっていない）。名前が分かったら、そこまでの記憶とファイルを移す
         """
         user = self._current_account_user()
-        if user not in self._agent_account_names and user not in self._agent_task_names                 and time.time() - self._agent_task_names_at > 60:
+        if (user not in self._agent_account_names and user not in self._agent_task_names
+                and time.time() - self._agent_task_names_at > 60):
             self._agent_task_names = self._load_task_account_names()     # タスク機能があとから覚えたかもしれない（1分に1回だけ読む）
         name = self._agent_account_names.get(user) or self._agent_task_names.get(user)
-        if not name and self._agent_self_names:
-            name = self._agent_self_names[0]
-        return clean_display_name(name) if name else gravity_account_label(user)
+        if name:
+            return clean_display_name(name), True
+        others = {clean_display_name(n) for u, n in list(self._agent_account_names.items())
+                  + list(self._agent_task_names.items()) if u != user and n}
+        for name in self._agent_self_names:
+            if clean_display_name(name) not in others:
+                return clean_display_name(name), True
+        return gravity_account_label(user), False
+
+    def _gravity_account_name(self):
+        """今チャットしている GRAVITY のアカウントの名前（分からなければ「本体のGRAVITY」などの仮の呼び名）"""
+        return self._gravity_account_info()[0]
 
     def _agent_my_names(self):
         """自分の発言を見分ける名前（設定の名前＋今のアカウントの覚えた名前）"""
@@ -10312,6 +10548,7 @@ class App(ctk.CTk):
             if votes[name] < self.ACCOUNT_NAME_VOTES:
                 return
         self._agent_account_votes.pop(user, None)
+        previous, previous_named = self._gravity_account_info()
         names = dict(self._agent_account_names)
         names[user] = name
         self._agent_account_names = names
@@ -10321,6 +10558,17 @@ class App(ctk.CTk):
             pass
         label = gravity_account_label(user, name)
         self._post_to_ui(lambda: self._append_agent_log(f"🪪 チャットしているGRAVITYのアカウントを覚えました: {label}"))
+        runtime = self.agent_runtime
+        if not previous_named and runtime is not None:
+            # 仮の呼び名（「本体のGRAVITY」）で覚えた記憶とファイルを、分かった名前へ移す（別のアカウントに分かれたままにしない）
+            try:
+                moved = runtime.move_account(previous, name)
+            except Exception:
+                write_error_log(f"記憶を移すところでエラー:\n{traceback.format_exc()}")
+                moved = 0
+            self._post_to_ui(lambda: self._append_agent_log(
+                f"📦 「{previous}」として覚えた記憶（{moved}件）とファイルを「{name}」へ移しました。"))
+        self._post_to_ui(self.refresh_agent_accounts)
 
     def _on_gravity_room(self, info):
         """監視スレッドから。ルームの様子を AI に渡し、判断のログに短く出す"""

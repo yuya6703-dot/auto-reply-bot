@@ -106,6 +106,21 @@ class Harness(ctk.CTk):
     _gravity_account_name = A.App._gravity_account_name
     _agent_my_names = A.App._agent_my_names
     _learn_gravity_account_name = A.App._learn_gravity_account_name
+    _gravity_account_info = A.App._gravity_account_info
+    MEMORY_FILTER_ALL = A.App.MEMORY_FILTER_ALL
+    MEMORY_FILTER_UNKNOWN = A.App.MEMORY_FILTER_UNKNOWN
+    NO_ACCOUNT_YET = A.App.NO_ACCOUNT_YET
+    build_agent_accounts_section = A.App.build_agent_accounts_section
+    _known_gravity_accounts = A.App._known_gravity_accounts
+    _selected_agent_account = A.App._selected_agent_account
+    refresh_agent_accounts = A.App.refresh_agent_accounts
+    _fill_agent_account_profile = A.App._fill_agent_account_profile
+    save_agent_account_profile = A.App.save_agent_account_profile
+    edit_agent_account_persona = A.App.edit_agent_account_persona
+    clear_agent_account_persona = A.App.clear_agent_account_persona
+    move_unknown_agent_memories = A.App.move_unknown_agent_memories
+    _refresh_agent_persona_target = A.App._refresh_agent_persona_target
+    edit_common_agent_persona = A.App.edit_common_agent_persona
     on_agent_initiative_toggled = A.App.on_agent_initiative_toggled
     AGENT_OUTPUT_LABELS = A.App.AGENT_OUTPUT_LABELS
     AGENT_CHAT_SEND_LABELS = A.App.AGENT_CHAT_SEND_LABELS
@@ -533,6 +548,92 @@ check("覚えた名前がアカウントの名前になる・自分の発言の�
       h._gravity_account_name() == "テストちゃ👼" and "テストちゃ👼" in h._agent_my_names())
 h._learn_gravity_account_name("テストちゃ..", "またね")
 check("切れて出た名前で上書きしない", h._agent_account_names["0"] == "テストちゃ👼")
+check("ほかの GRAVITY の名前だと分かっている設定の名前は、使わない（別のアカウントと混ぜない）",
+      (h.worker.__setattr__("agent_account_user", "11"), h._agent_self_names.__setitem__(slice(None), ["テストちゃ👼"]),
+       h._gravity_account_info())[2] == ("複製のGRAVITY（u11）", False))
+h.worker.agent_account_user = "0"
+
+print("■ 仮の呼び名で覚えた記憶を、名前が分かったら移す")
+h.worker.agent_account_user = "12"
+h._agent_self_names[:] = []
+store = h.agent_store
+store.upsert_person("複製のGRAVITY（u12）／伏せ字3", "伏せ字3", "複製のGRAVITY（u12）")
+store.add_memory("person", "複製のGRAVITY（u12）／伏せ字3", "名前が分かる前の記憶", "high", 0.8, 86400, "複製のGRAVITY（u12）")
+h.worker.sent = ["一つ目", "二つ目"]
+h._learn_gravity_account_name("複製の本当の名前", "一つ目")
+h._learn_gravity_account_name("複製の本当の名前", "二つ目")
+check("記憶が分かった名前のアカウントへ移る", dict(store.memory_accounts()).get("複製の本当の名前") == 1
+      and "複製のGRAVITY（u12）" not in dict(store.memory_accounts()), store.memory_accounts())
+check("移したことを判断のログに出す", pump(h, lambda: "📦 「複製のGRAVITY（u12）」として覚えた記憶（1件）とファイルを「複製の本当の名前」へ移しました"
+                                                 in agent_log(h)), agent_log(h)[-300:])
+store.delete_all_memories()
+h.worker.agent_account_user = "0"
+h._agent_self_names[:] = saved_self_names
+
+print("■ GRAVITYのアカウントごとの設定（呼ばれ方・オーナー・人格）")
+h.refresh_agent_accounts()
+accounts = h.agent_account_menu.cget("values")
+check("知っているアカウントを選べる（覚えた名前・タスク機能の名前）", "テストちゃ👼" in accounts and "複製の名前" in accounts, accounts)
+check("今チャットしているアカウントを出す", "今チャットしているアカウント: テストちゃ👼" in h.agent_account_now_label.cget("text"),
+      h.agent_account_now_label.cget("text"))
+h.agent_account_var.set("複製の名前")
+h._fill_agent_account_profile()
+h.agent_profile_name_entry.insert(0, "複製ちゃん")
+h.agent_profile_owner_entry.insert(0, "伏せ字9")
+h.save_agent_account_profile()
+check("アカウントごとに保存する（動いているエージェントにもすぐ効く）",
+      '"複製の名前": {"ai_name": "複製ちゃん", "owner_names": "伏せ字9"}' in (db.get_setting("agent.account_profiles") or "")
+      and h.agent_runtime.config.account_profiles["複製の名前"]["ai_name"] == "複製ちゃん")
+h.agent_account_var.set("テストちゃ👼")
+h._fill_agent_account_profile()
+check("ほかのアカウントを選ぶと、そのアカウントの欄（空＝共通）", h.agent_profile_name_entry.get() == "")
+h.agent_account_var.set("複製の名前")
+h._fill_agent_account_profile()
+check("戻すと保存した値が出る", h.agent_profile_name_entry.get() == "複製ちゃん" and h.agent_profile_owner_entry.get() == "伏せ字9")
+check("人格は最初は共通", h.agent_profile_persona_label.cget("text") == "人格: 共通の人格を使う")
+h.edit_agent_account_persona()
+check("人格の欄の編集先がこのアカウントになる", "「複製の名前」用の人格" in h.agent_persona_target_label.cget("text"))
+h.agent_persona_widgets["summary"].delete("1.0", "end")
+h.agent_persona_widgets["summary"].insert("1.0", "複製のアカウントだけの人格")
+h.save_agent_persona()
+check("保存すると、このアカウント用の人格になる（共通は変わらない）",
+      h.agent_runtime.account_persona("複製の名前").summary == "複製のアカウントだけの人格"
+      and h.agent_runtime.common_persona().summary != "複製のアカウントだけの人格"
+      and h.agent_profile_persona_label.cget("text") == "人格: このアカウント用の人格")
+answers.append(True)
+h.clear_agent_account_persona()
+check("共通の人格に戻せる（欄も共通の編集に戻る）", h.agent_runtime.account_persona("複製の名前") is None
+      and "共通の人格" in h.agent_persona_target_label.cget("text"))
+h.agent_profile_name_entry.delete(0, "end")
+h.agent_profile_owner_entry.delete(0, "end")
+h.save_agent_account_profile()
+check("欄を空にして保存すると、共通に戻る", "複製の名前" not in h.agent_runtime.config.account_profiles)
+
+print("■ アカウントが分からない古い記憶・一覧の絞り込み")
+store.add_memory("room", None, "古い記憶", "mid", 0.5, 86400, "")
+store.add_memory("room", None, "テスト垢の記憶", "mid", 0.5, 86400, "テスト垢")
+h.refresh_agent_memory_list()
+check("一覧のアカウントの選び方に、記憶があるアカウントと「アカウント不明」",
+      set(h.agent_memory_filter_menu.cget("values")) >= {"すべて", "（アカウント不明）", "テスト垢"},
+      h.agent_memory_filter_menu.cget("values"))
+h.agent_memory_filter_var.set("テスト垢")
+h.refresh_agent_memory_list()
+check("選んだアカウントの記憶だけ出す", h.agent_memory_listbox.get(0, "end") == ("[この場] テスト垢の記憶",),
+      h.agent_memory_listbox.get(0, "end"))
+h.agent_memory_filter_var.set("すべて")
+h.refresh_agent_memory_list()
+check("すべてなら、どのアカウントかも出す", "[テスト垢／この場] テスト垢の記憶" in h.agent_memory_listbox.get(0, "end"))
+h.agent_account_var.set("テストちゃ👼")
+h._fill_agent_account_profile()
+check("アカウントが分からない記憶の数を出す", "アカウントが分からない古い記憶: 1件" in h.agent_unknown_memories_label.cget("text"))
+answers.append(False)
+h.move_unknown_agent_memories()
+check("移すのは確かめてから（いいえなら移さない）", dict(store.memory_accounts()).get("") == 1)
+answers.append(True)
+h.move_unknown_agent_memories()
+check("選んだアカウントの記憶にする", "" not in dict(store.memory_accounts())
+      and dict(store.memory_accounts()).get("テストちゃ👼") == 1, store.memory_accounts())
+store.delete_all_memories()
 
 print("■ ルームの様子")
 h._on_gravity_room({"name": "伏せ字1", "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2, "announcement": "x"})
