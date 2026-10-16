@@ -127,6 +127,7 @@ class Harness(ctk.CTk):
     on_agent_lookup_toggled = A.App.on_agent_lookup_toggled
     unmute_agent = A.App.unmute_agent
     on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
+    on_agent_mention_toggled = A.App.on_agent_mention_toggled
     _agent_voice_style_map = A.App._agent_voice_style_map
     _agent_voice_styles = A.App._agent_voice_styles
     _agent_voice_profile = A.App._agent_voice_profile
@@ -731,6 +732,12 @@ check("OFFにできる（動いているエージェントにもすぐ効く）"
 h.agent_conversation_var.set(True)
 h.on_agent_conversation_toggled()
 check("ONに戻せる", h.agent_runtime.config.conversation_enabled is True)
+check("チャットのメンションは既定ON", h.agent_mention_var.get() is True)
+h.agent_mention_var.set(False)
+h.on_agent_mention_toggled()
+check("メンションをOFFにできる", db.get_setting("agent.chat_mention") == "0" and h.agent_runtime.config.chat_mention is False)
+h.agent_mention_var.set(True)
+h.on_agent_mention_toggled()
 
 print("■ 反応しない人・静かにを解く（2026-10-16）")
 h.agent_ignored_entry.insert(0, "荒らし、いたずら")

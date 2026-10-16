@@ -388,7 +388,9 @@ def build_generate_request(decision, events, window, persona, config, now, timeo
         "## 直近の会話", RECENT_BLOCK_BEGIN, *(lines or ["（なし）"]), RECENT_BLOCK_END,
         *lookup_section(lookup),
         "## 決まった行動", f"行動: {ACTION_LABELS.get(decision.action, decision.action)}",
-        f"相手: {target or '（場全体）'}",
+        f"相手: {target or '（場全体）'}"
+        + ("（チャットでは、ツールが文の頭に @相手の名前 を付ける。文に @ は書かない）"
+           if target and config.output_mode == OUTPUT_CHAT and config.chat_mention else ""),
         f"話題: {decision.topic or '（不明）'} / 雰囲気: {decision.mood or '（不明）'}",
         f"文字数の上限: {limit}字",
         *voice_style_lines(config, voice_styles),

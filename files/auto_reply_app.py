@@ -9954,7 +9954,11 @@ class App(ctk.CTk):
         ctk.CTkOptionMenu(output_row, variable=self.agent_chat_send_var,
                           values=list(self.AGENT_CHAT_SEND_LABELS.values()),
                           command=self.on_agent_chat_send_selected, width=220).pack(side="left")
-        ctk.CTkLabel(settings, text="チャットは1分に1通・1時間に20通まで。送るのはメインタブの監視です（監視していないと送れません）。",
+        self.agent_mention_var = ctk.BooleanVar(value=config.chat_mention)
+        ctk.CTkSwitch(settings, text="特定の人にチャットで返すときは、文の頭にメンション（@名前）を付ける",
+                      variable=self.agent_mention_var, command=self.on_agent_mention_toggled).pack(anchor="w", padx=12, pady=(0, 4))
+        ctk.CTkLabel(settings, text="チャットは1分に1通・1時間に20通まで（話しかけられたときは、続けて話すがONなら1分に4回まで）。"
+                                    "送るのはメインタブの監視です（監視していないと送れません）。",
                      text_color="gray70").pack(anchor="w", padx=12, pady=(0, 10))
 
         self.build_agent_accounts_section(frame)
@@ -10710,6 +10714,13 @@ class App(ctk.CTk):
         if self.agent_runtime is not None:
             self.agent_runtime.config.initiative_enabled = on
         self._append_agent_log("💭 静かなときに自分から話しかけます。" if on else "💭 自分から話しかけるのをやめました。")
+
+    def on_agent_mention_toggled(self):
+        on = bool(self.agent_mention_var.get())
+        self.db.save_setting("agent.chat_mention", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.chat_mention = on
+        self._append_agent_log("@ 特定の人に返すときは、メンションを付けます。" if on else "@ メンションは付けません。")
 
     def on_agent_conversation_toggled(self):
         on = bool(self.agent_conversation_var.get())

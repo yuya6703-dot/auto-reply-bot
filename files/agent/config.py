@@ -62,6 +62,8 @@ class AgentConfig:
     chat_max_per_minute: int = 1           # R7（チャット）: 声より厳しく（設計書/06 の 9章）
     chat_max_per_hour: int = 20
     chat_approval_seconds: float = 60.0    # 下書きを見せておく時間。過ぎたら捨てる
+    # 特定の人にチャットで返すときは、文の頭に「@名前 」を付ける（2026-10-16 本人「特定の誰かにチャットで返信する場合メンションするように」）
+    chat_mention: bool = True
     # 呼ばれたときは、判断と文を1回で頼む（AIを呼ぶのが2回→1回。2026-10-16 本人「応答遅いの気になる」→「それもやろう」）。
     # 呼ばれていないときは今まで通り判断だけ先に頼む（黙るなら文を作らない＝費用がかからない）
     combined_when_addressed: bool = True
@@ -120,7 +122,7 @@ class AgentConfig:
     # 画面で変える項目
     EDITABLE = ("ai_name", "self_names", "owner_names", "ignored_people", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
-                "conversation_enabled",
+                "conversation_enabled", "chat_mention",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
                 "lookup_enabled", "lookup_wait_text", "digest_enabled", "hearing_enabled", "hearing_device",
                 "hearing_threshold", "hearing_hints")

@@ -33,7 +33,7 @@ from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, Utterance, prech
                          request_utterance)
 from .events import (KIND_CHAT_MESSAGE, KIND_SYSTEM, KIND_VOICE_UTTERANCE, RECENT_BLOCK_BEGIN, RECENT_BLOCK_END,
                      SOURCE_GRAVITY, SOURCE_SYSTEM, SOURCE_VOICE, AgentEvent, clean_name, describe_event,
-                     new_event_id)
+                     name_matches, new_event_id)
 from .inbox import Inbox
 from .memory.recall import MemoryKeeper
 from .owner import CMD_MUTE, CMD_REMEMBER, CMD_UNMUTE, is_owner, parse_command
@@ -819,6 +819,45 @@ class AgentRuntime:
         else:
             self._speak(utterance, decision, turn_id, count=False)
 
+    HONORIFICS = ("さん", "ちゃん", "くん", "君", "様", "さま", "氏")
+
+    def _with_mention(self, utterance, target):
+        """
+        特定の人に返すチャットの文の頭に「@アカウント名 」を付ける（メンションがONで、相手がいるときだけ）。
+        ⚠️ AI が返す相手の名前は「たろうさん」のような呼び方のこともある。チャット欄に出ているアカウント名に当てはめ、
+           当てはまらなければ付けない（2026-10-16 本人「@名前という感じより@アカウント名みたいな感じで」）。もう付いていれば付けない
+        """
+        if not self.config.chat_mention or not target or is_ignored_name(target, self.config):
+            return utterance
+        name = self._account_name_of(target)
+        if not name or any(name_matches(name, mine) for mine in self.config.self_name_list):
+            return utterance
+        text = utterance.text
+        if f"@{name}" in text or f"@{name[:max(2, len(name) - 2)]}" in text:
+            return utterance
+        return replace(utterance, text=f"@{name} {text}")
+
+    def _account_name_of(self, target):
+        """
+        AI が返した相手の名前を、チャット欄に出ている（直近の会話の）アカウント名に当てはめる。
+        名前が「名前..」と切れて出ていても、切れていない方を使う。当てはまらなければ None
+        """
+        wanted = clean_name(target)
+        for suffix in self.HONORIFICS:
+            if wanted.endswith(suffix) and len(wanted) > len(suffix):
+                wanted = wanted[:-len(suffix)]
+                break
+        names = []
+        for e in self.window.recent_events():
+            name = clean_name(e.speaker) if e.speaker and not e.is_self and e.source == SOURCE_GRAVITY else ""
+            if name and name not in names:
+                names.append(name)
+        if not names:                     # GRAVITY の行が無い（AIタブの手入力など）ときは、出てきた名前から
+            names = [clean_name(e.speaker) for e in self.window.recent_events() if e.speaker and not e.is_self]
+        matches = [n for n in names if n == wanted or name_matches(n, wanted) or name_matches(wanted, n)
+                   or (len(wanted) >= 2 and n.startswith(wanted))]
+        return max(matches, key=len) if matches else None
+
     def _look_up(self, decision, turn_id, cancel):
         """
         頼まれて調べる（2026-10-16）。調べている間に「待って」の一言を出す。
@@ -908,6 +947,7 @@ class AgentRuntime:
                 return
             self._speech_cancel = token
         self._set_state(STATE_POSTING)
+        utterance = self._with_mention(utterance, decision.target)
         label = "参加" if decision.action == ENGAGE else "短く反応"
         self.log.write(f"✍️ チャットに書く（{label}）:「{utterance.text}」")
         started = self._clock()
