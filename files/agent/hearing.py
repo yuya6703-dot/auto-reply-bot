@@ -16,6 +16,8 @@ PC の音声入力（iPad をつないだライン入力・USB の音声入力�
 import io
 import math
 import queue
+import re
+import unicodedata
 import threading
 import time
 import wave
@@ -32,6 +34,37 @@ PRE_ROLL_SECONDS = 0.3           # 話し始めの少し前から入れる（頭
 FLOOR_RATIO = 2.0                # 下地のこの倍より大きい音を声とみる
 FLOOR_WINDOW_SECONDS = 4.5       # 下地は、直近4.5秒の音の大きさの…
 FLOOR_PERCENTILE = 0.2           # …小さい方から2割のところ（話し声には息つぎの間があるので、下地は声に引っぱられにくい）
+
+
+# 笑い声・相づち（2026-10-16 本人「笑い声を会話の割り込みとして捉えないようにする仕組み」）。
+# 文字にしたものがこれだけなら、割り込み・話しかけとして扱わない
+_LAUGH = re.compile(
+    r"^(?:(?:(?:ぎゃ|あ|う|え|い|が|わ|だ|に|ア|ウ|エ|イ|ガ|ワ|ダ)[っッ]?)?[はハふフひヒへヘほホ][っッー〜]*|w|ｗ|"
+    # 「草」「くさ」「草生える」も笑い（同日 本人「笑う時くさとか草生えるっていう人もいるからそれも含めて」）
+    r"大草原|草生え(?:る|た|すぎ)?|草はえ(?:る|た)?|くさ(?:はえる|生える)?|クサ|草|笑い声|爆笑|笑|"
+    r"わら|わろた|ワロタ|わろす|ワロス|ウケる|うける|ウケた|うけた|くすくす|クスクス)+$", re.IGNORECASE)
+BACKCHANNELS = ("うん", "うんうん", "ん", "んー", "へー", "へぇ", "ほー", "ほう", "えー", "おー", "あー", "そうなんだ", "なるほど",
+                "たしかに", "確かに", "わかる", "ねー", "そうそう", "そっか", "まじか", "まじ", "いいね", "すご", "すごい", "ふーん",
+                "へえ", "ほえー", "おお", "うわー")
+_STRIP = re.compile(r"[\s、。！!？?…・()（）「」]+")
+
+
+def _plain(text):
+    return _STRIP.sub("", unicodedata.normalize("NFKC", text or ""))
+
+
+def is_laughter(text):
+    """笑い声だけか（あはは・www・（笑） など）"""
+    t = _plain(text)
+    return bool(t) and bool(_LAUGH.match(t))
+
+
+def is_backchannel(text):
+    """笑い声か、短い相づちだけか（AI が喋っている途中なら、割り込みにしない）"""
+    t = _plain(text)
+    if not t or is_laughter(t):
+        return True
+    return t in BACKCHANNELS or any(t == b * 2 or t == b * 3 for b in BACKCHANNELS)
 
 
 def frame_level(pcm):

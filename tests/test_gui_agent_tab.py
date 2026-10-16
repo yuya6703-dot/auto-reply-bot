@@ -128,6 +128,7 @@ class Harness(ctk.CTk):
     unmute_agent = A.App.unmute_agent
     on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
     on_agent_mention_toggled = A.App.on_agent_mention_toggled
+    on_agent_emoji_toggled = A.App.on_agent_emoji_toggled
     _agent_voice_style_map = A.App._agent_voice_style_map
     _agent_voice_styles = A.App._agent_voice_styles
     _agent_voice_profile = A.App._agent_voice_profile
@@ -738,6 +739,12 @@ h.on_agent_mention_toggled()
 check("メンションをOFFにできる", db.get_setting("agent.chat_mention") == "0" and h.agent_runtime.config.chat_mention is False)
 h.agent_mention_var.set(True)
 h.on_agent_mention_toggled()
+check("チャットの絵文字は既定ON", h.agent_emoji_var.get() is True)
+h.agent_emoji_var.set(False)
+h.on_agent_emoji_toggled()
+check("絵文字をOFFにできる", db.get_setting("agent.chat_emoji") == "0" and h.agent_runtime.config.chat_emoji is False)
+h.agent_emoji_var.set(True)
+h.on_agent_emoji_toggled()
 
 print("■ 反応しない人・静かにを解く（2026-10-16）")
 h.agent_ignored_entry.insert(0, "荒らし、いたずら")

@@ -107,7 +107,8 @@ def is_partner(event, partners):
 
 def is_meaningless(event, ignore_words):
     text = (event.text or "").strip()
-    return not text or bool(_NO_WORD.match(text)) or text in ignore_words
+    return (not text or bool(_NO_WORD.match(text)) or text in ignore_words
+            or bool(event.meta.get("backchannel")))      # 声の笑い声・相づちだけ（返事しない）
 
 
 class Gate:

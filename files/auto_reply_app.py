@@ -9957,6 +9957,9 @@ class App(ctk.CTk):
         self.agent_mention_var = ctk.BooleanVar(value=config.chat_mention)
         ctk.CTkSwitch(settings, text="特定の人にチャットで返すときは、文の頭にメンション（@名前）を付ける",
                       variable=self.agent_mention_var, command=self.on_agent_mention_toggled).pack(anchor="w", padx=12, pady=(0, 4))
+        self.agent_emoji_var = ctk.BooleanVar(value=config.chat_emoji)
+        ctk.CTkSwitch(settings, text="チャットで気持ちを絵文字で表す（AIが1〜2個まで選ぶ。真面目な話では控えめに）",
+                      variable=self.agent_emoji_var, command=self.on_agent_emoji_toggled).pack(anchor="w", padx=12, pady=(0, 4))
         ctk.CTkLabel(settings, text="チャットは1分に1通・1時間に20通まで（話しかけられたときは、続けて話すがONなら1分に4回まで）。"
                                     "送るのはメインタブの監視です（監視していないと送れません）。",
                      text_color="gray70").pack(anchor="w", padx=12, pady=(0, 10))
@@ -10721,6 +10724,13 @@ class App(ctk.CTk):
         if self.agent_runtime is not None:
             self.agent_runtime.config.chat_mention = on
         self._append_agent_log("@ 特定の人に返すときは、メンションを付けます。" if on else "@ メンションは付けません。")
+
+    def on_agent_emoji_toggled(self):
+        on = bool(self.agent_emoji_var.get())
+        self.db.save_setting("agent.chat_emoji", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.chat_emoji = on
+        self._append_agent_log("😊 チャットで気持ちを絵文字で表します。" if on else "😊 チャットで絵文字は使いません。")
 
     def on_agent_conversation_toggled(self):
         on = bool(self.agent_conversation_var.get())

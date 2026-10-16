@@ -64,6 +64,45 @@ check("出さなかった返事を覚える", wait_until(lambda: a.runtime._pend
 check("次の判断に渡す", wait_until(lambda: any("会話が進んだので出さなかった" in r.messages[0].content for r in a.decide_calls()), 8.0))
 a.close()
 
+print("■ 笑い声・相づちは割り込みにしない（2026-10-16 本人「笑い声を会話の割り込みとして捉えないように」「草」「くさ」も）")
+from agent.hearing import is_backchannel, is_laughter
+check("笑い声を見分ける", all(is_laughter(t) for t in ("あはは", "あっはっは", "www", "（笑）", "草", "くさ", "草生える",
+                                                        "大草原", "わろた", "ウケる", "ふふっ")))
+check("笑いでない言葉は笑いにしない", not any(is_laughter(t) for t in ("くさい", "草むしり", "はい", "ほんと？", "あははそれ面白い")))
+check("相づちも見分ける（割り込みにはしない）", all(is_backchannel(t) for t in ("うんうん", "へー", "なるほど", "そうなんだ", "えー"))
+      and not is_backchannel("ちょっと待って"))
+a = Agent(mode=MODE_ENGAGE, output_mode="voice_room", hearing_enabled=True, ai_name="アイ", play_seconds=2.0,
+          max_utterances_per_minute=10, min_gap_after_speaking=0.0)
+a.mock.script_decide = [{"action": "engage", "reason": "呼ばれた", "target": "たろう", "text": "それでね、昨日おもしろいことがあって",
+                         "emotion": "joy"}]
+a.say("アイ、なにか話して", speaker="たろう")
+a.speaker.speaking.wait(5.0)
+a.mock.script_transcribe = [{"heard": "あはは", "text": "あはは", "confidence": "high", "kind": "laugh"}]
+check("喋っている途中の笑い声では止まらない（話し続ける）", a.runtime.hear(WAV, 1.0) is None and a.speaker.cancelled == []
+      and any("割り込みにしません" in line for line in a.logs))
+a.mock.script_transcribe = [{"heard": "うんうん", "text": "うんうん", "confidence": "high", "kind": "backchannel"}]
+check("相づちでも止まらない", a.runtime.hear(WAV, 1.0) is None and a.speaker.cancelled == [])
+check("話し終える", wait_until(lambda: len(a.speaker.spoken) == 1, 5.0))
+calls = len(a.decide_calls())
+a.mock.script_transcribe = [{"heard": "草", "text": "草", "confidence": "high", "kind": "laugh"}]
+a.runtime.hear(WAV, 1.0)
+check("喋っていないときの笑い声だけには返事をしない（記録だけ）", wait_until(lambda: any("R9" in line for line in a.logs), 5.0)
+      and len(a.decide_calls()) == calls, a.logs[-3:])
+a.close()
+
+print("■ チャットで気持ちを絵文字で表す（2026-10-16 本人「チャットで感情を出す時、絵文字で表現する仕組み」）")
+a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto")
+a.say("アイ、合格したよ", speaker="たろう")
+check("チャットのときは、気持ちに合う絵文字を1〜2個使ってよいと伝える", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+      and "気持ちに合う絵文字を1〜2個" in a.decide_calls()[0].messages[0].content
+      and "絵文字の使い方は「## 絵文字」に従う" in a.decide_calls()[0].system)
+a.close()
+a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto", chat_emoji=False)
+a.say("アイ、合格したよ", speaker="たろう")
+check("OFFなら「絵文字は使わない」", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+      and "絵文字は使わない" in a.decide_calls()[0].messages[0].content)
+a.close()
+
 print("■ 言いかけたことは3分で忘れる")
 a = Agent(mode=MODE_ENGAGE)
 a.runtime._keep_pending("古い話", "テスト")
