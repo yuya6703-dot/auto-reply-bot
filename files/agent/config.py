@@ -92,6 +92,7 @@ class AgentConfig:
     hearing_device: str = ""                      # 音声入力の名前（MME）
     hearing_threshold: float = 0.02               # これより大きい音を「話している」とみる（0〜1）
     hearing_max_minutes_per_hour: float = 10.0    # 1時間に文字にする量の上限（BGM で上限まで使い切らないように）
+    hearing_hints: str = ""                       # 聞き取りのヒント（よく出る名前・言葉。「、」で区切る）。文字にするときに渡す
     # GRAVITYのアカウントごとの設定（2026-10-16 本人「全部やろうか」）。空の項目は共通の設定を使う
     account_profiles: dict = field(default_factory=dict)
     active_account: str = ""                      # 今チャットしている GRAVITY のアカウント（エージェントが入れる）
@@ -113,7 +114,7 @@ class AgentConfig:
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
                 "lookup_enabled", "lookup_wait_text", "digest_enabled", "hearing_enabled", "hearing_device",
-                "hearing_threshold")
+                "hearing_threshold", "hearing_hints")
 
     def profile_value(self, key):
         """今のアカウントの設定（無い・空なら共通の設定）"""
@@ -193,6 +194,7 @@ class AgentConfig:
         config.self_names = config.self_names.strip()[:NAMES_MAX_CHARS]
         config.owner_names = config.owner_names.strip()[:NAMES_MAX_CHARS]
         config.ignored_people = config.ignored_people.strip()[:IGNORED_MAX_CHARS]
+        config.hearing_hints = config.hearing_hints.strip()[:IGNORED_MAX_CHARS]
         config.lookup_wait_text = " ".join(config.lookup_wait_text.split())[:WAIT_TEXT_MAX_CHARS]
         config.account_profiles = load_account_profiles(get_setting)
         return config

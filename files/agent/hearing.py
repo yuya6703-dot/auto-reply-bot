@@ -20,6 +20,7 @@ import threading
 import time
 import wave
 from array import array
+from collections import deque
 
 FRAME_SECONDS = 0.03
 START_FRAMES = 3                 # しきい値を超えるフレームがこれだけ続いたら話し始め（ぷつっという物音で始めない）
@@ -27,6 +28,10 @@ END_SECONDS = 0.8
 MIN_SECONDS = 0.5
 MAX_SECONDS = 15.0
 PRE_ROLL_SECONDS = 0.3           # 話し始めの少し前から入れる（頭が切れないように）
+# 続いている音（BGM など）を下地として覚え、それより十分大きいときだけ声とみる（2026-10-16 本人「人が出している声をしっかり認識する仕組み」）
+FLOOR_RATIO = 2.0                # 下地のこの倍より大きい音を声とみる
+FLOOR_WINDOW_SECONDS = 4.5       # 下地は、直近4.5秒の音の大きさの…
+FLOOR_PERCENTILE = 0.2           # …小さい方から2割のところ（話し声には息つぎの間があるので、下地は声に引っぱられにくい）
 
 
 def frame_level(pcm):
@@ -52,9 +57,12 @@ def to_wav(pcm, rate):
 class VoiceSegmenter:
     """音のフレームを順に受け取り、話し声のかたまりを返す（機材に触らない。テストしやすいように分けた）"""
 
-    def __init__(self, rate, threshold=0.02):
+    def __init__(self, rate, threshold=0.02, adaptive=True):
         self.rate = int(rate)
         self.threshold = threshold
+        self.adaptive = adaptive
+        self.floor = 0.0             # 続いている音の大きさ（BGM など）
+        self._recent_levels = deque(maxlen=max(1, int(FLOOR_WINDOW_SECONDS / FRAME_SECONDS)))
         self.frame_bytes = int(self.rate * FRAME_SECONDS) * 2
         self._pre = []               # 話し始める前の少しの音
         self._voice = []             # 今のかたまり
@@ -64,11 +72,23 @@ class VoiceSegmenter:
         self.active = False
         self.level = 0.0
 
+    @property
+    def effective_threshold(self):
+        """今の「声とみる大きさ」（しきい値と、下地の FLOOR_RATIO 倍の大きい方）"""
+        return max(self.threshold, self.floor * FLOOR_RATIO) if self.adaptive else self.threshold
+
+    def _learn_floor(self, level):
+        self._recent_levels.append(level)
+        ordered = sorted(self._recent_levels)
+        self.floor = ordered[int(len(ordered) * FLOOR_PERCENTILE)]
+
     def feed(self, pcm):
         """フレーム（だいたい30ミリ秒）を足す。かたまりが終わったら [(pcm, 秒)] を返す"""
         level = frame_level(pcm)
         self.level = level
-        loud = level >= self.threshold
+        if self.adaptive:
+            self._learn_floor(level)      # 続いている音（BGM など）を下地として覚える
+        loud = level >= self.effective_threshold
         done = []
         if not self.active:
             self._pre.append(pcm)
@@ -120,10 +140,12 @@ class VoiceListener:
     呼ばれた側が文字にするあいだ、次の音はたまっていく）。level は画面の音量の表示用
     """
 
-    def __init__(self, device_name, threshold, on_segment, on_error=lambda message: None, stream_factory=None):
+    def __init__(self, device_name, threshold, on_segment, on_error=lambda message: None, stream_factory=None,
+                 on_activity=None):
         self.device_name = device_name
         self.threshold = threshold
         self._on_segment = on_segment
+        self._on_activity = on_activity          # (話しているか) -> None。話し始め・終わりで呼ぶ（AI が割り込まないように）
         self._on_error = on_error
         self._stream_factory = stream_factory      # テストでは にせもの
         self._frames = queue.Queue(maxsize=2000)
@@ -203,7 +225,11 @@ class VoiceListener:
             except queue.Empty:
                 continue
             try:
-                for voice, seconds in self.segmenter.feed(pcm):
+                was_active = self.segmenter.active
+                segments = self.segmenter.feed(pcm)
+                if self._on_activity is not None and self.segmenter.active != was_active:
+                    self._on_activity(self.segmenter.active)
+                for voice, seconds in segments:
                     if self._stop.is_set():
                         break
                     self._on_segment(to_wav(voice, self.rate), seconds)

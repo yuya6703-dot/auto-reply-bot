@@ -10147,6 +10147,16 @@ class App(ctk.CTk):
         self.agent_hearing_level = ctk.CTkProgressBar(level_row, width=160)
         self.agent_hearing_level.set(0)
         self.agent_hearing_level.pack(side="left")
+        hint_row = ctk.CTkFrame(section, fg_color="transparent")
+        hint_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(hint_row, text="聞き取りの\nヒント:", width=110, anchor="w", justify="left").pack(side="left")
+        self.agent_hearing_hints_entry = ctk.CTkEntry(hint_row, width=320,
+                                                      placeholder_text="よく出る名前・言葉を「、」で区切って（聞き間違いを直すのに使う）")
+        self.agent_hearing_hints_entry.pack(side="left", padx=(0, 6))
+        self.agent_hearing_hints_entry.bind("<Button-3>", self._show_entry_context_menu)
+        if config.hearing_hints:
+            self.agent_hearing_hints_entry.insert(0, config.hearing_hints)
+        ctk.CTkButton(hint_row, text="💾", width=40, command=self.save_agent_hearing_hints).pack(side="left")
         self.agent_hearing_status = ctk.CTkLabel(section, text="止まっています", anchor="w", text_color="gray70")
         self.agent_hearing_status.pack(anchor="w", padx=12, pady=(0, 10))
         self.refresh_agent_hearing_devices()
@@ -10192,6 +10202,17 @@ class App(ctk.CTk):
             self._stop_voice_listener()
             self._append_agent_log("👂 声を聞くのをやめました。")
 
+    def save_agent_hearing_hints(self):
+        """聞き取りのヒント（文字にするときに渡す名前・言葉）"""
+        hints = self.agent_hearing_hints_entry.get().strip()
+        if len(hints) > AGENT_IGNORED_MAX_CHARS:
+            messagebox.showwarning("声を聞く", f"聞き取りのヒントは、全部で{AGENT_IGNORED_MAX_CHARS}文字までにしてください。")
+            return
+        self.db.save_setting("agent.hearing_hints", hints)
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.hearing_hints = hints
+        self._append_agent_log(f"👂 聞き取りのヒントを保存しました（{hints or 'なし'}）。")
+
     def on_agent_hearing_device_selected(self, _value=None):
         device = self._selected_hearing_device()
         self.db.save_setting("agent.hearing_device", device)
@@ -10218,7 +10239,8 @@ class App(ctk.CTk):
             return
         listener = self._voice_listener_factory(
             device, float(self.agent_hearing_threshold.get()), self._on_voice_segment,
-            on_error=lambda message: write_error_log(f"声を聞くところでエラー: {message}"))
+            on_error=lambda message: write_error_log(f"声を聞くところでエラー: {message}"),
+            on_activity=runtime.on_voice_activity)       # 話している間は、AI が喋り始めない
         ok, why = listener.start()
         if not ok:
             self._append_agent_log(f"⚠️ {why}")
@@ -10232,6 +10254,8 @@ class App(ctk.CTk):
         listener, self._voice_listener = self._voice_listener, None
         if listener is not None:
             listener.stop()
+            if self.agent_runtime is not None:
+                self.agent_runtime.on_voice_activity(False)     # 聞くのをやめたら「話している」も終わり
         self.agent_hearing_level.set(0)
         self.agent_hearing_status.configure(text="止まっています")
 

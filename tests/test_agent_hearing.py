@@ -48,9 +48,32 @@ check("話し始めの少し前から入れる（頭が切れない）・終わ�
 check("かたまりの中身は PCM", len(pcm) == int(round(seconds / FRAME_SECONDS)) * N * 2)
 check("物音（0.15秒）は捨てる", feed_all(VoiceSegmenter(RATE, 0.05), tone(0, 20) + tone(0.5, 5) + tone(0, 40)) == [])
 check("しきい値より小さい音は声にしない", feed_all(VoiceSegmenter(RATE, 0.3), tone(0, 10) + tone(0.1, 60) + tone(0, 40)) == [])
-long_done = feed_all(VoiceSegmenter(RATE, 0.05), tone(0.5, int(20 / FRAME_SECONDS)) + tone(0, 40))
-check("長く続く音（BGMなど）は15秒で切る", len(long_done) == 2 and long_done[0][1] <= MAX_SECONDS + 0.01,
+long_done = feed_all(VoiceSegmenter(RATE, 0.05, adaptive=False), tone(0.5, int(20 / FRAME_SECONDS)) + tone(0, 40))
+check("長く続く声は15秒で切る（1回に送る量を増やしすぎない）", len(long_done) == 2 and long_done[0][1] <= MAX_SECONDS + 0.01,
       [d[1] for d in long_done])
+
+print("■ 続いている音（BGM）を下地として覚える（2026-10-16 本人「人が出している声をしっかり認識する仕組み」）")
+seg = VoiceSegmenter(RATE, 0.02)
+bgm = tone(0.1, int(6 / FRAME_SECONDS))
+check("ずっと流れている BGM は声にしない", feed_all(seg, bgm) == [] and not seg.active, seg.floor)
+check("下地を覚えて、声とみる大きさが上がる", seg.effective_threshold >= 0.13, (seg.floor, seg.effective_threshold))
+
+
+def speech_over_bgm(seconds):
+    """BGM の上で話す（話し声には息つぎの間がある）"""
+    frames = []
+    for i in range(int(seconds / FRAME_SECONDS)):
+        frames += tone(0.5 if (i // 10) % 3 != 2 else 0.1)
+    return frames
+
+
+done = feed_all(seg, speech_over_bgm(2.0) + bgm[:60])
+check("BGM の上で話した声は拾う", len(done) == 1 and 1.5 <= done[0][1] <= 3.5, [d[1] for d in done])
+check("話し終わったら、また BGM は声にしない", feed_all(seg, bgm) == [])
+quiet = VoiceSegmenter(RATE, 0.02)
+feed_all(quiet, bgm)
+feed_all(quiet, tone(0, 200))
+check("BGM が止まって静かになったら、下地も下がる（小さな声も拾える）", quiet.effective_threshold < 0.03, quiet.effective_threshold)
 w = wave.open(io.BytesIO(to_wav(pcm, RATE)))
 check("AI へ送る形（WAV・モノラル・16bit）", w.getnchannels() == 1 and w.getsampwidth() == 2 and w.getframerate() == RATE)
 
@@ -72,12 +95,15 @@ def factory(push):
     return FakeStream(), RATE
 
 
-listener = VoiceListener("テストの入力", 0.05, lambda wav, s: got.append((wav[:4], s)), stream_factory=factory)
+activity = []
+listener = VoiceListener("テストの入力", 0.05, lambda wav, s: got.append((wav[:4], s)), stream_factory=factory,
+                         on_activity=activity.append)
 ok, why = listener.start()
 check("始められる", ok and listener.running, why)
 for f in tone(0, 10) + tone(0.5, 40) + tone(0, 40):
     holder["push"](f)
 check("かたまりができたら WAV で渡す", wait_until(lambda: len(got) == 1, 3.0) and got[0][0] == b"RIFF", got)
+check("話し始め・終わりを知らせる（AI が割り込まないように）", activity == [True, False], activity)
 check("音量を画面に出せる", 0.0 <= listener.level <= 1.0)
 listener.stop()
 check("止められる（音声入力を閉じる）", not listener.running and holder.get("stopped"))
@@ -131,6 +157,37 @@ a.close()
 
 a = Agent(mode=MODE_SILENT, hearing_enabled=False)
 check("OFFなら文字にしない", a.runtime.hear(wav, 2.0) is None and not a.mock.requests)
+a.close()
+
+print("■ 聞き間違いを会話の流れで直す（2026-10-16 本人「文字に起こした時に微妙におかしかった時にAIが補正する」）")
+a = Agent(mode=MODE_ENGAGE, hearing_enabled=True, ai_name="アイ", owner_names="オーナー", hearing_hints="ポテチ、深夜ラジオ",
+          min_gap_after_speaking=0.0, max_utterances_per_minute=10)
+a.runtime.submit(make_event("昨日の深夜ラジオ聞いた？", speaker="はなこ", source=SOURCE_GRAVITY))
+wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+a.mock.script_transcribe = [{"heard": "愛、新屋ラジオ聞いた？", "text": "アイ、深夜ラジオ聞いた？", "confidence": "high"}]
+check("直したほうを使う", a.runtime.hear(wav, 3.0) == "アイ、深夜ラジオ聞いた？")
+req = [r for r in a.mock.requests if r.purpose == "transcribe"][-1]
+content = req.messages[0].content
+check("出てきそうな名前・言葉を渡す（呼ばれ方・オーナー・ヒント・ルームの人）",
+      all(w in content for w in ("アイ", "オーナー", "ポテチ", "深夜ラジオ", "はなこ")), content[:300])
+check("直近の会話も渡す（区切り記号で囲む）", "<<<直近の会話ここから>>>" in content and "はなこ: 昨日の深夜ラジオ聞いた？" in content)
+check("聞こえたままと直したもの・確かさを返させる", all(k in req.response_schema["properties"] for k in ("heard", "text", "confidence"))
+      and "自信が無いところは直さない" in req.system)
+check("直したことを判断のログに（直す前も）", any("「アイ、深夜ラジオ聞いた？」（直す前:「愛、新屋ラジオ聞いた？」）" in line for line in a.logs),
+      a.logs[-2:])
+a.mock.script_transcribe = [{"heard": "もにょもにょ", "text": "もにょもにょ", "confidence": "low"}]
+a.runtime.hear(wav, 2.0)
+check("確かさが低ければ［聞き取りが不確か］の目印（推測で進めず聞き返してよい）", wait_until(
+    lambda: any("声（だれか）: もにょもにょ ［聞き取りが不確か］" in r.messages[0].content for r in a.decide_calls()), 5.0)
+      and "推測で話を進めず" in a.decide_calls()[-1].system)
+a.close()
+
+print("■ 話している間は割り込まない（BGM で止まり続けない）")
+a = Agent(mode=MODE_ENGAGE)
+a.runtime.on_voice_activity(True)
+check("話し始めたら「話している」", a.runtime._snapshot(time.time()).listening)
+a.runtime._listening_since -= 21
+check("20秒より長く続くのは BGM などとみて、話していないことにする", not a.runtime._snapshot(time.time()).listening)
 a.close()
 
 finish()

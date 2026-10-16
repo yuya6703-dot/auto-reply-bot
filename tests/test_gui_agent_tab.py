@@ -142,6 +142,7 @@ class Harness(ctk.CTk):
     _selected_hearing_device = A.App._selected_hearing_device
     on_agent_hearing_toggled = A.App.on_agent_hearing_toggled
     on_agent_hearing_device_selected = A.App.on_agent_hearing_device_selected
+    save_agent_hearing_hints = A.App.save_agent_hearing_hints
     on_agent_hearing_threshold_changed = A.App.on_agent_hearing_threshold_changed
     _start_voice_listener = A.App._start_voice_listener
     _stop_voice_listener = A.App._stop_voice_listener
@@ -744,8 +745,9 @@ print("■ 声を聞く（既定OFF。2026-10-16）")
 class FakeListener:
     made = []
 
-    def __init__(self, device, threshold, on_segment, on_error=None):
+    def __init__(self, device, threshold, on_segment, on_error=None, on_activity=None):
         self.device, self.threshold, self.on_segment = device, threshold, on_segment
+        self.on_activity = on_activity
         self.level, self.started, self.stopped = 0.05, False, False
         FakeListener.made.append(self)
 
@@ -782,6 +784,11 @@ check("しきい値を変えると、聞いている途中でも効く・保存�
       and db.get_setting("agent.hearing_threshold") == "0.08")
 h._poll_voice_level()
 check("今の音量を出す", abs(h.agent_hearing_level.get() - 0.25) < 0.01, h.agent_hearing_level.get())
+check("話し始め・終わりを AI に知らせる（話している間は喋り始めない）", listener.on_activity == h.agent_runtime.on_voice_activity)
+h.agent_hearing_hints_entry.insert(0, "ポテチ、深夜ラジオ")
+h.save_agent_hearing_hints()
+check("聞き取りのヒントを保存する（動いているエージェントにもすぐ効く）", db.get_setting("agent.hearing_hints") == "ポテチ、深夜ラジオ"
+      and h.agent_runtime.config.hearing_hints == "ポテチ、深夜ラジオ")
 h.agent_hearing_device_var.set("テストのマイク")
 h.on_agent_hearing_device_selected()
 check("入力を変えると聞き直す", listener.stopped and FakeListener.made[-1].device == "テストのマイク"
