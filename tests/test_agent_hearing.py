@@ -182,6 +182,40 @@ check("確かさが低ければ［聞き取りが不確か］の目印（推測�
       and "推測で話を進めず" in a.decide_calls()[-1].system)
 a.close()
 
+print("■ オーナーのマイク（声でもオーナーの合図が効く。2026-10-16）")
+a = Agent(mode=MODE_ENGAGE, hearing_enabled=True, ai_name="アイ", owner_names="オーナー")
+a.mock.script_transcribe = [{"heard": "アイ、10分静かにして", "text": "アイ、10分静かにして", "confidence": "high"}]
+check("オーナーのマイクの声は、オーナーの声として受け付ける", a.runtime.hear(wav, 2.0, speaker="オーナー") == "アイ、10分静かにして")
+check("声でもオーナーの合図が効く（静かにする）", wait_until(lambda: a.runtime.muted_until is not None, 5.0), a.logs[-3:])
+a.mock.script_transcribe = [{"heard": "アイ、十分静かにして", "text": "アイ、十分静かにして", "confidence": "high"}]
+check("同じ声がルームの音（iPad）からも聞こえたら、そちらは使わない（2度聞かない）", a.runtime.hear(wav, 2.0) is None
+      and any("オーナーのマイクで聞いた声と同じ" in line for line in a.logs))
+a.mock.script_transcribe = [{"heard": "アイ、静かにして", "text": "アイ、静かにして", "confidence": "high"}]
+a.runtime.set_muted(0)
+check("ルームの音（だれか）の「静かにして」は合図にしない（誰か分からない）", a.runtime.hear(wav, 2.0) is None
+      or a.runtime.muted_until is None)
+time.sleep(0.5)
+check("（合図にならない）", a.runtime.muted_until is None)
+a.close()
+
+print("■ 会話の回数の上限と、裏の仕事（文字起こしなど）の上限は別に数える")
+a = Agent(mode=MODE_ENGAGE, hearing_enabled=True, daily_call_limit=1, background_daily_call_limit=2)
+a.say("こんにちは", speaker="たろう")
+wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+a.say("聞こえる？", speaker="はなこ")
+check("会話の分は1日の上限で止まる（R8）", wait_until(lambda: any("R8" in line for line in a.logs), 5.0))
+check("それでも文字起こしはできる（裏の仕事は別に数える）", a.runtime.hear(wav, 2.0) == "（模擬）聞こえた声")
+a.runtime.hear(wav, 2.0)
+check("裏の仕事にも1日の上限がある", a.runtime.hear(wav, 2.0) is None
+      and len([r for r in a.mock.requests if r.purpose == "transcribe"]) == 2)
+a.close()
+b = Agent(mode=MODE_ENGAGE, hearing_enabled=True, background_daily_call_limit=1)
+b.runtime.hear(wav, 2.0)
+b.runtime.hear(wav, 2.0)
+b.say("こんにちは", speaker="たろう")
+check("文字起こしで裏の上限に届いても、会話の返事はできる", wait_until(lambda: len(b.speaker.spoken) >= 1, 5.0))
+b.close()
+
 print("■ 話している間は割り込まない（BGM で止まり続けない）")
 a = Agent(mode=MODE_ENGAGE)
 a.runtime.on_voice_activity(True)

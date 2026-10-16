@@ -130,11 +130,15 @@ class Harness(ctk.CTk):
     on_agent_lookup_toggled = A.App.on_agent_lookup_toggled
     unmute_agent = A.App.unmute_agent
     on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
+    on_agent_filler_toggled = A.App.on_agent_filler_toggled
     on_agent_mention_toggled = A.App.on_agent_mention_toggled
     on_agent_emoji_toggled = A.App.on_agent_emoji_toggled
     _agent_voice_style_map = A.App._agent_voice_style_map
     _agent_voice_styles = A.App._agent_voice_styles
     _agent_voice_profile = A.App._agent_voice_profile
+    PERSONA_VOICE_DEFAULT = A.App.PERSONA_VOICE_DEFAULT
+    _persona_voice_choices = A.App._persona_voice_choices
+    _persona_voice_labels = A.App._persona_voice_labels
 
     def get_all_speakers(self):
         return {"テストの声": {"ノーマル": "voicevox:3", "あまあま": "voicevox:1", "ツンツン": "voicevox:7"},
@@ -150,6 +154,9 @@ class Harness(ctk.CTk):
     on_agent_hearing_toggled = A.App.on_agent_hearing_toggled
     on_agent_hearing_device_selected = A.App.on_agent_hearing_device_selected
     save_agent_hearing_hints = A.App.save_agent_hearing_hints
+    NO_OWNER_MIC = A.App.NO_OWNER_MIC
+    on_agent_owner_mic_selected = A.App.on_agent_owner_mic_selected
+    _start_owner_mic = A.App._start_owner_mic
     on_agent_hearing_threshold_changed = A.App.on_agent_hearing_threshold_changed
     _start_voice_listener = A.App._start_voice_listener
     _stop_voice_listener = A.App._stop_voice_listener
@@ -671,6 +678,15 @@ check("保存すると、このアカウント用の人格になる（共通は�
       h.agent_runtime.account_persona("複製の名前").summary == "複製のアカウントだけの人格"
       and h.agent_runtime.common_persona().summary != "複製のアカウントだけの人格"
       and h.agent_profile_persona_label.cget("text") == "人格: このアカウント用の人格")
+check("人格の声は、最初は読み上げタブの声（共通）", h.agent_persona_voice_var.get() == "読み上げタブの声（共通）"
+      and "べつの声（ノーマル）" in h.agent_persona_voice_menu.cget("values"))
+h.agent_persona_voice_var.set("べつの声（ノーマル）")
+h.save_agent_persona()
+check("このアカウント用の人格で、声も選べる（アカウントごとに声を変えられる）",
+      h.agent_runtime.account_persona("複製の名前").voice == "voicevox:2"
+      and h.agent_runtime.common_persona().voice is None)
+h.edit_agent_account_persona()
+check("また開くと、選んだ声が出る", h.agent_persona_voice_var.get() == "べつの声（ノーマル）")
 answers.append(True)
 h.clear_agent_account_persona()
 check("共通の人格に戻せる（欄も共通の編集に戻る）", h.agent_runtime.account_persona("複製の名前") is None
@@ -736,6 +752,12 @@ check("OFFにできる（動いているエージェントにもすぐ効く）"
 h.agent_conversation_var.set(True)
 h.on_agent_conversation_toggled()
 check("ONに戻せる", h.agent_runtime.config.conversation_enabled is True)
+check("考え中のつなぎ言葉は既定ON", h.agent_filler_var.get() is True)
+h.agent_filler_var.set(False)
+h.on_agent_filler_toggled()
+check("つなぎ言葉をOFFにできる", db.get_setting("agent.thinking_fillers") == "0" and h.agent_runtime.config.thinking_fillers is False)
+h.agent_filler_var.set(True)
+h.on_agent_filler_toggled()
 check("チャットのメンションは既定ON", h.agent_mention_var.get() is True)
 h.agent_mention_var.set(False)
 h.on_agent_mention_toggled()
@@ -845,8 +867,25 @@ h.agent_hearing_device_var.set("テストのマイク")
 h.on_agent_hearing_device_selected()
 check("入力を変えると聞き直す", listener.stopped and FakeListener.made[-1].device == "テストのマイク"
       and db.get_setting("agent.hearing_device") == "テストのマイク")
+check("オーナーのマイクは最初は使わない", h.agent_owner_mic_var.get() == "（使わない）"
+      and h.agent_owner_mic_menu.cget("values") == ["（使わない）", "テストの入力（ライン）", "テストのマイク"])
+h.agent_runtime.config.owner_names = "伏せ字9"
+h.agent_owner_mic_var.set("テストの入力（ライン）")
+before = len(FakeListener.made)
+h.on_agent_owner_mic_selected()
+mics = FakeListener.made[before:]
+check("オーナーのマイクを選ぶと、ルームの音とは別に聞き始める", db.get_setting("agent.hearing_owner_device") == "テストの入力（ライン）"
+      and len(mics) == 2 and mics[-1].device == "テストの入力（ライン）" and h._owner_mic_listener is mics[-1], [m.device for m in mics])
+got = []
+h.agent_runtime.hear = lambda wav, seconds, speaker=None: got.append(speaker) or "x"
+mics[-1].on_segment(b"RIFF", 1.0)
+del h.agent_runtime.hear
+check("オーナーのマイクの声は、オーナーの名前で渡す", got == ["伏せ字9"], got)
 h.stop_agent()
-check("AIを止めたら聞くのもやめる", FakeListener.made[-1].stopped and h._voice_listener is None)
+check("AIを止めたら聞くのもやめる（オーナーのマイクも）", FakeListener.made[-1].stopped and h._voice_listener is None
+      and h._owner_mic_listener is None)
+h.agent_owner_mic_var.set("（使わない）")
+h.on_agent_owner_mic_selected()
 h.start_agent()
 check("また始めたら聞き始める", FakeListener.made[-1].started and not FakeListener.made[-1].stopped)
 h.agent_hearing_var.set(False)

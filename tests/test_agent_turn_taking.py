@@ -133,6 +133,34 @@ a.runtime._thoughts = [(t - 1300, x) for t, x in a.runtime._thoughts]
 check("20分で忘れる", a.runtime._thought_lines(time.time()) == [])
 a.close()
 
+print("■ 考え中のつなぎ言葉（2026-10-16 本人「考えてる最中にあーとか、えーととかをいうとか、うーんとかもね」）")
+FILLERS = ("えーと", "うーん", "あー", "んーと")
+a = Agent(mode=MODE_ENGAGE, output_mode="voice_room", ai_name="アイ", filler_after_seconds=0.3, hearing_enabled=True)
+a.mock.delay_seconds = 1.0
+a.say("アイ、ちょっと難しい質問なんだけど", speaker="たろう")
+check("返事を作るのに時間がかかったら、先に「えーと」などを言う", wait_until(lambda: len(a.speaker.spoken) >= 2, 6.0)
+      and a.speaker.spoken[0] in FILLERS and a.speaker.spoken[1] not in FILLERS, a.speaker.spoken)
+check("判断のログに 🤔", any("🤔 考え中:" in line for line in a.logs))
+a.mock.script_transcribe = [{"heard": a.speaker.spoken[0], "text": a.speaker.spoken[0], "confidence": "high"}]
+check("聞こえた自分のつなぎ言葉は、自分の声として使わない", a.runtime.hear(WAV, 1.0) is None)
+a.close()
+a = Agent(mode=MODE_ENGAGE, output_mode="voice_room", ai_name="アイ", filler_after_seconds=0.3)
+a.say("アイ、こんにちは", speaker="たろう")
+check("すぐ返せるときは言わない", wait_until(lambda: len(a.speaker.spoken) >= 1, 5.0)
+      and a.speaker.spoken[0] not in FILLERS and len(a.speaker.spoken) == 1)
+a.close()
+a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", filler_after_seconds=0.3, chat_send_mode="auto")
+a.mock.delay_seconds = 1.0
+a.say("アイ、ちょっと難しい質問", speaker="たろう")
+check("チャットでは言わない", wait_until(lambda: len(a.chat.posted) >= 1, 6.0) and a.speaker.spoken == []
+      and not any(p in FILLERS for p in a.chat.posted))
+a.close()
+a = Agent(mode=MODE_ENGAGE, output_mode="voice_room", ai_name="アイ", filler_after_seconds=0.3, thinking_fillers=False)
+a.mock.delay_seconds = 1.0
+a.say("アイ、ちょっと難しい質問", speaker="たろう")
+check("OFFなら言わない", wait_until(lambda: len(a.speaker.spoken) >= 1, 6.0) and a.speaker.spoken[0] not in FILLERS)
+a.close()
+
 print("■ 言いかけたことは3分で忘れる")
 a = Agent(mode=MODE_ENGAGE)
 a.runtime._keep_pending("古い話", "テスト")

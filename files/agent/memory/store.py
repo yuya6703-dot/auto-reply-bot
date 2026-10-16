@@ -458,12 +458,18 @@ class AgentStore:
             row = self._conn.execute("SELECT json FROM persona WHERE persona_id = ?", (persona_id,)).fetchone()
         return Persona.from_json(row[0]) if row else None
 
-    def usage_since(self, since):
-        """since 以降に AI を呼んだ回数と、費用の見積もりの合計"""
+    def usage_since(self, since, purposes=None, exclude=None):
+        """since 以降に AI を呼んだ回数と、費用の見積もりの合計。purposes / exclude で用途を絞る"""
+        sql = "SELECT COUNT(*), COALESCE(SUM(estimated_cost), 0) FROM usage_records WHERE at >= ?"
+        args = [since]
+        if purposes:
+            sql += f" AND purpose IN ({','.join('?' * len(purposes))})"
+            args += list(purposes)
+        if exclude:
+            sql += f" AND purpose NOT IN ({','.join('?' * len(exclude))})"
+            args += list(exclude)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(estimated_cost), 0) FROM usage_records WHERE at >= ?",
-                (since,)).fetchone()
+            row = self._conn.execute(sql, args).fetchone()
         return int(row[0]), float(row[1])
 
     def recent_events(self, since):

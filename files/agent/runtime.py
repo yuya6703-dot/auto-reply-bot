@@ -11,6 +11,7 @@
 """
 import difflib
 import os
+import random
 import threading
 import time
 import traceback
@@ -24,7 +25,8 @@ from .cancel import CancelToken
 from .config import OUTPUT_CHAT, OUTPUT_VOICE_ROOM, split_names
 from .context import (ConversationWindow, build_combined_request, build_decide_request, build_generate_request,
                       max_chars_for, rules_note)
-from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HOLD, OBSERVE, SILENT, USE_TOOL,
+from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HOLD, OBSERVE, SILENT,
+                       SPEAKING_ACTIONS, USE_TOOL,
                        Decision, DecisionFailed, call_llm, request_decision)
 from .gate import HOLD as GATE_HOLD
 from .gate import OBSERVE as GATE_OBSERVE
@@ -109,6 +111,10 @@ class AgentDeps:
     owner_profile: object = None
 
 
+# 裏の仕事（会話の判断・文作りとは別に、1日の回数の上限を数える）
+BACKGROUND_PURPOSES = (PURPOSE_SUMMARIZE, PURPOSE_TRANSCRIBE, PURPOSE_DIGEST, PURPOSE_PROFILE)
+
+
 class AgentRuntime:
     def __init__(self, deps, config):
         self.deps = deps
@@ -163,10 +169,14 @@ class AgentRuntime:
         self._partners = {}                # 話している相手 {名前: この時刻まで}（返事をした相手。続けて話せるように）
         self._digest_request = None        # 「今のまとめを作る」と頼まれた日（画面から）
         self._heard = []                   # 文字にした声 [(時刻, 秒)]（1時間の上限）
+        self._owner_heard = []             # オーナーのマイクで聞いた文 [(時刻, 文)]（ルームの音で同じ声を2度聞かない）
         self._own_voice = []               # ルームへ喋った時間 [(始め, 終わり)]（聞こえた声が自分の声かを見分ける）
         self._current_text = None          # 今喋っている文（割り込まれたら「言いかけたこと」にする）
         self._pending_thought = None       # 言いかけて止めたこと {"text", "at", "why"}（相手に譲った・会話が進んで出さなかった）
         self._thoughts = []                # 心の中 [(時刻, 思ったこと)]（次の判断に渡す。考えの続き）
+        self._filler_speaking = False      # 考え中のつなぎ言葉を言っている間
+        self._recent_fillers = []          # 言ったつなぎ言葉 [(時刻, 言葉)]（聞こえても自分の声とわかるように）
+        self._last_filler = ""
         self._hearing_capped = False       # 上限のことを言ったか（何度も言わない）
         self._digest_checked_at = 0.0      # 前の日のまとめが要るかを見た時刻
         self._owner_done = set()           # 扱ったオーナーの合図（同じ発言を2度扱わない）
@@ -294,7 +304,7 @@ class AgentRuntime:
         """
         with self._lock:
             # ⚠️ 自分がルームへ喋っている間の音は、自分の声（自分の声で「誰かが話している」にしない）
-            if speaking and self._speaking and self.config.output_mode == OUTPUT_VOICE_ROOM:
+            if speaking and (self._speaking or self._filler_speaking) and self.config.output_mode == OUTPUT_VOICE_ROOM:
                 return
             if speaking and not self._listening:
                 self._listening_since = self._clock()
@@ -527,7 +537,8 @@ class AgentRuntime:
         self.window.add_action(decision.action)
 
     def _snapshot(self, now):
-        calls, cost_today = self.usage.today()
+        calls, _cost = self.usage.today(exclude=BACKGROUND_PURPOSES)      # 回数は会話の分だけ（裏の仕事は別に数える）
+        _all_calls, cost_today = self.usage.today()                        # 費用は全部まとめて
         _calls_month, cost_month = self.usage.this_month()
         with self._lock:
             return GateSnapshot(now=now, degraded=self._degraded, listening=self._heard_talking(now),
@@ -546,6 +557,13 @@ class AgentRuntime:
         with self._lock:
             self._partners = {name: until for name, until in self._partners.items() if until > now}
             return tuple(self._partners)
+
+    def _background_over_limit(self, snap):
+        """裏の仕事（文字起こし・整理・まとめ・自己分析）をしてはいけないか（裏の仕事の回数の上限か、費用の上限）"""
+        c = self.config
+        background_calls, _cost = self.usage.today(purposes=BACKGROUND_PURPOSES)
+        return (background_calls >= c.background_daily_call_limit or snap.cost_today >= c.daily_cost_limit_usd
+                or snap.cost_month >= c.monthly_cost_limit_usd)
 
     def _hold(self, events, wait_seconds):
         with self._lock:
@@ -627,6 +645,7 @@ class AgentRuntime:
             except Exception:
                 self.config.self_voice = ""
         extra = {"voice_styles": voice_styles} if combined else {}
+        filler = self._start_filler(turn_id) if result.strong else None
         request = builder(events, self.window, self.persona, self.config, note, now,
                           timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines, **extra)
         try:
@@ -638,11 +657,13 @@ class AgentRuntime:
                 decision = request_decision(self._provider, request, turn_id, cancel,
                                             self._usage_recorder(turn_id, PURPOSE_DECIDE))
         except DecisionFailed as e:
+            self._stop_filler(filler)
             reason = "AIが答えなかった" if e.kind == FAIL_REFUSED else "AIの返事の形が合わなかった"
             self._record(Decision(SILENT, reason, DECIDED_BY_LLM, turn_id))
             self.log.write(f"🤫 沈黙（{reason}）")
             return
         except LLMError as e:
+            self._stop_filler(filler)
             self._on_llm_failure(e, turn_id)
             return
         self._failures = 0
@@ -653,6 +674,8 @@ class AgentRuntime:
 
         # --- 調べる（頼まれたとき。「待って」の一言を出してから調べ、調べた結果で答える） ---
         lookup = None
+        if decision.action not in SPEAKING_ACTIONS:
+            self._stop_filler(filler)          # 喋らない・調べる（待っての一言がある）なら、つなぎ言葉はいらない
         if decision.action == USE_TOOL:
             lookup = self._look_up(decision, turn_id, cancel)
             if lookup is None:
@@ -701,6 +724,7 @@ class AgentRuntime:
             if cancel.cancelled:
                 return
 
+        self._stop_filler(filler)
         # --- 出す前の確認 ---
         # ⚠️ 調べた答えは、調べている間に会話が進んでも出す（頼まれたことの答えなので古くならない）
         check = self._precheck(utterance, decision, fresh_seq, allow_stale=lookup is not None, strong=result.strong)
@@ -994,9 +1018,7 @@ class AgentRuntime:
         if self._degraded or self._emergency or self._provider is None or not self.memory.due(quiet):
             return
         snap = self._snapshot(now)
-        c = self.config
-        if (snap.calls_today >= c.daily_call_limit or snap.cost_today >= c.daily_cost_limit_usd
-                or snap.cost_month >= c.monthly_cost_limit_usd):
+        if self._background_over_limit(snap):
             self.memory.postpone()
             return
         speakers = [e.speaker for e in self.window.recent_events()
@@ -1044,10 +1066,11 @@ class AgentRuntime:
     TRANSCRIBE_CONTEXT_LINES = 8
     ECHO_SECONDS = 90
 
-    def hear(self, wav, seconds):
+    def hear(self, wav, seconds, speaker=None):
         """
         声のかたまりを AI の提供元で文字にして、声の出来事として受け付ける（聞くスレッドから呼ぶ）。
-        文字にした文を返す（ONでない・上限・空・読み上げの聞き返しなら None）。⚠️ 音は保存しない
+        文字にした文を返す（ONでない・上限・空・読み上げの聞き返しなら None）。⚠️ 音は保存しない。
+        speaker は誰の声か分かっているとき（オーナーのマイク）。分からなければ None（ルームの音＝だれか）
         """
         c = self.config
         if not c.hearing_enabled or self._provider is None or not self._running or self._emergency or self._degraded:
@@ -1065,8 +1088,7 @@ class AgentRuntime:
                                "（BGMを拾っているなら、しきい値を上げるか、iPadの音量を下げてください）。")
             return None
         snap = self._snapshot(now)
-        if (snap.calls_today >= c.daily_call_limit or snap.cost_today >= c.daily_cost_limit_usd
-                or snap.cost_month >= c.monthly_cost_limit_usd):
+        if self._background_over_limit(snap):
             return None
         request = LLMRequest(purpose=PURPOSE_TRANSCRIBE, system=self.TRANSCRIBE_SYSTEM,
                              messages=[LLMMessage("user", self._transcribe_context(now),
@@ -1090,6 +1112,12 @@ class AgentRuntime:
         if self._is_echo(text, now):
             self.log.write(f"🔁 聞こえた声は、チャットの読み上げの聞き返しなので使いません:「{text}」")
             return None
+        if speaker:
+            with self._lock:
+                self._owner_heard = [(t, x) for t, x in self._owner_heard if now - t < 30] + [(now, text)]
+        elif self._heard_from_owner_mic(text, now):
+            self.log.write(f"🔁 オーナーのマイクで聞いた声と同じなので、ルームの音のほうは使いません:「{text}」")
+            return None
         kind = str(data.get("kind") or "").strip().lower()
         laughter = is_laughter(text) or kind == "laugh"
         backchannel = laughter or is_backchannel(text) or kind == "backchannel"
@@ -1100,7 +1128,7 @@ class AgentRuntime:
             self._yield_turn()             # 自分が喋っている途中に、ほかの人が話した → 譲る
         event_id = new_event_id()
         event = AgentEvent(event_id=event_id, kind=KIND_VOICE_UTTERANCE, source=SOURCE_VOICE, key=f"voice:{event_id}",
-                           speaker=None, text=text, observed_at=now,
+                           speaker=speaker or None, text=text, observed_at=now,
                            meta={"account": self._account, "account_named": self.config.active_account_named,
                                  "seconds": seconds, "heard": heard, "unsure": unsure,
                                  "backchannel": laughter})      # 笑い声だけなら返事しない（相づちは AI が決める）
@@ -1157,6 +1185,7 @@ class AgentRuntime:
             return True
         with self._lock:
             mine = [self._current_text] if self._current_text else []
+            mine += [w for t, w in self._recent_fillers if self._clock() - t < 30]
         mine += [u.text for u in self.window.own_utterances()[-3:]]
         for said in (norm(m) for m in mine if m):
             if heard in said or difflib.SequenceMatcher(None, heard, said).ratio() >= 0.7:
@@ -1174,6 +1203,45 @@ class AgentRuntime:
             self._listening, self._listening_since = True, self._clock()
         self._keep_pending(text, "話している途中で、相手に譲った")
         self.log.write("✋ ほかの人が話し始めたので、話を譲りました（言いかけたことは、相手が話し終えたら続けるか考えます）。")
+
+    # --- 考え中のつなぎ言葉（2026-10-16 本人「考えてる最中にあーとか、えーととかをいうとか、うーんとかもね」） ---
+    def _start_filler(self, turn_id):
+        """呼ばれて返事を作るのに時間がかかったら、先に「えーと」などを言う（声で答えるときだけ）。止めるための札を返す"""
+        c = self.config
+        if not c.thinking_fillers or c.output_mode == OUTPUT_CHAT or self.deps.speak is None:
+            return None
+        timer = threading.Timer(c.filler_after_seconds, self._say_filler, (turn_id,))
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    @staticmethod
+    def _stop_filler(timer):
+        if timer is not None:
+            timer.cancel()
+
+    def _say_filler(self, turn_id):
+        with self._lock:
+            thinking = (self._state in (STATE_DECIDING, STATE_GENERATING) and not self._speaking
+                        and not self._emergency and not self._filler_speaking)
+            if not thinking:
+                return
+            self._filler_speaking = True
+        words = [w for w in split_names(self.config.filler_words) if w != self._last_filler] or ["えーと"]
+        word = random.choice(words)
+        self._last_filler = word
+        with self._lock:
+            self._recent_fillers = [(t, w) for t, w in self._recent_fillers if self._clock() - t < 60] + [(self._clock(), word)]
+        self.log.write(f"🤔 考え中:「{word}」")
+        started = self._clock()
+        try:
+            self.deps.speak(Utterance(text=word, emotion="neutral", turn_id=turn_id, speed=1.0), CancelToken())
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                self._filler_speaking = False
+            self._note_own_voice(started, self._clock())
 
     # --- 心の中（2026-10-16 本人「考えながら話をする仕組み作っておきたい。いわゆる心の中ってやつやな」） ---
     THOUGHT_KEEP_SECONDS = 1200.0
@@ -1206,6 +1274,15 @@ class AgentRuntime:
         if not pending:
             return []
         return [f"「{pending['text']}」（{pending['why']}。{max(0, int(now - pending['at']))}秒前）"]
+
+    def _heard_from_owner_mic(self, text, now):
+        """ルームの音で聞こえた声が、少し前にオーナーのマイクで聞いた文とほとんど同じか（同じ声を2度聞かない）"""
+        norm = lambda t: "".join(ch for ch in unicodedata.normalize("NFKC", t or "") if ch.isalnum())     # noqa: E731
+        heard = norm(text)
+        with self._lock:
+            recent = [x for t, x in self._owner_heard if now - t < 30]
+        return any(heard and (heard in norm(x) or norm(x) in heard
+                              or difflib.SequenceMatcher(None, heard, norm(x)).ratio() >= 0.6) for x in recent)
 
     def _is_echo(self, text, now):
         """
@@ -1268,8 +1345,7 @@ class AgentRuntime:
                 return
             day = days[-1]
         snap = self._snapshot(now)
-        if (snap.calls_today >= c.daily_call_limit or snap.cost_today >= c.daily_cost_limit_usd
-                or snap.cost_month >= c.monthly_cost_limit_usd):
+        if self._background_over_limit(snap):
             self.log.write("📝 AIを呼ぶ上限に達しているので、1日のまとめは作りません。")
             return
         lines = journal.day_lines(self._account, day)
@@ -1341,9 +1417,7 @@ class AgentRuntime:
         if not fingerprint or fingerprint == self.deps.store.load_note("owner_profile_fp"):
             return
         snap = self._snapshot(now)
-        c = self.config
-        if (snap.calls_today >= c.daily_call_limit or snap.cost_today >= c.daily_cost_limit_usd
-                or snap.cost_month >= c.monthly_cost_limit_usd):
+        if self._background_over_limit(snap):
             return
         text = profile.source_text()
         if not text:

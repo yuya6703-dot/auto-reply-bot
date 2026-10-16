@@ -71,9 +71,9 @@ class UsageTracker:
             kind = getattr(error, "kind", "unknown")
             self._store.add_usage(provider_name, None, purpose, None, None, None, 0.0, False, kind, turn_id)
 
-    def today(self):
-        """(今日 AI を呼んだ回数, 今日の費用の見積もり（米ドル）)"""
-        return self._store.usage_since(local_day_start(self._clock()))
+    def today(self, purposes=None, exclude=None):
+        """(今日 AI を呼んだ回数, 今日の費用の見積もり（米ドル）)。purposes / exclude で用途を絞る"""
+        return self._store.usage_since(local_day_start(self._clock()), purposes, exclude)
 
     def this_month(self):
         return self._store.usage_since(local_month_start(self._clock()))

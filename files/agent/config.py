@@ -53,7 +53,10 @@ class AgentConfig:
     max_utterances_per_minute: int = 2     # R7
     max_utterances_per_hour: int = 30      # R7
     max_decisions_per_minute: int = 6      # R10: 判断の呼び出しの頻度
-    daily_call_limit: int = 300            # R8: AI を呼ぶ回数の1日の上限
+    daily_call_limit: int = 300            # R8: AI を呼ぶ回数の1日の上限（会話の判断・文作り）
+    # 裏の仕事（声を文字にする・整理・1日のまとめ・自己分析の読み込み）の1日の上限。会話の分とは別に数える
+    # （2026-10-16: 文字起こしが続くと、会話の返事に使う分が早く尽きていた）。費用の上限は全部まとめて1つ
+    background_daily_call_limit: int = 300
     daily_cost_limit_usd: float = 1.0      # R8: 費用の見積もりの1日の上限（米ドル）。8割で知らせる
     monthly_cost_limit_usd: float = 10.0   # R8: 1か月の上限
     model: str = ""                        # 使うモデル（空なら提供元の既定）
@@ -77,6 +80,11 @@ class AgentConfig:
     conversation_max_per_hour: int = 60
     conversation_min_gap_seconds: float = 3.0
     conversation_partner_seconds: float = 90.0    # 返事をした相手は、このあいだ「話している相手」（名前を呼ばれなくても返す）
+    # 考え中のつなぎ言葉（2026-10-16 本人「考えてる最中にあーとか、えーととかをいうとか、うーんとかもね」）。
+    # 声で答えるときに、呼ばれて返事を作るのに時間がかかったら、先に短く言う。チャットでは言わない
+    thinking_fillers: bool = True
+    filler_after_seconds: float = 2.0
+    filler_words: str = "えーと、うーん、あー、んーと"
     # 静かなときに自分から話すか考える（既定OFF。外に見える動きなので本人がONにしたときだけ）
     initiative_enabled: bool = False
     initiative_quiet_seconds: float = 300.0       # これだけ誰も書かなかったら
@@ -108,6 +116,8 @@ class AgentConfig:
     hearing_threshold: float = 0.02               # これより大きい音を「話している」とみる（0〜1）
     hearing_max_minutes_per_hour: float = 10.0    # 1時間に文字にする量の上限（BGM で上限まで使い切らないように）
     hearing_hints: str = ""                       # 聞き取りのヒント（よく出る名前・言葉。「、」で区切る）。文字にするときに渡す
+    # オーナーのマイク（任意）。ここで聞いた声は「オーナーの声」（声でもオーナーの合図が効く。2026-10-16）
+    hearing_owner_device: str = ""
     # GRAVITYのアカウントごとの設定（2026-10-16 本人「全部やろうか」）。空の項目は共通の設定を使う
     account_profiles: dict = field(default_factory=dict)
     active_account: str = ""                      # 今チャットしている GRAVITY のアカウント（エージェントが入れる）
@@ -128,10 +138,11 @@ class AgentConfig:
     # 画面で変える項目
     EDITABLE = ("ai_name", "self_names", "owner_names", "ignored_people", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
-                "conversation_enabled", "chat_mention", "chat_emoji",
+                "conversation_enabled", "chat_mention", "chat_emoji", "thinking_fillers",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
                 "lookup_enabled", "lookup_wait_text", "digest_enabled", "hearing_enabled", "hearing_device",
-                "hearing_threshold", "hearing_hints", "owner_profile_enabled", "owner_profile_dir")
+                "hearing_threshold", "hearing_hints", "hearing_owner_device", "owner_profile_enabled",
+                "owner_profile_dir")
 
     def profile_value(self, key):
         """今のアカウントの設定（無い・空なら共通の設定）"""

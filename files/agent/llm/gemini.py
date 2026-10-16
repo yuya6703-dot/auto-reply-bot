@@ -42,6 +42,9 @@ MODELS = (
 DEFAULT_MODEL = MODELS[0][0]
 
 MAX_REQUEST_BYTES = 128 * 1024       # 1回に送る量の上限（ひといきと同じ考え。会話を送りすぎない）
+# 音を添えるとき（声を文字にする）の上限。⚠️ 128KB のままだと声は2秒ほどで超え、文字起こしがいつも失敗していた
+# （2026-10-16 本物の Gemini で確かめて見つけた）。Gemini の1回の上限は20MB。15秒の声（44.1kHz）でも2MBほど
+MAX_MEDIA_REQUEST_BYTES = 8 * 1024 * 1024
 
 # 安全上の理由で答えなかった、とみなす終わり方
 REFUSAL_FINISH = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "LANGUAGE"}
@@ -118,12 +121,12 @@ class GeminiProvider:
     def _headers(self):
         return {"x-goog-api-key": self._key, "Content-Type": "application/json"}
 
-    def _call(self, method, path, payload, timeout):
+    def _call(self, method, path, payload, timeout, limit=MAX_REQUEST_BYTES):
         url = f"{API_BASE}/{path}"
         body = None
         if payload is not None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            if len(body) > MAX_REQUEST_BYTES:
+            if len(body) > limit:
                 raise LLMError(KIND_BAD_REQUEST, "送る量が多すぎる")
         try:
             status, data = self._send(method, url, self._headers(), body, timeout)
@@ -169,8 +172,10 @@ class GeminiProvider:
 
     def complete(self, request, cancel):
         started = self._clock()
+        media = any(getattr(m, "attachments", None) for m in request.messages)
         data = self._call("POST", f"models/{urllib.parse.quote(self.model)}:generateContent",
-                          self.build_payload(request), request.timeout_seconds)
+                          self.build_payload(request), request.timeout_seconds,
+                          limit=MAX_MEDIA_REQUEST_BYTES if media else MAX_REQUEST_BYTES)
         if cancel.cancelled:
             raise LLMError(KIND_CANCELLED, "取り消した")
         return self.parse_response(data, request, int((self._clock() - started) * 1000))

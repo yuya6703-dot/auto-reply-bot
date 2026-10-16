@@ -9847,6 +9847,10 @@ class App(ctk.CTk):
         ctk.CTkSwitch(control, text="💬 話しかけられたら続けて話す（呼ばれた・話している相手には1分に4回まで。3秒はあける）",
                       variable=self.agent_conversation_var, command=self.on_agent_conversation_toggled).pack(
             anchor="w", padx=12, pady=(0, 6))
+        # 考え中のつなぎ言葉（2026-10-16 本人「考えてる最中にあーとか、えーととかをいうとか、うーんとかもね」。既定ON）
+        self.agent_filler_var = ctk.BooleanVar(value=AgentConfig.load(self.db.get_setting).thinking_fillers)
+        ctk.CTkSwitch(control, text="🤔 考え中に「えーと」「うーん」などを言う（声で答えるとき。返事に2秒以上かかったら）",
+                      variable=self.agent_filler_var, command=self.on_agent_filler_toggled).pack(anchor="w", padx=12, pady=(0, 6))
         # 頼まれたら調べる（2026-10-16 本人「調べるからちょっと待っててねみたいな一言」「チャットの中の話ね」）
         lookup_config = AgentConfig.load(self.db.get_setting)
         self.agent_lookup_var = ctk.BooleanVar(value=lookup_config.lookup_enabled)
@@ -10053,6 +10057,16 @@ class App(ctk.CTk):
         add_entry("speaking_style", "話し方:")
         add_box("boundaries", "しないこと\n（1行に1つ）:", 70)
         add_box("example_lines", "口調の例\n（1行に1つ）:", 50)
+        # 声（2026-10-16: アカウントごとの人格で声も変えられるように。前は人格に声を選ぶところが無かった）
+        voice_row = ctk.CTkFrame(section, fg_color="transparent")
+        voice_row.pack(anchor="w", fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(voice_row, text="声:", width=110, anchor="w").pack(side="left")
+        self.agent_persona_voice_var = ctk.StringVar(value=self.PERSONA_VOICE_DEFAULT)
+        self.agent_persona_voice_menu = ctk.CTkOptionMenu(voice_row, variable=self.agent_persona_voice_var,
+                                                          values=self._persona_voice_labels(), width=360)
+        self.agent_persona_voice_menu.pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(voice_row, text="（読み上げツールの声。AIは文ごとに同じキャラのスタイルを選びます）",
+                     text_color="gray70").pack(side="left")
         self.agent_persona_target_label = ctk.CTkLabel(section, text="", anchor="w", text_color="#8ab4f8")
         self.agent_persona_target_label.pack(anchor="w", padx=12, pady=(2, 0))
         buttons = ctk.CTkFrame(section, fg_color="transparent")
@@ -10121,6 +10135,7 @@ class App(ctk.CTk):
 
     # --- 声を聞く（2026-10-16 本人「iPad mini 6から音を拾う仕組み」→「1から6まで」の6） ---
     NO_INPUT_DEVICE = "（音声入力が見つかりません）"
+    NO_OWNER_MIC = "（使わない）"
     HEARING_THRESHOLD_MAX = 0.2
 
     def build_agent_hearing_section(self, parent):
@@ -10135,6 +10150,7 @@ class App(ctk.CTk):
                      justify="left", text_color="gray70").pack(anchor="w", padx=12, pady=(0, 6))
         config = AgentConfig.load(self.db.get_setting)
         self._voice_listener = None
+        self._owner_mic_listener = None          # オーナーのマイク（任意）
         self._voice_listener_factory = VoiceListener
         self.agent_hearing_var = ctk.BooleanVar(value=config.hearing_enabled)
         ctk.CTkSwitch(section, text="👂 声を聞く（文字にするために、音をAIの提供元へ送ります）", variable=self.agent_hearing_var,
@@ -10160,6 +10176,16 @@ class App(ctk.CTk):
         self.agent_hearing_level = ctk.CTkProgressBar(level_row, width=160)
         self.agent_hearing_level.set(0)
         self.agent_hearing_level.pack(side="left")
+        owner_mic_row = ctk.CTkFrame(section, fg_color="transparent")
+        owner_mic_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(owner_mic_row, text="オーナーの\nマイク（任意）:", width=110, anchor="w", justify="left").pack(side="left")
+        self.agent_owner_mic_var = ctk.StringVar(value=config.hearing_owner_device or self.NO_OWNER_MIC)
+        self.agent_owner_mic_menu = ctk.CTkOptionMenu(owner_mic_row, variable=self.agent_owner_mic_var,
+                                                      values=[self.NO_OWNER_MIC], width=320,
+                                                      command=self.on_agent_owner_mic_selected)
+        self.agent_owner_mic_menu.pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(owner_mic_row, text="（ここで聞いた声はオーナーの声。声でも「静かにして」などが効く）",
+                     text_color="gray70").pack(side="left")
         hint_row = ctk.CTkFrame(section, fg_color="transparent")
         hint_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
         ctk.CTkLabel(hint_row, text="聞き取りの\nヒント:", width=110, anchor="w", justify="left").pack(side="left")
@@ -10177,6 +10203,9 @@ class App(ctk.CTk):
     def refresh_agent_hearing_devices(self):
         devices = list_voice_input_devices()
         self.agent_hearing_device_menu.configure(values=devices or [self.NO_INPUT_DEVICE])
+        self.agent_owner_mic_menu.configure(values=[self.NO_OWNER_MIC] + devices)
+        if self.agent_owner_mic_var.get() not in devices:
+            self.agent_owner_mic_var.set(self.NO_OWNER_MIC)
         current = self.agent_hearing_device_var.get()
         if current not in devices:
             saved = self.db.get_setting("agent.hearing_device", "") or ""
@@ -10235,6 +10264,17 @@ class App(ctk.CTk):
             self._stop_voice_listener()
             self._start_voice_listener()
 
+    def on_agent_owner_mic_selected(self, _value=None):
+        device = self.agent_owner_mic_var.get()
+        device = "" if device == self.NO_OWNER_MIC else device
+        self.db.save_setting("agent.hearing_owner_device", device)
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.hearing_owner_device = device
+        if self._voice_listener is not None:          # 聞いている途中なら、聞き直す
+            self._stop_voice_listener()
+            self._start_voice_listener()
+        self._append_agent_log(f"👂 オーナーのマイク: {device or '使わない'}")
+
     def on_agent_hearing_threshold_changed(self, value):
         value = round(float(value), 3)
         self.db.save_setting("agent.hearing_threshold", str(value))
@@ -10261,9 +10301,35 @@ class App(ctk.CTk):
             return
         self._voice_listener = listener
         self.agent_hearing_status.configure(text=f"聞いています（{device}）")
+        self._start_owner_mic(runtime)
         self._poll_voice_level()
 
+    def _start_owner_mic(self, runtime):
+        """オーナーのマイク（任意）も聞く。ここで聞いた声はオーナーの声（オーナーの名前が要る）"""
+        device = self.agent_owner_mic_var.get()
+        if device == self.NO_OWNER_MIC or not device:
+            return
+        owners = runtime.config.owner_name_list
+        if not owners:
+            self._append_agent_log("⚠️ オーナーのマイクを使うには、「⚙️ 設定」でオーナーの名前を入れてください。")
+            return
+        owner = owners[0]
+        listener = self._voice_listener_factory(
+            device, float(self.agent_hearing_threshold.get()),
+            lambda wav, seconds: self._on_voice_segment(wav, seconds, speaker=owner),
+            on_error=lambda message: write_error_log(f"オーナーのマイクを聞くところでエラー: {message}"),
+            on_activity=runtime.on_voice_activity)
+        ok, why = listener.start()
+        if not ok:
+            self._append_agent_log(f"⚠️ オーナーのマイク: {why}")
+            return
+        self._owner_mic_listener = listener
+        self._append_agent_log(f"👂 オーナーのマイクも聞いています（{device}。ここの声は「{owner}」の声）。")
+
     def _stop_voice_listener(self):
+        owner_mic, self._owner_mic_listener = getattr(self, "_owner_mic_listener", None), None
+        if owner_mic is not None:
+            owner_mic.stop()
         listener, self._voice_listener = self._voice_listener, None
         if listener is not None:
             listener.stop()
@@ -10272,12 +10338,12 @@ class App(ctk.CTk):
         self.agent_hearing_level.set(0)
         self.agent_hearing_status.configure(text="止まっています")
 
-    def _on_voice_segment(self, wav, seconds):
+    def _on_voice_segment(self, wav, seconds, speaker=None):
         """聞くスレッドから。文字にしてAIへ（runtime.hear が提供元へ送る）。⚠️ Tk に触らない"""
         runtime = self.agent_runtime
         if runtime is None:
             return
-        text = runtime.hear(wav, seconds)
+        text = runtime.hear(wav, seconds, speaker=speaker)
         if text:
             self._post_to_ui(lambda: self.agent_hearing_status.configure(
                 text=f"聞いています — 最後に聞こえた: 「{text[:40]}」"))
@@ -10639,7 +10705,27 @@ class App(ctk.CTk):
         self._append_agent_log("↺ 関係の値をリセットしました。")
         self.refresh_agent_memory_list()
 
+    PERSONA_VOICE_DEFAULT = "読み上げタブの声（共通）"
+
+    def _persona_voice_choices(self):
+        """{表示: "engine:話者ID"}（読み上げタブと同じキャラ一覧から）"""
+        choices = {}
+        try:
+            for name, styles in self.get_all_speakers().items():
+                for style, selector in styles.items():
+                    choices[f"{name}（{style}）"] = selector
+        except Exception:
+            pass
+        return choices
+
+    def _persona_voice_labels(self):
+        return [self.PERSONA_VOICE_DEFAULT] + list(self._persona_voice_choices())
+
     def _fill_agent_persona(self, persona):
+        voice_label = next((label for label, selector in self._persona_voice_choices().items()
+                            if selector == persona.voice), self.PERSONA_VOICE_DEFAULT)
+        self.agent_persona_voice_menu.configure(values=self._persona_voice_labels())
+        self.agent_persona_voice_var.set(voice_label)
         values = {"name": persona.name, "summary": persona.summary, "character": persona.character,
                   "speaking_style": persona.speaking_style, "boundaries": "\n".join(persona.boundaries),
                   "example_lines": "\n".join(persona.example_lines)}
@@ -10675,7 +10761,8 @@ class App(ctk.CTk):
         base = self.agent_runtime.persona if self.agent_runtime is not None else Persona()
         return Persona(persona_id=base.persona_id, name=raw["name"], summary=raw["summary"],
                        character=raw["character"], speaking_style=raw["speaking_style"],
-                       boundaries=lists["boundaries"], example_lines=lists["example_lines"], voice=base.voice), ""
+                       boundaries=lists["boundaries"], example_lines=lists["example_lines"],
+                       voice=self._persona_voice_choices().get(self.agent_persona_voice_var.get())), ""
 
     def save_agent_persona(self):
         persona, problem = self._read_agent_persona()
@@ -10781,6 +10868,13 @@ class App(ctk.CTk):
         if self.agent_runtime is not None:
             self.agent_runtime.config.chat_emoji = on
         self._append_agent_log("😊 チャットで気持ちを絵文字で表します。" if on else "😊 チャットで絵文字は使いません。")
+
+    def on_agent_filler_toggled(self):
+        on = bool(self.agent_filler_var.get())
+        self.db.save_setting("agent.thinking_fillers", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.thinking_fillers = on
+        self._append_agent_log("🤔 考え中に「えーと」などを言います。" if on else "🤔 考え中のつなぎ言葉は言いません。")
 
     def on_agent_conversation_toggled(self):
         on = bool(self.agent_conversation_var.get())
