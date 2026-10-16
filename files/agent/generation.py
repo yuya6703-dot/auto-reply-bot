@@ -42,23 +42,37 @@ class Utterance:
     priority: int = PRIORITY_AI
 
 
-def parse_utterance(data, turn_id):
+MAX_CHAT_LINES = 3      # チャットは改行2つ（3行）まで
+
+
+def tidy_text(raw, keep_newlines=False):
+    """声は改行・続く空白を1つの空白に。チャットは改行を2つ（3行）まで残し、行の中の空白だけ詰める"""
+    if not keep_newlines:
+        return " ".join(raw.split())
+    lines = [" ".join(line.split()) for line in raw.replace("\r", "").split("\n")]
+    lines = [line for line in lines if line]
+    if len(lines) > MAX_CHAT_LINES:
+        lines = lines[:MAX_CHAT_LINES - 1] + [" ".join(lines[MAX_CHAT_LINES - 1:])]
+    return "\n".join(lines)
+
+
+def parse_utterance(data, turn_id, keep_newlines=False):
     if not isinstance(data, dict) or not isinstance(data.get("text"), str):
         raise ValueError("text が無い")
-    text = " ".join(data["text"].split())       # 改行・続く空白は1つの空白に（声で読むため）
+    text = tidy_text(data["text"], keep_newlines)
     if not text:
         raise ValueError("text が空")
     emotion = data.get("emotion")
     return Utterance(text=text, emotion=emotion if emotion in EMOTIONS else "neutral", turn_id=turn_id)
 
 
-def request_utterance(provider, request, turn_id, cancel, on_call):
+def request_utterance(provider, request, turn_id, cancel, on_call, keep_newlines=False):
     """文を作ってもらう。型に合わなければ1回だけ作り直し。失敗は DecisionFailed / LLMError"""
     return request_structured(provider, request, cancel, on_call,
-                              lambda r: parse_utterance(r.structured, turn_id))
+                              lambda r: parse_utterance(r.structured, turn_id, keep_newlines))
 
 
-def request_decision_with_text(provider, request, turn_id, cancel, on_call):
+def request_decision_with_text(provider, request, turn_id, cancel, on_call, keep_newlines=False):
     """
     判断と文を1回で頼む（context.build_combined_request）。(Decision, Utterance または None) を返す。
     文が無い・形が合わないときは None（呼ぶ側が文だけをもう一度頼む）。判断の形が合わなければ1回だけ作り直し（DecisionFailed / LLMError）
@@ -74,7 +88,7 @@ def request_decision_with_text(provider, request, turn_id, cancel, on_call):
     utterance = None
     if decision.action in SPEAKING_ACTIONS:
         try:
-            utterance = parse_utterance(holder.get("data"), turn_id)
+            utterance = parse_utterance(holder.get("data"), turn_id, keep_newlines)
         except ValueError:
             utterance = None
     return decision, utterance

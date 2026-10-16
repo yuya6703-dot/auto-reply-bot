@@ -93,6 +93,7 @@ from agent.events import (AgentEvent, make_manual_event, new_event_id as new_age
 from agent.llm.mock import MockProvider, MODE_LABELS as MOCK_MODE_LABELS, MODE_SCRIPT as MOCK_MODE_SCRIPT
 from agent.llm.gemini import GeminiProvider, MODELS as GEMINI_MODELS, DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
 from agent.persona import Persona
+from agent.generation import tidy_text as agent_tidy_text
 from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN_RESTORED, OPEN_RECREATED
 from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
                            STATE_STOPPED as AGENT_STOPPED, STATE_EMERGENCY as AGENT_EMERGENCY,
@@ -1068,6 +1069,34 @@ def find_by_id(xml_dump, resource_name, display=None, text=None):
     return boxes
 
 
+def read_room_info(xml_dump, display=None):
+    """
+    音声ルームの画面から、ルームの様子を読む（押さない。読むだけ）。ルームの画面でなければ None。
+    {"name": ルーム名, "permission": 公開設定, "guests": 「ゲスト（N人）」, "seated": 座っている席の数, "empty_seats": 空いた席の数}
+    ⚠️ 席に座っている人の名前は画面に出ていない（アイコンだけ）。tvTitle は「ミッションへ」にも使われているので、
+       上の帯（llTitle）の中のものだけをルーム名にする（GRAVITY画面部品.md）
+    """
+    root = ET.fromstring(xml_dump)
+    parent = {child: node for node in root.iter() for child in node}
+    nodes = _display_nodes(root, display)
+    if not any(_resource_name(n) == CHAT_LIST_ID for n in nodes):
+        return None
+    info = {"name": "", "permission": "", "guests": "", "seated": 0, "empty_seats": 0}
+    for node in nodes:
+        rid, text = _resource_name(node), (node.get("text") or "").strip()
+        if rid == "tvTitle" and text and not info["name"] and _has_ancestor(node, parent, "llTitle"):
+            info["name"] = text[:60]
+        elif rid == "tvPermission" and text:
+            info["permission"] = text[:30]
+        elif rid == "tvUserCount" and text:
+            info["guests"] = text[:30]
+        elif rid == "vSideView":
+            info["seated"] += 1
+        elif rid == "ivAdd":
+            info["empty_seats"] += 1
+    return info
+
+
 def find_by_text(xml_dump, text, display=None, clickable_box=True):
     """文言が完全一致する部品の枠（既定では、それを含む押せる枠）を返す"""
     root = ET.fromstring(xml_dump)
@@ -1503,13 +1532,29 @@ class GravityChatBridge:
     """
     MAX_TEXT = 300
 
-    def __init__(self, on_events, active=lambda: True, self_names=lambda: [], clock=time.time):
+    def __init__(self, on_events, active=lambda: True, self_names=lambda: [], clock=time.time, on_room=None):
         self._on_events = on_events     # (list[AgentEvent]) -> None
         self.active = active            # 渡してよいか（AIが動いていて、本人がスイッチをONにしている）
         self.self_names = self_names    # () -> このアカウントの表示名のリスト（監視スレッドから呼ばれる）
         self._clock = clock
         self._counts = None             # 前回の画面の {行の目印: 数}。None = まだ読んでいない
         self._seq = 0
+        self._on_room = on_room         # (dict) -> None。ルームの様子が変わったら知らせる
+        self._room = None
+        self._announcement = ""         # 最後に見えたアナウンス（流れて見えなくなっても覚えておく）
+
+    def on_room(self, info, rows=()):
+        """ルームの様子（read_room_info）とアナウンスの行を受け取り、変わっていたら知らせる"""
+        for row in rows or []:
+            if row.get("kind") == CHAT_KIND_ANNOUNCEMENT and row.get("text"):
+                self._announcement = row["text"][:self.MAX_TEXT]
+        if info is None:
+            return
+        room = dict(info, announcement=self._announcement)
+        if room != self._room:
+            self._room = room
+            if self._on_room is not None:
+                self._on_room(dict(room))
 
     def reset(self):
         """次に読む画面を「前からあった」扱いにする（監視を始め直した・ルームを出た・渡すのを止めていた）"""
@@ -6361,6 +6406,8 @@ class AutoReplyWorker:
                 if agent_active:
                     own_replies = [r for r in keywords_map.values() if r and KEYWORD_NAME_PLACEHOLDER not in r]
                     try:
+                        # ルームの様子（ルーム名・ゲスト・席・アナウンス）も渡す。読むだけ
+                        self._agent_bridge.on_room(read_room_info(xml_dump, self._target_display), chat_rows)
                         self._agent_bridge.on_rows(
                             chat_rows, lambda text: any(r in text for r in own_replies) or self._is_own_manual_text(text))
                     except Exception:
@@ -9662,7 +9709,8 @@ class App(ctk.CTk):
         # このアカウントの表示名（監視スレッドが読むので素の値で持つ。設定を保存したら入れ替える）
         self._agent_self_names = AgentConfig.load(self.db.get_setting).self_name_list
         self.agent_bridge = GravityChatBridge(self._on_gravity_events, active=self._agent_gravity_active,
-                                              self_names=lambda: self._agent_self_names)
+                                              self_names=lambda: self._agent_self_names,
+                                              on_room=self._on_gravity_room)
         self.worker.set_agent_bridge(self.agent_bridge)
         # 監視ワーカーで起きた、AIに関わること（実際に送れたか・チャット欄が隠れたか）も判断のログに出す
         self.worker.agent_note = lambda message: self._post_to_ui(lambda: self._append_agent_log(message))
@@ -9709,6 +9757,10 @@ class App(ctk.CTk):
         ctk.CTkSwitch(control, text="💬 GRAVITYのチャットをAIに渡す（メインタブで監視している間だけ）",
                       variable=self.agent_gravity_var, command=self.on_agent_gravity_toggled).pack(
             anchor="w", padx=12, pady=(2, 6))
+        self.agent_initiative_var = ctk.BooleanVar(value=AgentConfig.load(self.db.get_setting).initiative_enabled)
+        ctk.CTkSwitch(control, text="💭 静かなときに自分から話しかける（5分静かなら考える。15分に1回まで）",
+                      variable=self.agent_initiative_var, command=self.on_agent_initiative_toggled).pack(
+            anchor="w", padx=12, pady=(0, 6))
 
         self.agent_usage_label = ctk.CTkLabel(control, text="", text_color="gray70", justify="left")
         self.agent_usage_label.pack(anchor="w", padx=12, pady=(0, 10))
@@ -9736,6 +9788,15 @@ class App(ctk.CTk):
         if config.self_names:
             self.agent_self_names_entry.insert(0, config.self_names)
         ctk.CTkLabel(self_row, text="（この名前の発言は、AI自身の発言として扱う）", text_color="gray70").pack(side="left")
+        owner_row = ctk.CTkFrame(settings, fg_color="transparent")
+        owner_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(owner_row, text="オーナーの名前:", width=110, anchor="w").pack(side="left")
+        self.agent_owner_entry = ctk.CTkEntry(owner_row, width=260, placeholder_text="あなたのGRAVITYでの表示名")
+        self.agent_owner_entry.pack(side="left", padx=(0, 8))
+        self.agent_owner_entry.bind("<Button-3>", self._show_entry_context_menu)
+        if config.owner_names:
+            self.agent_owner_entry.insert(0, config.owner_names)
+        ctk.CTkLabel(owner_row, text="（AIはこの人と親しく話す。規則は同じ）", text_color="gray70").pack(side="left")
         ctk.CTkLabel(row, text="1日にAIを呼ぶ上限:", anchor="w").pack(side="left", padx=(0, 6))
         self.agent_limit_entry = ctk.CTkEntry(row, width=70)
         self.agent_limit_entry.pack(side="left", padx=(0, 4))
@@ -9787,6 +9848,7 @@ class App(ctk.CTk):
                      text_color="gray70").pack(anchor="w", padx=12, pady=(0, 10))
 
         self.build_agent_persona_section(frame)
+        self.build_agent_memory_section(frame)
 
         # --- 手で出来事を入れる ---
         manual = ctk.CTkFrame(frame)
@@ -9825,9 +9887,10 @@ class App(ctk.CTk):
         self.agent_log_textbox = ctk.CTkTextbox(log_section, height=220, state="disabled", wrap="word")
         self.agent_log_textbox.pack(fill="x", padx=12, pady=(0, 12))
 
-        # 前にAIを使ったことがあれば、保存した人格を欄に出す（使ったことが無ければ記録のファイルは作らない）
+        # 前にAIを使ったことがあれば、保存した人格と記憶を出す（使ったことが無ければ記録のファイルは作らない）
         if os.path.exists(AGENT_DB_FILE) and self._ensure_agent_runtime() is not None:
             self._fill_agent_persona(self.agent_runtime.persona)
+        self.refresh_agent_memory_list()
         self._refresh_agent_provider_label()
         self._refresh_agent_state()
 
@@ -9875,6 +9938,133 @@ class App(ctk.CTk):
         ctk.CTkButton(buttons, text="↺ 既定に戻す", width=110, fg_color="#555555", hover_color="#3a3a3a",
                       command=self.reset_agent_persona).pack(side="left")
         self._fill_agent_persona(Persona())
+
+    # --- 記憶（2026-10-16。⚠️ 他の人のことを覚える。どれも本人がONにしたときだけ・このPCの中だけ・見て消せる） ---
+    AGENT_MEMORY_SWITCHES = (
+        ("memory_enabled", "🧠 会話を覚える（人・この場・自分が言ったこと）",
+         "会話から、あとで役立つことをAIに選ばせて、このPCの記録（agent_data.db）に残します。\n"
+         "ルームの他の人の名前と、その人について分かったこと（好きな話題など）も入ります。\n"
+         "健康・信条・性的指向・犯罪歴・住所・本名などの繊細な事柄は覚えません。\n"
+         "覚えたことは下の一覧で見られ、1件ずつ・全部消せます。使わない記憶は30〜180日で消えます。\n\n覚えるようにしますか？"),
+        ("impressions_enabled", "人の印象を推定する（話し方・好み。推定として扱い、口に出さない）",
+         "人の話し方や好みの印象を、AIに推定させて覚えます（例: 冗談が好きそう〈推定・確からしさ低〉）。\n"
+         "推定は事実として扱わず、本人に向かって言いません。接し方の参考にするだけです。\n"
+         "「会話を覚える」がONのときだけ動きます。\n\n推定するようにしますか？"),
+        ("relationships_enabled", "関係の値を持つ（なじみ・やりとりの温かさ）",
+         "AIとその人との「なじみ」（話した量）と「温かさ」（やりとりが和やかか）を数値で持ちます。\n"
+         "1回に動く量には上限があり、値は口に出しません。接し方を変えるためだけに使います。\n"
+         "「会話を覚える」がONのときだけ動きます。\n\n関係の値を持つようにしますか？"),
+    )
+
+    def build_agent_memory_section(self, parent):
+        section = ctk.CTkFrame(parent)
+        section.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(section, text="🧠 記憶", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(section, text="どれも最初はOFFです。覚えたことはこのPCの中（agent_data.db）だけにあり、ここで見て消せます。",
+                     justify="left", text_color="gray70").pack(anchor="w", padx=12, pady=(0, 6))
+        config = AgentConfig.load(self.db.get_setting)
+        self.agent_memory_vars = {}
+        for name, label, _confirm in self.AGENT_MEMORY_SWITCHES:
+            var = ctk.BooleanVar(value=getattr(config, name))
+            self.agent_memory_vars[name] = var
+            ctk.CTkSwitch(section, text=label, variable=var,
+                          command=lambda n=name: self.on_agent_memory_toggled(n)).pack(anchor="w", padx=12, pady=(0, 4))
+
+        lists = ctk.CTkFrame(section, fg_color="transparent")
+        lists.pack(fill="x", padx=12, pady=(6, 4))
+        ctk.CTkLabel(lists, text="覚えていること:", anchor="w").pack(anchor="w")
+        self.agent_memory_listbox = tk.Listbox(lists, height=6, font=("", 10), bg="#2b2b2b", fg="#dce4ee",
+                                               selectbackground="#1f6aa5", highlightthickness=0, bd=0,
+                                               exportselection=False)
+        self.agent_memory_listbox.pack(fill="x", pady=(2, 6))
+        ctk.CTkLabel(lists, text="関係の値:", anchor="w").pack(anchor="w")
+        self.agent_relationship_listbox = tk.Listbox(lists, height=3, font=("", 10), bg="#2b2b2b", fg="#dce4ee",
+                                                     selectbackground="#1f6aa5", highlightthickness=0, bd=0,
+                                                     exportselection=False)
+        self.agent_relationship_listbox.pack(fill="x", pady=(2, 4))
+
+        buttons = ctk.CTkFrame(section, fg_color="transparent")
+        buttons.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
+        ctk.CTkButton(buttons, text="🔄 一覧を更新", width=110, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.refresh_agent_memory_list).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(buttons, text="🗑 選んだ記憶を消す", width=140, fg_color="gray", hover_color="#444444",
+                      command=self.delete_selected_agent_memory).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(buttons, text="🗑 記憶を全部消す", width=130, fg_color="red", hover_color="darkred",
+                      command=self.delete_all_agent_memory).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(buttons, text="↺ 関係の値をリセット", width=150, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.reset_agent_relationships).pack(side="left")
+        self._agent_memory_ids = []
+
+    def on_agent_memory_toggled(self, name):
+        var = self.agent_memory_vars[name]
+        on = bool(var.get())
+        confirm = next(text for n, _label, text in self.AGENT_MEMORY_SWITCHES if n == name)
+        if on and not messagebox.askyesno("記憶", confirm):
+            var.set(False)
+            return
+        self.db.save_setting(f"agent.{name}", "1" if on else "0")
+        if self.agent_runtime is not None:
+            setattr(self.agent_runtime.config, name, on)
+        label = next(label for n, label, _text in self.AGENT_MEMORY_SWITCHES if n == name)
+        self._append_agent_log(f"{'✅' if on else '⏸'} {label.split('（')[0]}: {'ON' if on else 'OFF'}")
+
+    def _agent_memory_store(self):
+        """記憶の一覧を読む store。AIを一度も使っていなければ None（記録のファイルを作らない）"""
+        if self.agent_store is not None:
+            return self.agent_store
+        if os.path.exists(AGENT_DB_FILE) and self._ensure_agent_runtime() is not None:
+            return self.agent_store
+        return None
+
+    def refresh_agent_memory_list(self):
+        store = self._agent_memory_store()
+        self.agent_memory_listbox.delete(0, "end")
+        self.agent_relationship_listbox.delete(0, "end")
+        self._agent_memory_ids = []
+        if store is None:
+            self.agent_memory_listbox.insert("end", "（まだありません）")
+            return
+        scope_labels = {"person": "人", "room": "この場", "self": "自分", "impression": "印象（推定）"}
+        for mem_id, scope, person, content, conf, _imp, _upd, _pin in store.memories(limit=200):
+            who = f"{person}・" if person else ""
+            confidence = {"low": "低", "mid": "中", "high": "高"}.get(conf, "?")
+            mark = f"・確からしさ{confidence}" if scope == "impression" else ""
+            self.agent_memory_listbox.insert("end", f"[{who}{scope_labels.get(scope, scope)}{mark}] {content}")
+            self._agent_memory_ids.append(mem_id)
+        if not self._agent_memory_ids:
+            self.agent_memory_listbox.insert("end", "（まだありません）")
+        for _key, name, familiarity, warmth, _upd in store.relationships():
+            self.agent_relationship_listbox.insert("end", f"{name}: なじみ {familiarity:.0f} ・ 温かさ {warmth:+.0f}")
+
+    def delete_selected_agent_memory(self):
+        selection = self.agent_memory_listbox.curselection()
+        store = self._agent_memory_store()
+        if not selection or store is None or selection[0] >= len(self._agent_memory_ids):
+            messagebox.showinfo("記憶", "消す記憶を一覧から選んでください。")
+            return
+        store.delete_memory(self._agent_memory_ids[selection[0]])
+        self._append_agent_log("🗑 記憶を1件消しました。")
+        self.refresh_agent_memory_list()
+
+    def delete_all_agent_memory(self):
+        store = self._agent_memory_store()
+        if store is None:
+            return
+        if not messagebox.askyesno("記憶", "覚えていること・人・関係の値を全部消しますか？（元に戻せません）"):
+            return
+        store.delete_all_memories()
+        self._append_agent_log("🗑 記憶を全部消しました。")
+        self.refresh_agent_memory_list()
+
+    def reset_agent_relationships(self):
+        store = self._agent_memory_store()
+        if store is None:
+            return
+        if not messagebox.askyesno("記憶", "関係の値（なじみ・温かさ）を全部リセットしますか？"):
+            return
+        store.reset_relationships()
+        self._append_agent_log("↺ 関係の値をリセットしました。")
+        self.refresh_agent_memory_list()
 
     def _fill_agent_persona(self, persona):
         values = {"name": persona.name, "summary": persona.summary, "character": persona.character,
@@ -9972,6 +10162,32 @@ class App(ctk.CTk):
             self._append_agent_log(f"💬 GRAVITYのチャットをAIに渡します{note}。")
         else:
             self._append_agent_log("💬 GRAVITYのチャットをAIに渡すのをやめました。")
+
+    def on_agent_initiative_toggled(self):
+        on = bool(self.agent_initiative_var.get())
+        if on and not messagebox.askyesno(
+                "自分から話しかける",
+                "チャットがしばらく静かなとき、AIが自分から話題を出すかを考えます（話さないと決めることもあります）。\n"
+                "直近30分にやりとりがあった場だけ、15分に1回までです。応答のしかた（声 / チャット）で出します。\n\n"
+                "自分から話しかけるようにしますか？"):
+            self.agent_initiative_var.set(False)
+            return
+        self.db.save_setting("agent.initiative_enabled", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.initiative_enabled = on
+        self._append_agent_log("💭 静かなときに自分から話しかけます。" if on else "💭 自分から話しかけるのをやめました。")
+
+    def _on_gravity_room(self, info):
+        """監視スレッドから。ルームの様子を AI に渡し、判断のログに短く出す"""
+        runtime = self.agent_runtime
+        if runtime is not None:
+            runtime.set_room_info(info)
+        parts = [f"「{info['name']}」" if info.get("name") else "", info.get("guests", ""),
+                 f"席{info.get('seated', 0)}人" if info.get("seated") else ""]
+        line = "🏠 ルームの様子: " + "・".join(p for p in parts if p)
+        if info.get("announcement"):
+            line += "（アナウンスあり）"
+        self._post_to_ui(lambda: self._append_agent_log(line))
 
     def _on_gravity_events(self, events):
         """監視スレッドから呼ばれる。新しい行を AI の受付箱へ入れ、AIタブのログに出す（⚠️ Tk には伝言板で）"""
@@ -10084,11 +10300,15 @@ class App(ctk.CTk):
         countdown = ctk.CTkLabel(dialog, text="", text_color="gray70")
         countdown.pack(anchor="w", padx=14, pady=(4, 0))
 
+        def edited_text():
+            # チャットは改行を2つまで残す（AIの文と同じ整え方）
+            return agent_tidy_text(box.get("1.0", "end"), keep_newlines=True)
+
         def finish(ok):
             if done.is_set():
                 return
             holder["ok"] = ok
-            holder["text"] = " ".join(box.get("1.0", "end").split())
+            holder["text"] = edited_text()
             done.set()
             self._agent_draft_dialog = None
             try:
@@ -10097,7 +10317,7 @@ class App(ctk.CTk):
                 pass
 
         def send():
-            edited = " ".join(box.get("1.0", "end").split())
+            edited = edited_text()
             limit = self.get_manual_char_limit()
             if not edited:
                 messagebox.showwarning("AIの下書き", "送る文が空です。", parent=dialog)
@@ -10311,8 +10531,9 @@ class App(ctk.CTk):
         config = AgentConfig.load(self.db.get_setting)
         name = self.agent_name_entry.get().strip()
         self_names = self.agent_self_names_entry.get().strip()
-        if len(name) > AGENT_NAMES_MAX_CHARS or len(self_names) > AGENT_NAMES_MAX_CHARS:
-            messagebox.showwarning("AI", f"呼ばれ方・自分のアカウント名は、それぞれ{AGENT_NAMES_MAX_CHARS}文字までにしてください。")
+        owner_names = self.agent_owner_entry.get().strip()
+        if max(len(name), len(self_names), len(owner_names)) > AGENT_NAMES_MAX_CHARS:
+            messagebox.showwarning("AI", f"呼ばれ方・自分のアカウント名・オーナーの名前は、それぞれ{AGENT_NAMES_MAX_CHARS}文字までにしてください。")
             return
         try:
             limit = int(self.agent_limit_entry.get().strip())
@@ -10333,12 +10554,14 @@ class App(ctk.CTk):
             return
         model = next((code for code, label in GEMINI_MODELS if label == self.agent_model_var.get()), GEMINI_DEFAULT_MODEL)
         config.ai_name, config.self_names, config.daily_call_limit = name, self_names, limit
+        config.owner_names = owner_names
         config.daily_cost_limit_usd, config.monthly_cost_limit_usd, config.model = cost_day, cost_month, model
         config.save(self.db.save_setting)
         self._agent_self_names = config.self_name_list
         if self.agent_runtime is not None:
             live = self.agent_runtime.config
             live.ai_name, live.self_names, live.daily_call_limit = name, self_names, limit
+            live.owner_names = owner_names
             live.daily_cost_limit_usd, live.monthly_cost_limit_usd, live.model = cost_day, cost_month, model
         self._append_agent_log(f"⚙️ 設定を保存しました（呼ばれ方: {'・'.join(config.ai_names) or '（なし）'}、"
                                f"自分のアカウント名: {'・'.join(config.self_name_list) or '（なし）'}、1日の上限: {limit}回、"

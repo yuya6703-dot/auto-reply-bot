@@ -6,8 +6,8 @@
 AIタブの「模擬AIの返事」で、いつも沈黙・いつも反応… のように返事を決めて、沈黙と発言の流れを確かめられる。
 """
 
-from .base import (KIND_OK, KIND_TIMEOUT, PURPOSE_DECIDE, PURPOSE_GENERATE, STOP_END, STOP_REFUSAL,
-                   LLMError, LLMResponse, LLMUsage, PingResult)
+from .base import (KIND_OK, KIND_TIMEOUT, PURPOSE_DECIDE, PURPOSE_GENERATE, PURPOSE_SUMMARIZE, STOP_END,
+                   STOP_REFUSAL, LLMError, LLMResponse, LLMUsage, PingResult)
 
 # 判断の返し方
 MODE_SCRIPT = "script"       # 台本: 「？」があれば参加、「笑・w・草」があれば反応、ほかは沈黙
@@ -53,6 +53,7 @@ class MockProvider:
         self.delay_seconds = 0.0          # 返事を遅らせる（古い結果を捨てる確認用）
         self.script_decide = []           # 先に入れたものから順に返す（dict / LLMError / MODE_*）
         self.script_generate = []
+        self.script_summarize = []        # 覚えることの整理の返事（無ければ「何も無い」）
         self.requests = []                # 受け取った依頼（テストが中身を確かめる）
         self._generated = 0
 
@@ -71,6 +72,9 @@ class MockProvider:
         if request.purpose == PURPOSE_GENERATE:
             item = self.script_generate.pop(0) if self.script_generate else None
             return self._respond(item, lambda _: self._generate(request.hints))
+        if request.purpose == PURPOSE_SUMMARIZE:
+            item = self.script_summarize.pop(0) if self.script_summarize else None
+            return self._respond(item, lambda _: {"memories": [], "impressions": [], "relationships": []})
         return self._response({"ok": True})
 
     # --- 中身 ---

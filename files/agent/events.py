@@ -8,6 +8,7 @@
 import itertools
 import re
 import threading
+import unicodedata
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -23,12 +24,16 @@ SOURCE_GRAVITY = "gravity"
 SOURCE_VOICE = "voice"
 SOURCE_MANUAL = "manual"
 SOURCE_TEST = "test"
+SOURCE_SYSTEM = "system"      # エージェント自身が作った出来事（静かなときに話すか考える など）
 
 # AI に渡すときの区切り。外から来た文字を「データ」として囲む（設計書/04 の 3章）
 EVENT_BLOCK_BEGIN = "<<<今回の出来事ここから>>>"
 EVENT_BLOCK_END = "<<<今回の出来事ここまで>>>"
 RECENT_BLOCK_BEGIN = "<<<直近の会話ここから>>>"
 RECENT_BLOCK_END = "<<<直近の会話ここまで>>>"
+ROOM_BLOCK_BEGIN = "<<<ルームの様子ここから>>>"     # ルーム名・アナウンスも人が書いたもの（データ）
+ROOM_BLOCK_END = "<<<ルームの様子ここまで>>>"
+TRUNCATION_MARKS = ("..", "…")
 
 _manual_counter = itertools.count(1)
 _manual_lock = threading.Lock()
@@ -72,6 +77,23 @@ def clean_name(name):
     return re.sub(r"(\s*(\.\.+|…)\s*)+$", "", (name or "").strip())
 
 
+def name_matches(shown, wanted):
+    """
+    画面に出た名前 shown が、設定した名前 wanted の人か（名前は「名前..」と切れて出る）。
+    ⚠️ auto_reply_app.friend_name_matches と同じ考え（D3 で import できないので写した）。切れていれば先頭一致（2文字以上）、
+       切れていなければ完全一致。全角・半角は揃えて比べる
+    """
+    shown = unicodedata.normalize("NFKC", (shown or "").strip())
+    wanted = unicodedata.normalize("NFKC", (wanted or "").strip())
+    if not shown or not wanted:
+        return False
+    for mark in TRUNCATION_MARKS:
+        if shown.endswith(mark):
+            head = shown[:-len(mark)].strip()
+            return len(head) >= 2 and wanted.startswith(head)
+    return shown == wanted
+
+
 def describe_event(event, now=None):
     """AI に渡す1行。お知らせは本文だけ、発言は「名前: 本文」"""
     ago = ""
@@ -82,6 +104,8 @@ def describe_event(event, now=None):
     mark = "（自分）" if event.is_self else ""
     if event.kind == KIND_CHAT_NOTICE:
         return f"{ago}お知らせ: {event.text}"
+    if event.kind == KIND_SYSTEM:
+        return f"{ago}（このツールからの知らせ）{event.text}"
     if event.kind == KIND_VOICE_UTTERANCE:
         return f"{ago}声 {who}{mark}: {event.text}"
     return f"{ago}{who}{mark}: {event.text}"

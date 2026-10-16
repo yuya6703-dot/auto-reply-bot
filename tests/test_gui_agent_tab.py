@@ -83,6 +83,16 @@ class Harness(ctk.CTk):
     _confirm_agent_gravity_consent = A.App._confirm_agent_gravity_consent
     on_agent_gravity_toggled = A.App.on_agent_gravity_toggled
     _on_gravity_events = A.App._on_gravity_events
+    _on_gravity_room = A.App._on_gravity_room
+    AGENT_MEMORY_SWITCHES = A.App.AGENT_MEMORY_SWITCHES
+    build_agent_memory_section = A.App.build_agent_memory_section
+    on_agent_memory_toggled = A.App.on_agent_memory_toggled
+    _agent_memory_store = A.App._agent_memory_store
+    refresh_agent_memory_list = A.App.refresh_agent_memory_list
+    delete_selected_agent_memory = A.App.delete_selected_agent_memory
+    delete_all_agent_memory = A.App.delete_all_agent_memory
+    reset_agent_relationships = A.App.reset_agent_relationships
+    on_agent_initiative_toggled = A.App.on_agent_initiative_toggled
     AGENT_OUTPUT_LABELS = A.App.AGENT_OUTPUT_LABELS
     AGENT_CHAT_SEND_LABELS = A.App.AGENT_CHAT_SEND_LABELS
     _set_agent_config_value = A.App._set_agent_config_value
@@ -227,6 +237,10 @@ h.agent_self_names_entry.delete(0, "end"); h.agent_self_names_entry.insert(0, "�
 h.agent_name_entry.delete(0, "end"); h.agent_name_entry.insert(0, "アイ")
 h.save_agent_settings()
 check("上限の表示も変わる", "/ 5回" in h.agent_usage_label.cget("text"), h.agent_usage_label.cget("text"))
+h.agent_owner_entry.insert(0, "オーナー太郎")
+h.save_agent_settings()
+check("オーナーの名前を保存し、動いているエージェントにもすぐ効く", db.get_setting("agent.owner_names") == "オーナー太郎"
+      and h.agent_runtime.config.owner_name_list == ["オーナー太郎"])
 
 print("■ モデルと費用の上限")
 h.agent_cost_day_entry.delete(0, "end"); h.agent_cost_day_entry.insert(0, "-1")
@@ -345,16 +359,16 @@ draft.delete("1.0", "end"); draft.insert("1.0", "あ" * 31)
 draft_button("📨 送る").invoke()
 check("1通の上限を超えるように直したら送らない（窓は閉じない）", dialogs[-1][0] == "warning" and "30文字" in dialogs[-1][2]
       and h._agent_draft_dialog is not None)
-draft.delete("1.0", "end"); draft.insert("1.0", "こんばんは！\nよろしく")
+draft.delete("1.0", "end"); draft.insert("1.0", "こんばんは！\n\nよろしく")
 draft_button("📨 送る").invoke()
 th.join(2.0)
-check("送ると、直した文（改行は空白に）を送信待ちへ", box == ["posted"] and h.worker.agent_texts == ["こんばんは！ よろしく"],
+check("送ると、直した文（改行は残す。空の行は詰める）を送信待ちへ", box == ["posted"] and h.worker.agent_texts == ["こんばんは！\nよろしく"],
       (box, h.worker.agent_texts))
 th, box = post_in_thread("捨てられる文")
 pump(h, lambda: getattr(h, "_agent_draft_dialog", None) is not None)
 draft_button("🗑 捨てる").invoke()
 th.join(2.0)
-check("捨てたら送らない", box == ["discarded"] and h.worker.agent_texts == ["こんばんは！ よろしく"])
+check("捨てたら送らない", box == ["discarded"] and h.worker.agent_texts == ["こんばんは！\nよろしく"])
 h.agent_runtime.config.chat_approval_seconds = 1
 th, box = post_in_thread("放っておかれる文")
 check("時間が過ぎたら捨てる", pump(h, lambda: bool(box), timeout=5.0) and box == ["discarded"]
@@ -382,6 +396,75 @@ h.worker.is_running = False
 for key, value in (("output_mode", "voice"), ("chat_send_mode", "approve")):
     h._set_agent_config_value(key, value)
 pump(h)
+
+print("■ 静かなときに自分から話しかける（既定OFF）")
+check("既定はOFF", h.agent_initiative_var.get() is False)
+answers.append(False)
+h.agent_initiative_var.set(True)
+h.on_agent_initiative_toggled()
+check("ONにするときは確かめる。「いいえ」ならOFFのまま", dialogs[-1][0] == "ask" and h.agent_initiative_var.get() is False
+      and db.get_setting("agent.initiative_enabled") != "1")
+answers.append(True)
+h.agent_initiative_var.set(True)
+h.on_agent_initiative_toggled()
+check("「はい」ならONにする（動いているエージェントにもすぐ効く）", db.get_setting("agent.initiative_enabled") == "1"
+      and h.agent_runtime.config.initiative_enabled is True)
+h.agent_initiative_var.set(False)
+h.on_agent_initiative_toggled()
+check("OFFに戻せる", db.get_setting("agent.initiative_enabled") == "0" and h.agent_runtime.config.initiative_enabled is False)
+
+print("■ 記憶（既定OFF・ONにするとき確かめる・見て消せる）")
+check("3つとも既定はOFF", all(v.get() is False for v in h.agent_memory_vars.values()))
+answers.append(False)
+h.agent_memory_vars["memory_enabled"].set(True)
+h.on_agent_memory_toggled("memory_enabled")
+check("ONにするときは、他の人のことも覚えると書いて確かめる。「いいえ」ならOFF",
+      dialogs[-1][0] == "ask" and "ルームの他の人の名前" in dialogs[-1][2] and "繊細な事柄" in dialogs[-1][2]
+      and h.agent_memory_vars["memory_enabled"].get() is False)
+answers.append(True)
+h.agent_memory_vars["memory_enabled"].set(True)
+h.on_agent_memory_toggled("memory_enabled")
+check("「はい」ならON（動いているエージェントにもすぐ効く）", db.get_setting("agent.memory_enabled") == "1"
+      and h.agent_runtime.config.memory_enabled is True)
+answers.append(True)
+h.agent_memory_vars["impressions_enabled"].set(True)
+h.on_agent_memory_toggled("impressions_enabled")
+check("印象は「推定。口に出さない」と書いて確かめる", "口に出さない" in dialogs[-1][2] or "言いません" in dialogs[-1][2])
+store = h.agent_store
+store.upsert_person("伏せ字3", "伏せ字3")
+store.add_memory("person", "伏せ字3", "猫が好き", "high", 0.8, 86400)
+store.add_memory("impression", "伏せ字3", "冗談が好きそう", "low", 0.4, 86400)
+store.adjust_relationship("伏せ字3", 10, 2, "テスト")
+h.refresh_agent_memory_list()
+items = h.agent_memory_listbox.get(0, "end")
+check("覚えていることの一覧（印象は推定・確からしさ付き）", any("[伏せ字3・人] 猫が好き" == i for i in items)
+      and any("[伏せ字3・印象（推定）・確からしさ低] 冗談が好きそう" == i for i in items), items)
+check("関係の値の一覧", h.agent_relationship_listbox.get(0, "end") == ("伏せ字3: なじみ 10 ・ 温かさ +2",),
+      h.agent_relationship_listbox.get(0, "end"))
+h.delete_selected_agent_memory()
+check("選ばずに消そうとしたら案内", dialogs[-1][0] == "info")
+h.agent_memory_listbox.selection_set(0)
+h.delete_selected_agent_memory()
+check("選んだ記憶を1件消す", len(store.memories()) == 1)
+answers.append(True)
+h.reset_agent_relationships()
+check("関係の値をリセットできる", store.relationships() == [] and h.agent_relationship_listbox.size() == 0)
+answers.append(False)
+h.delete_all_agent_memory()
+check("全部消すのは確かめてから（いいえなら残す）", len(store.memories()) == 1)
+answers.append(True)
+h.delete_all_agent_memory()
+check("全部消す", store.memories() == [] and h.agent_memory_listbox.get(0) == "（まだありません）")
+for name in ("memory_enabled", "impressions_enabled"):
+    h.agent_memory_vars[name].set(False)
+    h.on_agent_memory_toggled(name)
+check("OFFに戻せる", db.get_setting("agent.memory_enabled") == "0" and h.agent_runtime.config.memory_enabled is False)
+
+print("■ ルームの様子")
+h._on_gravity_room({"name": "伏せ字1", "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2, "announcement": "x"})
+check("判断のログに短く出す", pump(h, lambda: "🏠 ルームの様子: 「伏せ字1」・ゲスト（1人）・席4人（アナウンスあり）" in agent_log(h)),
+      agent_log(h)[-200:])
+check("AI にも渡る", h.agent_runtime._room_info["name"] == "伏せ字1")
 
 print("■ 停止")
 h.stop_agent()

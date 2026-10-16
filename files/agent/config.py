@@ -36,6 +36,7 @@ def split_names(raw):
 class AgentConfig:
     ai_name: str = ""                      # 呼ばれ方（「、」で区切って複数。含まれていたら R6 を越えて判断する。強い合図）
     self_names: str = ""                   # GRAVITYでのこのアカウントの表示名（「、」で区切って複数）。この名前の発言は自分の発言
+    owner_names: str = ""                  # オーナー（このAIを動かしている本人）の表示名。親しく話してよい相手
     settle_seconds: float = 2.5            # 最後の出来事からこれだけ静かになったら、まとめて判断する
     inbox_max: int = 100                   # 受付箱の上限
     min_gap_after_speaking: float = 8.0    # R6: 自分が喋り終わってから、これだけは自分から話さない
@@ -54,8 +55,22 @@ class AgentConfig:
     # 呼ばれたときは、判断と文を1回で頼む（AIを呼ぶのが2回→1回。2026-10-16 本人「応答遅いの気になる」→「それもやろう」）。
     # 呼ばれていないときは今まで通り判断だけ先に頼む（黙るなら文を作らない＝費用がかからない）
     combined_when_addressed: bool = True
-    react_max_chars: int = 40              # C2: 短い反応の上限
-    engage_max_chars: int = 120            # C2: 参加の上限
+    # 静かなときに自分から話すか考える（既定OFF。外に見える動きなので本人がONにしたときだけ）
+    initiative_enabled: bool = False
+    initiative_quiet_seconds: float = 300.0       # これだけ誰も書かなかったら
+    initiative_min_gap_seconds: float = 900.0     # 自分から考えるのは、これだけ空けて（15分に1回まで）
+    initiative_activity_seconds: float = 1800.0   # 直近にやりとりがあった場だけ（誰もいない場で独り言を言わない）
+    # 記憶（設計書/07。⚠️ 他の人のことを覚える。どれも本人がONにしたときだけ。既定OFF）
+    memory_enabled: bool = False                  # 会話を覚える（人・この場・自分が言ったこと）
+    impressions_enabled: bool = False             # 人の印象を推定する（話し方・好み。推定として。口に出さない）
+    relationships_enabled: bool = False           # 関係の値（なじみ・温かさ）を持つ
+    summarize_interval_seconds: float = 600.0     # 覚えることを整理する間隔（10分）
+    summarize_quiet_seconds: float = 120.0        # 会話がこれだけ静かになったら、10分たっていなくても整理する
+    summarize_min_lines: int = 6                  # 他の人の発言がこれだけたまってから整理する
+    react_max_chars: int = 40              # C2: 短い反応の上限（声）
+    engage_max_chars: int = 120            # C2: 参加の上限（声）
+    chat_react_max_chars: int = 60         # C2: チャットの短い反応の上限（チャットは読むので声より長くてよい）
+    chat_engage_max_chars: int = 200       # C2: チャットの参加の上限（GRAVITYの1通は250字まで）
     hold_max_seconds: float = 30.0         # 保留した出来事は、これより古くなったら記録だけにする
     addressed_hold_max_seconds: float = 90.0   # 呼ばれた出来事は、回数の上限が空くまで長めに待つ（1分の上限を待てるように）
     ignore_words: list = field(default_factory=list)   # R9: これだけの出来事は判断しない
@@ -65,8 +80,9 @@ class AgentConfig:
     degraded_check_seconds: float = 60.0   # AI を呼ばない状態で、回復を確かめる間隔
 
     # 画面で変える項目
-    EDITABLE = ("ai_name", "self_names", "daily_call_limit", "daily_cost_limit_usd", "monthly_cost_limit_usd", "model",
-                "output_mode", "chat_send_mode")
+    EDITABLE = ("ai_name", "self_names", "owner_names", "daily_call_limit", "daily_cost_limit_usd",
+                "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
+                "memory_enabled", "impressions_enabled", "relationships_enabled")
 
     @property
     def ai_names(self):
@@ -81,6 +97,10 @@ class AgentConfig:
     @property
     def self_name_list(self):
         return split_names(self.self_names)
+
+    @property
+    def owner_name_list(self):
+        return split_names(self.owner_names)
 
     @property
     def call_names(self):
@@ -110,7 +130,10 @@ class AgentConfig:
                 continue
             current = getattr(config, f.name)
             try:
-                value = type(current)(raw) if not isinstance(current, str) else str(raw)
+                if isinstance(current, bool):       # ⚠️ bool("0") は True になるので文字で見る
+                    value = str(raw).strip().lower() in ("1", "true", "on", "yes")
+                else:
+                    value = type(current)(raw) if not isinstance(current, str) else str(raw)
             except (TypeError, ValueError):
                 continue
             setattr(config, f.name, value)
@@ -123,8 +146,10 @@ class AgentConfig:
         if config.chat_send_mode not in CHAT_SEND_MODES:
             config.chat_send_mode = CHAT_APPROVE
         config.self_names = config.self_names.strip()[:NAMES_MAX_CHARS]
+        config.owner_names = config.owner_names.strip()[:NAMES_MAX_CHARS]
         return config
 
     def save(self, save_setting):
         for name in self.EDITABLE:
-            save_setting(SETTING_PREFIX + name, str(getattr(self, name)))
+            value = getattr(self, name)
+            save_setting(SETTING_PREFIX + name, ("1" if value else "0") if isinstance(value, bool) else str(value))

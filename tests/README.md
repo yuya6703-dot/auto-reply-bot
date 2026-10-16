@@ -26,6 +26,7 @@
 | `test_agent_gravity_bridge.py` | 不要 | GRAVITYのチャット欄の行をAIの出来事にする橋（段階5）: 同じ画面を何周読んでも1回だけ（T30）、始めた時点・上へ戻した昔の行は「前からあった」、自分の発言、AIへつないで前からの行には反応しないこと。監視の本体を にせの端末で回し、キーワード自動返信が今まで通りなことも |
 | `test_agent_chat_output.py` | 不要 | AIがチャットに書き込む（段階5b）: チャットに返す・声は使わない（T45）、捨てた下書きは数えない（T46）、長すぎる文（T47）、自分の文に反応しない（T48）、監視していないとき（T49）、緊急停止（T50）、1分1通、監視ワーカーの送信待ち（AIの文だけ捨てる・送った文は自分の発言） |
 | `test_fast_input.py` | 不要 | 入力欄へ文字を入れる・消すのを、今選ばれている部品を直接さわるやり方にした（MuMu では uiautomator2 の文字入力の切り替えが止められ、1回の送信で約17秒待っていた）。遅いやり方を呼ばないこと・入らないときは前のやり方へ戻ること |
+| `test_agent_memory.py` | 不要 | 記憶（人・この場・自分・印象・関係の値）: OFFなら覚えない、会話に出てこない人・繊細な事柄は覚えない、印象は推定として渡す、関係の値は少しずつ動く、消せる・期限で消える、エージェントの中で整理して次の判断に入る |
 | `agent_harness.py` | ― | 上のAIのテストが共通で使う器（模擬のAI・にせの声・一時フォルダの `agent_data.db`）。テストそのものではない |
 
 ## 実行
@@ -50,6 +51,7 @@ python tests/test_agent_gemini.py
 python tests/test_agent_gravity_bridge.py
 python tests/test_agent_chat_output.py
 python tests/test_fast_input.py
+python tests/test_agent_memory.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方

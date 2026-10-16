@@ -92,6 +92,21 @@ check("名前が切れて出ても（先頭が同じなら）is_self", new[1].is
 check("似ているが違う名前は他の人", not new[2].is_self)
 check("自分がしたこと（いいね）のお知らせも自分のこと", new[3].is_self and not new[4].is_self)
 
+print("■ ルームの様子（ルーム名・人数・席・アナウンス。2026-10-16）")
+rooms = []
+b2 = A.GravityChatBridge(lambda events: None, on_room=rooms.append)
+info = A.read_room_info(GUEST, 2)
+check("ルームの画面から読む（押さない）", info == {"name": "伏せ字1", "permission": "プライベート音声ルーム",
+                                                 "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2}, info)
+check("ルームの画面でなければ読まない", A.read_room_info(fixture("voiceroom_minimized.xml"), 2) is None)
+announce_rows = A.parse_chat_rows(fixture("voiceroom_announcement.xml"), 2)
+b2.on_room(info, announce_rows)
+check("アナウンスの行の本文も渡す", rooms and rooms[-1]["announcement"] == "伏せ字4", rooms)
+b2.on_room(info, ROWS)
+check("変わらなければ知らせない（アナウンスが流れて見えなくなっても覚えている）", len(rooms) == 1)
+b2.on_room(dict(info, guests="ゲスト（2人）"), ROWS)
+check("人数が変わったら知らせる", len(rooms) == 2 and rooms[-1]["guests"] == "ゲスト（2人）")
+
 print("■ AI へつなぐ: 前からあった行には反応せず、新しい行で判断する")
 a = Agent(mode=MODE_ENGAGE)
 bridge = A.GravityChatBridge(lambda events: [a.runtime.submit(e) for e in events])
@@ -101,6 +116,10 @@ check("前からあった行は記録だけ（R3。AI を呼ばない）", a.wai
 bridge.on_rows(ROWS + [msg("伏せ字7", "アイ、聞こえる？")])
 check("新しい行で AI が判断して喋る", wait_until(lambda: len(a.speaker.spoken) == 1), a.logs[-3:])
 check("AI には前からあった行も直近の会話として渡る", "伏せ字3: 伏せ字4" in a.decide_calls()[0].messages[0].content)
+a.runtime.set_room_info({"name": "伏せ字1", "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2, "announcement": ""})
+bridge.on_rows(ROWS + [msg("伏せ字7", "アイ、聞こえる？"), msg("伏せ字8", "アイちゃん、ルームどう？")])
+check("ルームの様子も AI に渡る", wait_until(lambda: len(a.decide_calls()) == 2)
+      and "ルーム名: 伏せ字1" in a.decide_calls()[-1].messages[0].content)
 a.close()
 
 
@@ -166,6 +185,10 @@ fresh = [e for e in received if not e.backlog]
 check("始めた時点の5行は「前からあった」", len([e for e in received if e.backlog]) == 5, len(received))
 check("新しい参加のお知らせを1回だけ AI へ渡す", [e.text for e in fresh] == ["伏せ字7が音声ルームに参加しました"], fresh)
 check("キーワード自動返信は今まで通り（2人に1回ずつ）", sent == ["伏せ字5さん、いらっしゃい！", "伏せ字7さん、いらっしゃい！"], sent)
+rooms = []
+bridge = A.GravityChatBridge(lambda events: None, on_room=rooms.append)
+run_monitor([("出てこない言葉", "x", A.KEYWORD_TARGET_ANY)], [GUEST], rounds=3, bridge=bridge)
+check("監視の本体からルームの様子が届く", rooms and rooms[0]["name"] == "伏せ字1", rooms)
 
 received.clear()
 off = A.GravityChatBridge(received.extend, active=lambda: False)

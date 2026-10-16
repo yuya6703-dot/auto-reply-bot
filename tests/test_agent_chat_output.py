@@ -27,7 +27,7 @@ check("T45 チャットに1通", wait_until(lambda: len(a.chat.posted) == 1), a.
 check("T45 音声合成・再生は呼ばれない", a.speaker.spoken == [])
 combined = a.decide_calls()[0]
 check("呼ばれたので1回で頼む。そのときもチャット用の文の作り方で頼む", combined.hints.get("combined")
-      and "改行・箇条書き・URLを使わない" in combined.system and "チャットに書き込む文" in combined.messages[0].content
+      and "改行は2つまで" in combined.system and "チャットに書き込む文" in combined.messages[0].content
       and a.generate_calls() == [])
 check("判断にも「今の応答のしかた: チャット」を伝える", "チャット欄に書き込む" in a.decide_calls()[0].messages[0].content)
 check("発言の記録は posted", wait_until(lambda: a.utterance_rows() and a.utterance_rows()[-1][1] == "posted"),
@@ -58,6 +58,14 @@ check("空いたら判断して返事する", wait_until(lambda: len(a.chat.post
 check("判断のログに保留と見直す時間が出る", any("⏸ 保留（R7" in line and "秒後に見直す" in line for line in a.logs), a.logs)
 check("呼ばれた出来事は長く待てる（90秒）", a.runtime._hold_limit(make_event("@テストちゃ.. ねえ")) == 90.0
       and a.runtime._hold_limit(make_event("ねえ")) == 30.0)
+a.close()
+
+print("■ チャットは改行を残し、声より長く書ける（2026-10-16）")
+a = Agent(mode=MODE_ENGAGE, output_mode=OUTPUT_CHAT)
+a.mock.script_generate = [{"text": "それいいね！\n" + "あ" * 150 + "\nまた教えて", "emotion": "joy"}]
+a.say("最近どう？", speaker="C")
+check("改行入り・150字を超える文もチャットに送る（上限200）", wait_until(lambda: len(a.chat.posted) == 1)
+      and a.chat.posted[0].count("\n") == 2, a.utterance_rows())
 a.close()
 
 print("■ T46 捨てた下書きは数えない")

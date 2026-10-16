@@ -19,7 +19,7 @@ import time
 from ..events import AgentEvent
 from ..persona import Persona
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2     # 2: 記憶（persons・memories・relationships）を足した（2026-10-16）
 FILE_NAME = "agent_data.db"
 BACKUP_PREFIX = "agent_data_"
 BACKUP_KEEP = 7
@@ -29,6 +29,8 @@ RETENTION = {"events": 7 * DAY, "turns": 30 * DAY, "decisions": 30 * DAY,
              "utterances": 30 * DAY, "usage_records": 365 * DAY}
 _TIME_COLUMN = {"events": "observed_at", "turns": "started_at", "decisions": "created_at",
                 "utterances": "started_at", "usage_records": "at"}
+
+PERSON_KEEP = 180 * DAY     # 人は、最後に見てから180日で忘れる（その人の記憶と関係の値も）
 
 OPEN_OK = "ok"
 OPEN_RESTORED = "restored"       # 壊れていたのでバックアップから戻した
@@ -54,6 +56,13 @@ CREATE TABLE IF NOT EXISTS usage_records (
     ok INTEGER, error_kind TEXT, turn_id TEXT);
 CREATE INDEX IF NOT EXISTS idx_usage_at ON usage_records(at);
 CREATE TABLE IF NOT EXISTS persona (persona_id TEXT PRIMARY KEY, json TEXT);
+CREATE TABLE IF NOT EXISTS persons (
+    person_key TEXT PRIMARY KEY, display_name TEXT, first_seen REAL, last_seen REAL);
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT, person_key TEXT, content TEXT, confidence TEXT,
+    importance REAL, created_at REAL, updated_at REAL, expires_at REAL, pinned INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS relationships (
+    person_key TEXT PRIMARY KEY, familiarity REAL, warmth REAL, updated_at REAL, history TEXT);
 """
 
 
@@ -81,6 +90,10 @@ class AgentStore:
             self._conn.executescript(_SCHEMA)
             if self._conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0:
                 self._conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+            else:
+                # 表は CREATE IF NOT EXISTS で足りるので、番号だけ上げる
+                self._conn.execute("UPDATE schema_version SET version = ? WHERE version < ?",
+                                   (SCHEMA_VERSION, SCHEMA_VERSION))
             self._conn.commit()
             self.purge()
             self.open_status = status
@@ -157,11 +170,115 @@ class AgentStore:
             return True
 
     def purge(self):
-        """保存期間を過ぎたものを消す"""
+        """保存期間を過ぎたものを消す（記憶は期限、人は最後に見てから180日。消した人の記憶と関係も消す）"""
         with self._lock:
             now = self._clock()
             for table, keep in RETENTION.items():
                 self._conn.execute(f"DELETE FROM {table} WHERE {_TIME_COLUMN[table]} < ?", (now - keep,))
+            self._conn.execute("DELETE FROM memories WHERE pinned = 0 AND expires_at < ?", (now,))
+            gone = [r[0] for r in self._conn.execute("SELECT person_key FROM persons WHERE last_seen < ?",
+                                                    (now - PERSON_KEEP,))]
+            for key in gone:
+                self._forget_person(key)
+            self._conn.commit()
+
+    # --- 記憶（2026-10-16。⚠️ 他の人のことが入る。本人がONにしたときだけ書く・画面から消せる・期限で消える） ---
+    def _forget_person(self, person_key):
+        self._conn.execute("DELETE FROM memories WHERE person_key = ?", (person_key,))
+        self._conn.execute("DELETE FROM relationships WHERE person_key = ?", (person_key,))
+        self._conn.execute("DELETE FROM persons WHERE person_key = ?", (person_key,))
+
+    def upsert_person(self, person_key, display_name):
+        with self._lock:
+            now = self._clock()
+            row = self._conn.execute("SELECT display_name FROM persons WHERE person_key = ?", (person_key,)).fetchone()
+            if row is None:
+                self._conn.execute("INSERT INTO persons (person_key, display_name, first_seen, last_seen) VALUES (?, ?, ?, ?)",
+                                   (person_key, display_name, now, now))
+            else:
+                # 切れていない（長い）名前を残す
+                name = display_name if len(display_name or "") > len(row[0] or "") else row[0]
+                self._conn.execute("UPDATE persons SET display_name = ?, last_seen = ? WHERE person_key = ?",
+                                   (name, now, person_key))
+            self._conn.commit()
+
+    def persons(self):
+        with self._lock:
+            return self._conn.execute("SELECT person_key, display_name, first_seen, last_seen FROM persons"
+                                      " ORDER BY last_seen DESC").fetchall()
+
+    def add_memory(self, scope, person_key, content, confidence, importance, ttl_seconds):
+        with self._lock:
+            now = self._clock()
+            same = self._conn.execute("SELECT id FROM memories WHERE scope = ? AND IFNULL(person_key, '') = ?"
+                                      " AND content = ?", (scope, person_key or "", content)).fetchone()
+            if same:      # 同じ内容は覚え直す（期限を延ばす）
+                self._conn.execute("UPDATE memories SET updated_at = ?, expires_at = MAX(expires_at, ?) WHERE id = ?",
+                                   (now, now + ttl_seconds, same[0]))
+            else:
+                self._conn.execute(
+                    "INSERT INTO memories (scope, person_key, content, confidence, importance, created_at, updated_at,"
+                    " expires_at, pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                    (scope, person_key, content, confidence, importance, now, now, now + ttl_seconds))
+            self._conn.commit()
+
+    def memories(self, person_key=None, limit=200):
+        """新しい順 [(id, scope, person_key, content, confidence, importance, updated_at, pinned)]"""
+        with self._lock:
+            if person_key is None:
+                rows = self._conn.execute(
+                    "SELECT id, scope, person_key, content, confidence, importance, updated_at, pinned FROM memories"
+                    " ORDER BY updated_at DESC LIMIT ?", (limit,))
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, scope, person_key, content, confidence, importance, updated_at, pinned FROM memories"
+                    " WHERE person_key = ? ORDER BY importance DESC, updated_at DESC LIMIT ?", (person_key, limit))
+            return rows.fetchall()
+
+    def delete_memory(self, memory_id):
+        with self._lock:
+            self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            self._conn.commit()
+
+    def delete_all_memories(self):
+        """記憶・人・関係の値を全部消す（出来事や判断の記録は残る）"""
+        with self._lock:
+            for table in ("memories", "relationships", "persons"):
+                self._conn.execute(f"DELETE FROM {table}")
+            self._conn.commit()
+
+    def relationship(self, person_key):
+        with self._lock:
+            row = self._conn.execute("SELECT familiarity, warmth, updated_at, history FROM relationships"
+                                     " WHERE person_key = ?", (person_key,)).fetchone()
+        if row is None:
+            return None
+        return {"familiarity": row[0], "warmth": row[1], "updated_at": row[2], "history": json.loads(row[3] or "[]")}
+
+    def adjust_relationship(self, person_key, d_familiarity, d_warmth, reason):
+        """関係の値を少しだけ動かす（なじみ 0〜100、温かさ -100〜100）。理由つきで直近20件を残す"""
+        with self._lock:
+            now = self._clock()
+            current = self.relationship(person_key) or {"familiarity": 0.0, "warmth": 0.0, "history": []}
+            familiarity = min(100.0, max(0.0, current["familiarity"] + d_familiarity))
+            warmth = min(100.0, max(-100.0, current["warmth"] + d_warmth))
+            history = (current["history"] + [{"at": now, "familiarity": d_familiarity, "warmth": d_warmth,
+                                              "reason": reason[:40]}])[-20:]
+            self._conn.execute(
+                "INSERT OR REPLACE INTO relationships (person_key, familiarity, warmth, updated_at, history)"
+                " VALUES (?, ?, ?, ?, ?)", (person_key, familiarity, warmth, now, json.dumps(history, ensure_ascii=False)))
+            self._conn.commit()
+
+    def relationships(self):
+        with self._lock:
+            return self._conn.execute(
+                "SELECT r.person_key, IFNULL(p.display_name, r.person_key), r.familiarity, r.warmth, r.updated_at"
+                " FROM relationships r LEFT JOIN persons p ON p.person_key = r.person_key"
+                " ORDER BY r.updated_at DESC").fetchall()
+
+    def reset_relationships(self):
+        with self._lock:
+            self._conn.execute("DELETE FROM relationships")
             self._conn.commit()
 
     # --- 書く ---
@@ -255,7 +372,7 @@ class AgentStore:
                 " ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
     def count(self, table):
-        if table not in RETENTION and table != "persona":
+        if table not in RETENTION and table not in ("persona", "persons", "memories", "relationships"):
             raise ValueError(table)
         with self._lock:
             return self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]

@@ -22,14 +22,17 @@ from .config import OUTPUT_CHAT
 from .context import (ConversationWindow, build_combined_request, build_decide_request, build_generate_request,
                       max_chars_for, rules_note)
 from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HOLD, OBSERVE, SILENT, USE_TOOL,
-                       Decision, DecisionFailed, request_decision)
+                       Decision, DecisionFailed, call_llm, request_decision)
 from .gate import HOLD as GATE_HOLD
 from .gate import OBSERVE as GATE_OBSERVE
 from .gate import Gate, GateSnapshot, is_strong_signal
 from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, precheck, request_decision_with_text,
                          request_utterance)
+from .events import KIND_SYSTEM, SOURCE_SYSTEM, AgentEvent, new_event_id
 from .inbox import Inbox
-from .llm.base import KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_GENERATE, LLMError
+from .memory.recall import MemoryKeeper
+from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_GENERATE, PURPOSE_SUMMARIZE,
+                       LLMError)
 from .persona import DEFAULT_PERSONA_ID, Persona
 from .usage import UsageTracker
 
@@ -98,6 +101,7 @@ class AgentRuntime:
         self.window = ConversationWindow(clock=self._clock)
         self.usage = UsageTracker(deps.store, clock=self._clock)
         self.persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
+        self.memory = MemoryKeeper(deps.store, lambda: self.config, clock=self._clock)
 
         self._lock = threading.RLock()
         self._thread = None
@@ -123,6 +127,9 @@ class AgentRuntime:
         self._notified = set()
         self._current_cancel = None
         self._speech_cancel = None
+        self._room_info = None             # ルームの様子（ルーム名・ゲスト・席・アナウンス）。監視から届く
+        self._last_fresh_at = None         # 他の人の新しい出来事が最後に届いた時刻
+        self._last_initiative_at = 0.0     # 自分から話すか考えた時刻
 
     # ================= 操作（画面のスレッドから） =================
     @property
@@ -232,6 +239,8 @@ class AgentRuntime:
             ok = self.inbox.submit(event)
             if ok and self._state == STATE_IDLE:
                 self._state = STATE_GATHERING
+            if ok and not event.is_self and not event.backlog and event.source != SOURCE_SYSTEM:
+                self._last_fresh_at = self._clock()
         if ok:
             self._report_state()
         return ok
@@ -243,6 +252,11 @@ class AgentRuntime:
         if not speaking:
             self.inbox.wake()
         self._report_state()
+
+    def set_room_info(self, info):
+        """ルームの様子を受け取る（監視のスレッドから）。次の判断から使う"""
+        with self._lock:
+            self._room_info = dict(info) if info else None
 
     def today_usage(self):
         return self.usage.today()
@@ -291,8 +305,9 @@ class AgentRuntime:
                 if self._emergency:
                     continue
                 self._maybe_recover()
-                events = self._take_events(batch)
+                events = self._take_events(batch) or self._initiative_events()
                 if not events:
+                    self._maybe_summarize()
                     self._set_state(STATE_GATHERING if self.inbox.pending_count() else STATE_IDLE)
                     continue
                 try:
@@ -346,6 +361,35 @@ class AgentRuntime:
             return max(self.config.hold_max_seconds, self.config.addressed_hold_max_seconds)
         return self.config.hold_max_seconds
 
+    def _initiative_events(self):
+        """
+        静かなときに、自分から話すか考えるための出来事を作る（本人がONにしたときだけ。既定OFF）。
+        直近にやりとりがあった場で、しばらく誰も書かず、自分も話していないときだけ。15分に1回まで
+        """
+        c = self.config
+        now = self._clock()
+        with self._lock:
+            if (not c.initiative_enabled or self._degraded or self._listening or self._emergency
+                    or self._held or self._last_fresh_at is None):
+                return []
+            quiet = now - self._last_fresh_at
+            if not (c.initiative_quiet_seconds <= quiet <= c.initiative_activity_seconds):
+                return []
+            if self._last_utterance_end is not None and now - self._last_utterance_end < c.initiative_quiet_seconds:
+                return []
+            if now - self._last_initiative_at < c.initiative_min_gap_seconds:
+                return []
+            self._last_initiative_at = now
+        if self.inbox.pending_count():
+            return []
+        minutes = max(1, int(quiet // 60))
+        self.log.write(f"💭 {minutes}分ほど静かなので、自分から話すか考えます。")
+        return [AgentEvent(event_id=new_event_id(), kind=KIND_SYSTEM, source=SOURCE_SYSTEM,
+                           key=f"initiative:{int(now)}", speaker=None,
+                           text=f"チャットが{minutes}分ほど静か。話題を出すか、そのまま静かにしておくかを決めてください。"
+                                "無理に話さなくてよい。",
+                           observed_at=now, meta={"initiative": True})]
+
     def _new_turn(self, events, now, store_events=True):
         turn_id = uuid.uuid4().hex
         if store_events:
@@ -377,7 +421,7 @@ class AgentRuntime:
         now = self._clock()
         turn_id = self._new_turn(events, now)
         self.window.add_events(events)      # 保留から戻った出来事は、窓が同じものを2度入れない
-
+        self.memory.observe(events)
         # --- 規則の関所（AI を呼ばない） ---
         snap = self._snapshot(now)
         self._warn_budget(snap)
@@ -410,12 +454,17 @@ class AgentRuntime:
         combined = result.strong and self.config.combined_when_addressed
         prepared = None
         builder = build_combined_request if combined else build_decide_request
+        with self._lock:
+            room = dict(self._room_info) if self._room_info else None
+        keep_newlines = self.config.output_mode == OUTPUT_CHAT
+        memory_lines = self.memory.recall(events)
         request = builder(events, self.window, self.persona, self.config, note, now,
-                          timeout=self.config.decide_timeout_seconds)
+                          timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines)
         try:
             if combined:
                 decision, prepared = request_decision_with_text(self._provider, request, turn_id, cancel,
-                                                                self._usage_recorder(turn_id, PURPOSE_DECIDE))
+                                                                self._usage_recorder(turn_id, PURPOSE_DECIDE),
+                                                                keep_newlines)
             else:
                 decision = request_decision(self._provider, request, turn_id, cancel,
                                             self._usage_recorder(turn_id, PURPOSE_DECIDE))
@@ -457,10 +506,11 @@ class AgentRuntime:
                 self.log.write("ℹ️ 1回で頼んだ返事に文が無かったので、文だけもう一度頼みます。")
             self._set_state(STATE_GENERATING)
             request = build_generate_request(decision, events, self.window, self.persona, self.config,
-                                             self._clock(), timeout=self.config.decide_timeout_seconds)
+                                             self._clock(), timeout=self.config.decide_timeout_seconds, room=room,
+                                             memory_lines=memory_lines)
             try:
                 utterance = request_utterance(self._provider, request, turn_id, cancel,
-                                              self._usage_recorder(turn_id, PURPOSE_GENERATE))
+                                              self._usage_recorder(turn_id, PURPOSE_GENERATE), keep_newlines)
             except (DecisionFailed, LLMError) as e:
                 if isinstance(e, LLMError):
                     self._on_llm_failure(e, turn_id, during="文を作る")
@@ -480,9 +530,11 @@ class AgentRuntime:
 
         # --- 出す（声 / チャット） ---
         if self.config.output_mode == OUTPUT_CHAT:
-            self._post_chat(utterance, decision, turn_id)
+            delivered = self._post_chat(utterance, decision, turn_id)
         else:
-            self._speak(utterance, decision, turn_id)
+            delivered = self._speak(utterance, decision, turn_id)
+        if delivered and decision.target:
+            self.memory.note_interaction(decision.target)
 
     def _precheck(self, utterance, decision, fresh_seq):
         if self.inbox.fresh_seq != fresh_seq or self._listening:
@@ -523,6 +575,7 @@ class AgentRuntime:
             self.log.write("⏹ 途中で止めました。")
         elif outcome == SPEECH_FAILED:
             self.log.write("⚠️ 声にできませんでした（音声エンジンを確かめてください）。")
+        return outcome == SPOKEN
 
     def _post_chat(self, utterance, decision, turn_id):
         """チャットに書き込む（確認は post_chat の側）。送れたときだけ「発言した」に数える"""
@@ -553,6 +606,42 @@ class AgentRuntime:
         else:
             self.log.write("⚠️ チャットに送れませんでした（メインタブで監視していないか、送信待ちが一杯）。")
         self.deps.store.add_utterance(turn_id, utterance.text, utterance.emotion, "chat", outcome, started, ended)
+        return outcome == POSTED
+
+    def _maybe_summarize(self):
+        """
+        会話がたまったら、覚えておくことを AI に整理させる（覚えるがONのときだけ。設計書/07 の 4.2）。
+        AIを呼ぶ回数・費用の上限に当たっていれば、整理もしない
+        """
+        now = self._clock()
+        quiet = now - self._last_fresh_at if self._last_fresh_at is not None else 0.0
+        if self._degraded or self._emergency or self._provider is None or not self.memory.due(quiet):
+            return
+        snap = self._snapshot(now)
+        c = self.config
+        if (snap.calls_today >= c.daily_call_limit or snap.cost_today >= c.daily_cost_limit_usd
+                or snap.cost_month >= c.monthly_cost_limit_usd):
+            self.memory.postpone()
+            return
+        speakers = [e.speaker for e in self.window.recent_events() if e.speaker and not e.is_self]
+        request = self.memory.build_request(self.window, self.config.display_name)
+        cancel = CancelToken()
+        with self._lock:
+            self._current_cancel = cancel
+        try:
+            response = call_llm(self._provider, request, cancel, self._usage_recorder(None, PURPOSE_SUMMARIZE))
+        except LLMError as e:
+            self.memory.postpone()
+            self.log.write(f"⚠️ 覚えることの整理に失敗しました（{e.kind}）。あとでまた試します。")
+            return
+        finally:
+            with self._lock:
+                self._current_cancel = None
+        if cancel.cancelled:
+            return
+        kept, dropped = self.memory.apply_summary(response.structured, speakers)
+        note = f"（繊細な事柄など{dropped}件は覚えなかった）" if dropped else ""
+        self.log.write(f"🧠 覚えておくことを整理しました（新しく{kept}件）{note}。")
 
     def _usage_recorder(self, turn_id, purpose):
         """AI を呼ぶたびに利用量を残す（失敗した呼び出しも1回と数える）"""
