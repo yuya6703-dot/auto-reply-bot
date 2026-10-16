@@ -20,7 +20,7 @@ from ..events import AgentEvent
 from ..persona import Persona
 
 ACCOUNT_SEPARATOR = "／"      # 人の目印は「GRAVITYのアカウント／相手の名前」（アカウントが空なら名前だけ）
-SCHEMA_VERSION = 3     # 2: 記憶（persons・memories・relationships）を足した。3: GRAVITYのアカウントごとに分けた（account 列。2026-10-16）
+SCHEMA_VERSION = 4     # 4: 予定の記憶（due_at・done 列。2026-10-16）。 2: 記憶（persons・memories・relationships）を足した。3: GRAVITYのアカウントごとに分けた（account 列。2026-10-16）
 FILE_NAME = "agent_data.db"
 BACKUP_PREFIX = "agent_data_"
 BACKUP_KEEP = 7
@@ -91,6 +91,8 @@ class AgentStore:
             self._conn.executescript(_SCHEMA)
             self._add_column_if_missing("memories", "account", "TEXT DEFAULT ''")
             self._add_column_if_missing("persons", "account", "TEXT DEFAULT ''")
+            self._add_column_if_missing("memories", "due_at", "REAL")
+            self._add_column_if_missing("memories", "done", "INTEGER DEFAULT 0")
             if self._conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0:
                 self._conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
             else:
@@ -219,7 +221,7 @@ class AgentStore:
             return self._conn.execute("SELECT person_key, display_name, first_seen, last_seen FROM persons"
                                       " WHERE IFNULL(account, '') = ? ORDER BY last_seen DESC", (account,)).fetchall()
 
-    def add_memory(self, scope, person_key, content, confidence, importance, ttl_seconds, account=""):
+    def add_memory(self, scope, person_key, content, confidence, importance, ttl_seconds, account="", due_at=None):
         with self._lock:
             now = self._clock()
             same = self._conn.execute("SELECT id FROM memories WHERE scope = ? AND IFNULL(person_key, '') = ?"
@@ -231,8 +233,9 @@ class AgentStore:
             else:
                 self._conn.execute(
                     "INSERT INTO memories (scope, person_key, content, confidence, importance, created_at, updated_at,"
-                    " expires_at, pinned, account) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
-                    (scope, person_key, content, confidence, importance, now, now, now + ttl_seconds, account or ""))
+                    " expires_at, pinned, account, due_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                    (scope, person_key, content, confidence, importance, now, now, now + ttl_seconds, account or "",
+                     due_at))
             self._conn.commit()
 
     def memories(self, person_key=None, limit=200, account=None):
@@ -259,6 +262,34 @@ class AgentStore:
                 "SELECT m.id, IFNULL(m.account, ''), m.scope, IFNULL(p.display_name, m.person_key), m.content, m.confidence"
                 " FROM memories m LEFT JOIN persons p ON p.person_key = m.person_key"
                 " ORDER BY m.updated_at DESC LIMIT ?", (limit,)).fetchall()
+
+    def reinforce(self, memory_ids, extend_seconds, cap_seconds):
+        """
+        思い出して使った記憶の期限を延ばす（人間の「思い出すほど忘れにくい」。2026-10-16）。
+        今から extend_seconds 後まで延ばす。ただし覚えてから cap_seconds（1年）より先には延ばさない。予定は延ばさない
+        """
+        ids = [int(i) for i in memory_ids]
+        if not ids:
+            return
+        with self._lock:
+            now = self._clock()
+            marks = ",".join("?" * len(ids))
+            self._conn.execute(f"UPDATE memories SET expires_at = MIN(MAX(expires_at, ?), created_at + ?)"
+                               f" WHERE id IN ({marks}) AND scope != 'plan'", (now + extend_seconds, cap_seconds, *ids))
+            self._conn.commit()
+
+    def plans(self, person_key):
+        """その人の予定 [(id, content, due_at, done)]（日付の近い順）"""
+        with self._lock:
+            return self._conn.execute("SELECT id, content, due_at, IFNULL(done, 0) FROM memories"
+                                      " WHERE scope = 'plan' AND person_key = ? ORDER BY due_at", (person_key,)).fetchall()
+
+    def finish_plans(self, person_key, before):
+        """日付の過ぎた予定を「もう聞いた」にする（同じことを何度も聞かない）"""
+        with self._lock:
+            self._conn.execute("UPDATE memories SET done = 1 WHERE scope = 'plan' AND person_key = ? AND due_at < ?",
+                               (person_key, before))
+            self._conn.commit()
 
     def delete_memory(self, memory_id):
         with self._lock:

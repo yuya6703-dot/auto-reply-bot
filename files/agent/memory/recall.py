@@ -24,6 +24,7 @@ SCOPE_PERSON = "person"
 SCOPE_ROOM = "room"
 SCOPE_SELF = "self"
 SCOPE_IMPRESSION = "impression"      # 人の印象（推定）
+SCOPE_PLAN = "plan"                  # 人の予定（人間の「予定の記憶」。日付が来たら・過ぎたら思い出す。2026-10-16）
 SCOPES = (SCOPE_PERSON, SCOPE_ROOM, SCOPE_SELF)
 CONFIDENCES = ("low", "mid", "high")
 CONFIDENCE_LABELS = {"low": "低", "mid": "中", "high": "高"}
@@ -34,6 +35,12 @@ MAX_CONTENT_CHARS = 80
 MAX_NEW_PER_SUMMARY = 6
 WARMTH_STEP_LIMIT = 2.0             # 1回の整理で温かさが動く上限
 FAMILIARITY_PER_TALK = 2.0          # AI が話しかけるたびに、なじみが上がる量
+REINFORCE_SECONDS = 30 * DAY        # 思い出して使った記憶は、今から30日は残す（人間の「思い出すほど忘れにくい」）
+REINFORCE_CAP = 365 * DAY           # ただし覚えてから1年より先には延ばさない
+PLAN_SOON_DAYS = 7                  # これより先の予定は、まだ渡さない
+PLAN_KEEP_AFTER = 14 * DAY          # 予定は、その日から2週間で忘れる
+MAX_PLANS_PER_SUMMARY = 3
+_WEEKDAYS = "月火水木金土日"
 
 # 覚えない繊細な事柄（H5）。含む記憶は捨てる。⚠️ 誤って捨てる方に倒す
 SENSITIVE = re.compile(
@@ -48,7 +55,8 @@ SUMMARIZE_SYSTEM = f"""あなたは会話の記録係です。直近の会話か
 - 健康・病気・障害・信条・宗教・政治・性的指向・人種・国籍・犯罪歴・借金・住所・電話番号・本名・学校や会社の名前など、
   繊細な事柄と個人情報は書かないでください
 - 人の性格を断定しないでください。印象は「〜な傾向がありそう」のように書き、確からしさ（low / mid / high）を付けます
-- 新しく分かったことが無ければ、空の配列を返してください。1つの内容は40字以内"""
+- 新しく分かったことが無ければ、空の配列を返してください。1つの内容は40字以内
+- 「すでに覚えていること」が今の会話で古くなった・間違いと分かったら、その番号を outdated に入れてください（新しいことは memories へ）"""
 
 SUMMARY_SCHEMA = {
     "type": "object",
@@ -67,6 +75,12 @@ SUMMARY_SCHEMA = {
         "relationships": {"type": "array", "items": {"type": "object", "properties": {
             "person": {"type": "string"}, "warmth_delta": {"type": "number"}, "reason": {"type": "string"}},
             "required": ["person", "warmth_delta"]}},
+        # 予定の記憶（2026-10-16）。日付は YYYY-MM-DD（今日の日付を渡す）
+        "plans": {"type": "array", "items": {"type": "object", "properties": {
+            "person": {"type": "string"}, "content": {"type": "string"}, "date": {"type": "string"}},
+            "required": ["person", "content", "date"]}},
+        # 記憶の手入れ（2026-10-16）。「すでに覚えていること」の #番号のうち、古くなった・間違いと分かったもの
+        "outdated": {"type": "array", "items": {"type": "integer"}},
     },
     "required": ["memories"],
 }
@@ -116,6 +130,19 @@ def display_of(person_key):
     return (person_key or "").split(ACCOUNT_SEPARATOR, 1)[-1]
 
 
+def _day_start(at):
+    """その日の0時（その土地の時刻）"""
+    t = time.localtime(at)
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+def _parse_day(text):
+    try:
+        return time.mktime(time.strptime(str(text or "").strip()[:10], "%Y-%m-%d"))
+    except (ValueError, OverflowError):
+        return None
+
+
 def returning_text(before, now):
     """「久しぶり」の行。前に見た日と、どれくらい空いたか"""
     days = int((now - before) // DAY)
@@ -136,6 +163,8 @@ class MemoryKeeper:
         self._pending_lines = 0           # 前の整理から増えた、他の人の発言の数
         # 久しぶりに来た人 {人の目印: (前に見た時刻, 気づいた時刻)}。人間の「あ、久しぶり」にあたる（時間の感覚）
         self._returning = {}
+        self._shown_ids = set()           # 整理のときに「すでに覚えていること」として見せた記憶（outdated で消してよいもの）
+        self.last_forgotten = 0           # 前の整理で、古くなったとして消した数
 
     # --- 人 ---
     def person_key(self, name):
@@ -220,6 +249,7 @@ class MemoryKeeper:
         if known:
             with self._lock:
                 self._returning.pop(known, None)
+            self._store.finish_plans(known, _day_start(self._clock()))     # 過ぎた予定は、話しかけたら「聞いた」にする
         if not (config.memory_enabled and config.relationships_enabled) or not name:
             return
         key = self.person_key(name)
@@ -245,11 +275,19 @@ class MemoryKeeper:
             since = self._last_summary_at
         lines = [describe_event(e, now) for e in window.recent_events()
                  if e.observed_at >= since - 60 and self.in_current_account(e)]
-        known = []
-        for _id, scope, key, content, conf, _imp, _upd, _pin in self._store.memories(limit=30, account=self._account() or ""):
-            known.append(f"- [{display_of(key) if key else scope}] {content}")
+        known, shown = [], set()
+        for mem_id, scope, key, content, conf, _imp, _upd, _pin in self._store.memories(limit=30, account=self._account() or ""):
+            label = (display_of(key) + ("・予定" if scope == SCOPE_PLAN else "")) if key else scope
+            known.append(f"- #{mem_id} [{label}] {content}")
+            shown.add(mem_id)
+        with self._lock:
+            self._shown_ids = shown
+        today = time.localtime(now)
         asks = ["memories: 覚えておく価値のあること（最大5件）。scope は person（人について）/ room（この場について）/ "
-                "self（あなた自身が言ったこと・約束）。person はその人の名前、importance は 0〜1"]
+                "self（あなた自身が言ったこと・約束）。person はその人の名前、importance は 0〜1",
+                f"plans: 人が話した、これからの予定（試験・旅行・発売日・イベントなど。最大3件）。date は YYYY-MM-DD"
+                f"（今日は {time.strftime('%Y-%m-%d', today)}（{_WEEKDAYS[today.tm_wday]}））。日付が分からない予定は入れない",
+                "outdated: すでに覚えていることのうち、今の会話で古くなった・間違いと分かったものの番号（# の数字）。無ければ空"]
         if config.impressions_enabled:
             asks.append("impressions: 人の話し方や好みの印象（推定。最大3件。繊細な事柄は書かない）")
         if config.relationships_enabled:
@@ -329,6 +367,34 @@ class MemoryKeeper:
                     continue
                 delta = min(WARMTH_STEP_LIMIT, max(-WARMTH_STEP_LIMIT, delta))
                 self._store.adjust_relationship(key, 0.0, delta, str(item.get("reason") or "会話の雰囲気")[:40])
+        now = self._clock()
+        for item in (data.get("plans") or [])[:MAX_PLANS_PER_SUMMARY]:
+            if not isinstance(item, dict):
+                continue
+            content = " ".join(str(item.get("content") or "").split())[:40]
+            key = resolve(item.get("person"))
+            due = _parse_day(item.get("date"))
+            if not content or key is None or due is None or is_sensitive(content) \
+                    or not (now - DAY <= due <= now + 365 * DAY):
+                dropped += 1
+                continue
+            label = time.strftime("%m/%d", time.localtime(due)).lstrip("0").replace("/0", "/")
+            self._store.add_memory(SCOPE_PLAN, key, f"{label} {content}", "mid", 0.6, due + PLAN_KEEP_AFTER - now,
+                                   self._account() or "", due_at=due)
+            kept += 1
+        with self._lock:
+            shown, self._shown_ids = self._shown_ids, set()
+        forgotten = 0
+        for mem_id in data.get("outdated") or []:
+            try:
+                mem_id = int(mem_id)
+            except (TypeError, ValueError):
+                continue
+            if mem_id in shown:            # 見せていない記憶は消させない（番号の取り違え・作り話を防ぐ）
+                self._store.delete_memory(mem_id)
+                shown.discard(mem_id)
+                forgotten += 1
+        self.last_forgotten = forgotten
         return kept, dropped
 
     def summary_for_files(self):
@@ -346,6 +412,8 @@ class MemoryKeeper:
                 if scope == SCOPE_IMPRESSION:
                     if config.impressions_enabled:
                         lines.append(f"- 印象（推定・確からしさ{CONFIDENCE_LABELS.get(conf, '低')}）: {content}（{day}）")
+                elif scope == SCOPE_PLAN:
+                    lines.append(f"- 予定: {content}")
                 else:
                     lines.append(f"- {content}（{day}）")
             if config.relationships_enabled:
@@ -388,7 +456,9 @@ class MemoryKeeper:
             name = display_of(key)
             if key in returning:
                 lines.append(f"[{name}] {returning_text(returning[key][0], now)}")
-            for mem_id, scope, _key, content, conf, _imp, _upd, _pin in self._store.memories(person_key=key, limit=4):
+            lines += self._plan_lines(key, name, now)
+            person_memories = [r for r in self._store.memories(person_key=key, limit=12) if r[1] != SCOPE_PLAN][:4]
+            for mem_id, scope, _key, content, conf, _imp, _upd, _pin in person_memories:
                 if scope == SCOPE_IMPRESSION and not config.impressions_enabled:
                     continue
                 if scope == SCOPE_IMPRESSION:
@@ -401,14 +471,16 @@ class MemoryKeeper:
                 if rel:
                     lines.append(f"[{name}] あなたとは: {familiarity_label(rel['familiarity'])}・"
                                  f"やりとりは{warmth_label(rel['warmth'])}")
-        budget = MAX_RECALL_ITEMS - len([line for line in lines if "あなたとは:" not in line and "久しぶり" not in line])
+        budget = MAX_RECALL_ITEMS - len([line for line in lines if "あなたとは:" not in line and "久しぶり" not in line
+                                         and "予定:" not in line])
         for mem_id, scope, key, content, _conf, _imp, _upd, _pin in sorted(
                 self._store.memories(limit=50, account=self._account() or ""), key=lambda r: (-(r[5] or 0), -(r[6] or 0))):
             if budget <= 0:
                 break
-            if mem_id in used or scope in (SCOPE_PERSON, SCOPE_IMPRESSION):
+            if mem_id in used or scope in (SCOPE_PERSON, SCOPE_IMPRESSION, SCOPE_PLAN):
                 continue
             lines.append(f"[{'この場' if scope == SCOPE_ROOM else 'あなた自身'}] {content}")
+            used.add(mem_id)
             budget -= 1
         out, total = [], 0
         for line in lines:
@@ -416,4 +488,22 @@ class MemoryKeeper:
                 break
             out.append(line)
             total += len(line) + 1
+        # 思い出して使った記憶は、忘れにくくする（期限を延ばす）
+        self._store.reinforce(used, REINFORCE_SECONDS, REINFORCE_CAP)
         return out
+
+    def _plan_lines(self, key, name, now):
+        """その人の予定のうち、近いもの・過ぎてまだ聞いていないもの（人間の「予定の記憶」）"""
+        lines = []
+        today = _day_start(now)
+        for _id, content, due_at, done in self._store.plans(key):
+            if due_at is None or done:
+                continue
+            days = round((_day_start(due_at) - today) / DAY)
+            if days < 0:
+                lines.append(f"[{name}] 予定: {content}（もう過ぎた。どうだったか聞いてもよい）")
+            elif days == 0:
+                lines.append(f"[{name}] 予定: {content}（今日）")
+            elif days <= PLAN_SOON_DAYS:
+                lines.append(f"[{name}] 予定: {content}（あと{days}日）")
+        return lines[:2]

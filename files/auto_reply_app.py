@@ -10236,6 +10236,10 @@ class App(ctk.CTk):
          "話しかけてきた人のファイルの「メモ（自分で書く）」と、前のやりとり（数行）は、AIも読んで会話に使います（AIの提供元へ送ります）。\n"
          "ルームの他の人の名前と発言がそのまま入ります。このPCの中だけで、自動では消しません（フォルダを開いて、読む・消すができます）。\n\n"
          "会話をファイルに残すようにしますか？"),
+        ("digest_enabled", "📝 1日のまとめを作る（会話をファイルに残すがONのとき。AIを1日1回呼ぶ）",
+         "会話が静かなときに、前の日の会話の記録から「まとめ」を作り、「AIの記憶」の「まとめ」フォルダに残します。\n"
+         "その日の会話の記録（ルームの他の人の名前と発言）を、AIの提供元へ送ります。AIを1日1回呼び、回数と費用の上限に数えます。\n"
+         "「会話をファイルに残す」がONのときだけ動きます。\n\n1日のまとめを作るようにしますか？"),
         ("relationships_enabled", "関係の値を持つ（なじみ・やりとりの温かさ）",
          "AIとその人との「なじみ」（話した量）と「温かさ」（やりとりが和やかか）を数値で持ちます。\n"
          "1回に動く量には上限があり、値は口に出しません。接し方を変えるためだけに使います。\n"
@@ -10288,7 +10292,9 @@ class App(ctk.CTk):
         ctk.CTkButton(buttons, text="↺ 関係の値をリセット", width=150, fg_color="#555555", hover_color="#3a3a3a",
                       command=self.reset_agent_relationships).pack(side="left", padx=(0, 6))
         ctk.CTkButton(buttons, text="📂 フォルダを開く", width=120, fg_color="#555555", hover_color="#3a3a3a",
-                      command=self.open_agent_journal_folder).pack(side="left")
+                      command=self.open_agent_journal_folder).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(buttons, text="📝 今日のまとめを作る", width=150, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.make_agent_digest_now).pack(side="left")
         self._agent_memory_ids = []
 
     def on_agent_memory_toggled(self, name):
@@ -10328,12 +10334,12 @@ class App(ctk.CTk):
             selected = self.MEMORY_FILTER_ALL
             self.agent_memory_filter_var.set(selected)
         wanted = None if selected == self.MEMORY_FILTER_ALL else ("" if selected == self.MEMORY_FILTER_UNKNOWN else selected)
-        scope_labels = {"person": "人", "room": "この場", "self": "自分", "impression": "印象（推定）"}
+        scope_labels = {"person": "人", "room": "この場", "self": "自分", "impression": "印象（推定）", "plan": "予定"}
         for mem_id, account, scope, person, content, conf in store.memories_with_account(limit=500):
             if wanted is not None and account != wanted:
                 continue
             where = f"{account}／" if account and wanted is None else ""
-            who = f"{person}・" if person and scope in ("person", "impression") else ""
+            who = f"{person}・" if person and scope in ("person", "impression", "plan") else ""
             confidence = {"low": "低", "mid": "中", "high": "高"}.get(conf, "?")
             mark = f"・確からしさ{confidence}" if scope == "impression" else ""
             self.agent_memory_listbox.insert("end", f"[{where}{who}{scope_labels.get(scope, scope)}{mark}] {content}")
@@ -10362,6 +10368,18 @@ class App(ctk.CTk):
         store.delete_all_memories()
         self._append_agent_log("🗑 記憶を全部消しました。")
         self.refresh_agent_memory_list()
+
+    def make_agent_digest_now(self):
+        """今日のここまでの会話の記録から、まとめを作る（AIを1回呼ぶ）"""
+        runtime = self.agent_runtime
+        if runtime is None or not runtime.running:
+            messagebox.showinfo("記憶", "先に「▶ 開始」を押してください。")
+            return
+        if not (runtime.config.journal_enabled and runtime.config.digest_enabled):
+            messagebox.showinfo("記憶", "「📒 会話をファイルに残す」と「📝 1日のまとめを作る」をONにしてください。")
+            return
+        runtime.request_digest(time.strftime("%Y-%m-%d"))
+        self._append_agent_log("📝 今日のまとめを作ります（手が空いたら）。")
 
     def open_agent_journal_folder(self):
         """長期記憶ファイルのフォルダ（AIの記憶）を開く。無ければ作る"""

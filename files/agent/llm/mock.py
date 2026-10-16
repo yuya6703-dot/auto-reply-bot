@@ -7,7 +7,7 @@ AIタブの「模擬AIの返事」で、いつも沈黙・いつも反応… の
 """
 
 from .base import (KIND_OK, KIND_TIMEOUT, PURPOSE_DECIDE, PURPOSE_GENERATE, PURPOSE_SUMMARIZE, STOP_END,
-                   STOP_REFUSAL, LLMError, LLMResponse, LLMUsage, PingResult)
+                   STOP_REFUSAL, LLMError, LLMResponse, LLMUsage, PingResult, PURPOSE_DIGEST)
 
 # 判断の返し方
 MODE_SCRIPT = "script"       # 台本: 「？」があれば参加、「笑・w・草」があれば反応、ほかは沈黙
@@ -75,6 +75,9 @@ class MockProvider:
         if request.purpose == PURPOSE_SUMMARIZE:
             item = self.script_summarize.pop(0) if self.script_summarize else None
             return self._respond(item, lambda _: {"memories": [], "impressions": [], "relationships": []})
+        if request.purpose == PURPOSE_DIGEST:      # 1日のまとめは文字で返す
+            return LLMResponse(text="- （模擬）今日は穏やかな一日だった", structured=None, stop=STOP_END,
+                               usage=LLMUsage(100, 20), provider=self.name, model=self.model)
         return self._response({"ok": True})
 
     # --- 中身 ---

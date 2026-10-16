@@ -10,6 +10,7 @@
         会話の記録/2026-10-16.md   … その日の全文（ルーム全体。出来事が届いた順）
         相手/<相手の名前>.md        … メモ（本人が書く）＋覚えていること（要約。整理のたびに書き直す）＋その人の発言とAIの返事
         この場とAI自身.md           … この場の記憶・AIが言ったこと（要約）
+        まとめ/2026-10-16.md        … 1日のまとめ（AIが会話の記録から作る。スイッチがONのとき）
 
 AI も読む（2026-10-16 本人「全部やろうか」）: 話しかけてきた人のファイルの
   - 「## メモ（自分で書く）」… 本人が書いたこと。確かなこととして使う（人間でいう、人から教わった知識）
@@ -301,6 +302,46 @@ class ConversationJournal:
             when = time.strftime("%m/%d %H:%M", time.localtime(at)).lstrip("0")
             entries.append(f"[{when}] {body}"[:MAX_PAST_LINE_CHARS])
         return entries
+
+    # --- 1日のまとめ（2026-10-16） ---
+    def day_file(self, account, day):
+        return os.path.join(self.account_dir(account), "会話の記録", day + ".md")
+
+    def digest_file(self, account, day):
+        return os.path.join(self.account_dir(account), "まとめ", day + ".md")
+
+    def day_lines(self, account, day, max_chars=8000):
+        """その日の会話の記録の行（新しい方から max_chars まで）"""
+        path = self.day_file(account, day)
+        if not os.path.exists(path):
+            return []
+        with self._lock, open(path, encoding="utf-8") as f:
+            lines = [line.rstrip("\n") for line in f if line.startswith("- ")]
+        kept, total = [], 0
+        for line in reversed(lines):
+            total += len(line) + 1
+            if total > max_chars:
+                break
+            kept.append(line[2:])
+        return list(reversed(kept))
+
+    def days_without_digest(self, account, before_day, max_days=7):
+        """before_day より前で、記録はあるがまとめが無い日（古い順。直近 max_days 日まで）"""
+        folder = os.path.join(self.account_dir(account), "会話の記録")
+        if not os.path.isdir(folder):
+            return []
+        days = sorted(f[:-3] for f in os.listdir(folder) if f.endswith(".md") and f[:-3] < before_day)[-max_days:]
+        return [d for d in days if not os.path.exists(self.digest_file(account, d))]
+
+    def write_digest(self, account, day, text):
+        path = self.digest_file(account, day)
+        with self._lock:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(f"# {day} のまとめ（{account or UNKNOWN_ACCOUNT}）\n\n"
+                        "（AIが会話の記録から作ったまとめです。印象は推定で、事実ではありません）\n\n"
+                        f"{text.strip()}\n")
+        return path
 
     # --- 移す ---
     def move_account(self, old, new):

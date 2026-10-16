@@ -99,6 +99,7 @@ class Harness(ctk.CTk):
     delete_all_agent_memory = A.App.delete_all_agent_memory
     reset_agent_relationships = A.App.reset_agent_relationships
     open_agent_journal_folder = A.App.open_agent_journal_folder
+    make_agent_digest_now = A.App.make_agent_digest_now
     AGENT_ACCOUNT_NAMES_SETTING = A.App.AGENT_ACCOUNT_NAMES_SETTING
     ACCOUNT_NAME_VOTES = A.App.ACCOUNT_NAME_VOTES
     _load_task_account_names = A.App._load_task_account_names
@@ -674,6 +675,27 @@ h.move_unknown_agent_memories()
 check("選んだアカウントの記憶にする", "" not in dict(store.memory_accounts())
       and dict(store.memory_accounts()).get("テストちゃ👼") == 1, store.memory_accounts())
 store.delete_all_memories()
+
+print("■ 予定の記憶・1日のまとめ（2026-10-16）")
+store = h.agent_store
+store.upsert_person("テスト垢／伏せ字3", "伏せ字3", "テスト垢")
+store.add_memory("plan", "テスト垢／伏せ字3", "10/23 テスト", "mid", 0.6, 86400, "テスト垢", due_at=time.time() + 86400)
+h.agent_memory_filter_var.set("すべて")
+h.refresh_agent_memory_list()
+check("記憶の一覧に予定も出る", "[テスト垢／伏せ字3・予定] 10/23 テスト" in h.agent_memory_listbox.get(0, "end"),
+      h.agent_memory_listbox.get(0, "end"))
+store.delete_all_memories()
+check("1日のまとめのスイッチ（既定OFF）", h.agent_memory_vars["digest_enabled"].get() is False)
+answers.append(True)
+h.agent_memory_vars["digest_enabled"].set(True)
+h.on_agent_memory_toggled("digest_enabled")
+check("ONにするとき、会話の記録をAIの提供元へ送ること・1日1回呼ぶことを書いて確かめる",
+      "AIの提供元へ送ります" in dialogs[-1][2] and "1日1回" in dialogs[-1][2] and h.agent_runtime.config.digest_enabled is True)
+h.make_agent_digest_now()
+check("ファイルがOFFなら、今日のまとめは作れないと案内", dialogs[-1][0] == "info" and "会話をファイルに残す" in dialogs[-1][2]
+      or dialogs[-1][0] == "info" and "開始" in dialogs[-1][2], dialogs[-1])
+h.agent_memory_vars["digest_enabled"].set(False)
+h.on_agent_memory_toggled("digest_enabled")
 
 print("■ 反応しない人・静かにを解く（2026-10-16）")
 h.agent_ignored_entry.insert(0, "荒らし、いたずら")

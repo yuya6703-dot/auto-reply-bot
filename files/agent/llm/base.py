@@ -44,6 +44,7 @@ STOP_OTHER = "other"
 PURPOSE_DECIDE = "decide"
 PURPOSE_GENERATE = "generate"
 PURPOSE_SUMMARIZE = "summarize"
+PURPOSE_DIGEST = "digest"          # 1日のまとめ（2026-10-16）
 PURPOSE_PING = "ping"
 
 

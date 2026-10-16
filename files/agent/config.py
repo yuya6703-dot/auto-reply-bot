@@ -76,6 +76,7 @@ class AgentConfig:
     summarize_min_lines: int = 6                  # 他の人の発言がこれだけたまってから整理する
     # 長期記憶ファイル（GRAVITYのアカウントごと＋相手ごとに、会話の全文と要約を読めるファイルに残す。既定OFF。2026-10-16）
     journal_enabled: bool = False
+    digest_enabled: bool = False                  # 1日のまとめを作る（ファイルがONのとき。AIを1日1回呼ぶ。既定OFF）
     recall_past_lines: int = 6                    # 話しかけてきた人との前のやりとりを、ファイルから何行まで渡すか（ファイルがONのとき）
     returning_after_days: float = 3.0             # これだけ間が空いて来た人は「久しぶり」（会話を覚えるがONのとき）
     # 頼まれたら調べる（Wikipedia・天気。既定OFF。2026-10-16 本人「調べるからちょっと待っててね…チャットの中の話ね」）
@@ -103,7 +104,7 @@ class AgentConfig:
     EDITABLE = ("ai_name", "self_names", "owner_names", "ignored_people", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
-                "lookup_enabled", "lookup_wait_text")
+                "lookup_enabled", "lookup_wait_text", "digest_enabled")
 
     def profile_value(self, key):
         """今のアカウントの設定（無い・空なら共通の設定）"""
