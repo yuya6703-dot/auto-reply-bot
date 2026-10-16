@@ -31,11 +31,23 @@ OWN_UTTERANCES = 3
 
 EMOTIONS = ("neutral", "joy", "calm", "sad", "angry", "surprise")
 
+# 声の出し方（声で答えるときだけ使う。null を許す型だけ。値は parse_utterance が範囲に収める）
+VOICE_STYLE_PROPERTIES = {
+    "style": {"type": ["string", "null"], "description": "声の様子（使える声の様子から1つ）"},
+    "speed": {"type": ["number", "null"], "description": "話す速さ（1.0 がふつう）"},
+    "intonation": {"type": ["number", "null"], "description": "抑揚・感情の強さ（1.0 がふつう）"},
+    "pitch": {"type": ["number", "null"], "description": "声の高さ（0 がふつう）"},
+    "pause": {"type": ["number", "null"], "description": "間の長さ（1.0 がふつう）"},
+    "volume": {"type": ["number", "null"], "description": "声の大きさ（1.0 がふつう）"},
+    "tempo": {"type": ["number", "null"], "description": "話し方の緩急（1.0 がふつう）"},
+}
+
 GENERATION_SCHEMA = {
     "type": "object",
     "properties": {
         "text": {"type": "string"},
         "emotion": {"type": "string", "enum": list(EMOTIONS)},
+        **VOICE_STYLE_PROPERTIES,
     },
     "required": ["text", "emotion"],
 }
@@ -258,13 +270,29 @@ COMBINED_SCHEMA = {
         # ⚠️ null を混ぜた enum は書かない（Gemini で通るか確かめていない）。本番で通った形（null を許す型）だけにして、
         #    値は parse_utterance が確かめる（知らない感情は neutral にする）
         "emotion": {"type": ["string", "null"], "description": "neutral / joy / calm / sad / angry / surprise のどれか"},
+        **VOICE_STYLE_PROPERTIES,
     },
     "required": ["action", "reason"],
 }
 
 
+def voice_style_lines(config, voice_styles):
+    """声で答えるとき、読み上げツールに渡す声の出し方を AI に選ばせる（チャットなら何も足さない）"""
+    if config.output_mode == OUTPUT_CHAT:
+        return []
+    lines = ["## 声の出し方（読み上げツールに渡す）"]
+    if voice_styles:
+        lines.append("style は声の様子。次から1つ: " + " / ".join(voice_styles))
+    lines.append("speed は話す速さ（1.0 がふつう。0.85〜1.25）、intonation は抑揚・気持ちの強さ（1.0 がふつう。0.7〜1.4）、"
+                 "pitch は声の高さ（0 がふつう。-0.08〜0.08）、pause は間の長さ（1.0 がふつう。0.7〜1.4）、"
+                 "volume は声の大きさ（1.0 がふつう。0.85〜1.15）、tempo は話し方の緩急（1.0 がふつう。0.8〜1.2）。")
+    lines.append("文の気持ちに合わせて、自然に聞こえるくらい少しだけ変える（うれしい話は少し速く高く・抑揚大きめ、"
+                 "しんみりした話はゆっくり低めに間を長く、など）。迷ったら null")
+    return lines
+
+
 def build_combined_request(events, window, persona, config, rules_note, now, timeout=20.0, room=None,
-                           memory_lines=None):
+                           memory_lines=None, voice_styles=None):
     """
     判断と文を1回で頼む（呼ばれたとき）。判断の依頼に、人格の全文と文の作り方を足す。
     発言しない（silent など）なら text は null。発言するのに text が無ければ、呼ぶ側が文だけをもう一度頼む
@@ -280,6 +308,7 @@ def build_combined_request(events, window, persona, config, rules_note, now, tim
         f"action が react なら{max_chars_for(REACT, config)}字以内、engage なら{max_chars_for('engage', config)}字以内で、"
         f"text に{what}を、emotion に neutral / joy / calm / sad / angry / surprise のどれかを入れてください。"
         "発言しないなら text と emotion は null。",
+        *voice_style_lines(config, voice_styles),
     ])
     user = request.messages[0].content.replace("どう動くかを決めてください。", extra + "\nどう動くかを決めてください。")
     system = DECIDE_SYSTEM + "\n\n発言するときの文の作り方:\n" + rules
@@ -332,7 +361,7 @@ def max_chars_for(action, config):
 
 
 def build_generate_request(decision, events, window, persona, config, now, timeout=20.0, room=None,
-                           memory_lines=None, lookup=None):
+                           memory_lines=None, lookup=None, voice_styles=None):
     """文を作る依頼。判断のときより材料を絞る（直近の会話は半分）"""
     ids = {e.event_id for e in events}
     lines = [_line(e, now, config) for e in window.recent_events(exclude_ids=ids)] + \
@@ -351,6 +380,7 @@ def build_generate_request(decision, events, window, persona, config, now, timeo
         f"相手: {target or '（場全体）'}",
         f"話題: {decision.topic or '（不明）'} / 雰囲気: {decision.mood or '（不明）'}",
         f"文字数の上限: {limit}字",
+        *voice_style_lines(config, voice_styles),
         ("チャットに書き込む文" if config.output_mode == OUTPUT_CHAT else "喋る文")
         + "を作ってください。emotion は neutral / joy / calm / sad / angry / surprise のどれか。",
     ])

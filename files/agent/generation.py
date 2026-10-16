@@ -7,8 +7,10 @@
 import difflib
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 from .context import EMOTIONS
+from .voice_style import ADJUST_KEYS, clamp
 from .decision import SPEAKING_ACTIONS, parse_decision, request_structured
 
 PRIORITY_AI = 50      # 音声サービスの優先度（読み上げと同じ。来た順に喋る）
@@ -40,6 +42,14 @@ class Utterance:
     emotion: str
     turn_id: str
     priority: int = PRIORITY_AI
+    # 声の出し方（読み上げツールに渡す。2026-10-16）。AI が選ばなければ None（いつもの声）
+    style: Optional[str] = None       # 声の様子（今の声のキャラのスタイルの名前。ノーマル・喜び など）
+    speed: Optional[float] = None     # 話す速さ（1.0 がふつう）
+    intonation: Optional[float] = None    # 抑揚・感情の強さ（1.0 がふつう）
+    pitch: Optional[float] = None     # 声の高さ（0 がふつう）
+    pause: Optional[float] = None     # 間の長さ（1.0 がふつう）
+    volume: Optional[float] = None    # 声の大きさ（1.0 がふつう）
+    tempo: Optional[float] = None     # 緩急（1.0 がふつう。AivisSpeech の声だけ効く）
     skip_approval: bool = False     # 下書きを見せずに送る（調べる前の「待って」の一言だけ。本人の決定 2026-10-16）
 
 
@@ -64,7 +74,12 @@ def parse_utterance(data, turn_id, keep_newlines=False):
     if not text:
         raise ValueError("text が空")
     emotion = data.get("emotion")
-    return Utterance(text=text, emotion=emotion if emotion in EMOTIONS else "neutral", turn_id=turn_id)
+    style = data.get("style")
+    style = style.strip()[:20] if isinstance(style, str) and style.strip() else None
+    voice = {name: clamp(data.get(name), *ADJUST_KEYS[name][1]) if data.get(name) is not None else None
+             for name in ADJUST_KEYS}
+    return Utterance(text=text, emotion=emotion if emotion in EMOTIONS else "neutral", turn_id=turn_id,
+                     style=style, **voice)
 
 
 def request_utterance(provider, request, turn_id, cancel, on_call, keep_newlines=False):

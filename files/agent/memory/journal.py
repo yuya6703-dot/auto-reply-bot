@@ -170,9 +170,9 @@ class ConversationJournal:
             return
         with self._lock:
             stamp = time.strftime("%H:%M", time.localtime(self._clock()))
-            how = "声" if channel == "voice" else "チャット"
+            how = "チャット" if channel == "chat" else "声"
             line = f"- {stamp} {ai_name or 'AI'}（AI・{how}）: {(text or '').replace(chr(10), ' / ')}"
-            if channel == "voice":
+            if channel != "chat":
                 day = time.strftime("%Y-%m-%d", time.localtime(self._clock()))
                 day_file = os.path.join(self.account_dir(account), "会話の記録", day + ".md")
                 self._append(day_file, line, header=f"# 会話の記録（{account or UNKNOWN_ACCOUNT}） {day}\n\n")

@@ -69,15 +69,25 @@ class VoicevoxCompatibleEngine:
             raise RuntimeError("エンジンから音声が1つも見つかりませんでした。")
         return result
 
-    def synthesize(self, text, speaker_id):
-        """WAV(bytes) を返す。同じ宛先・話者・文は覚えたものを返す"""
-        cache_key = (self.base_url(), speaker_id, text)
+    def synthesize(self, text, speaker_id, adjust=None):
+        """
+        WAV(bytes) を返す。同じ宛先・話者・文（と読み方の調整）は覚えたものを返す。
+        adjust は audio_query に上書きする値（speedScale・intonationScale など。AI が決めた話し方）
+        """
+        adjust = {k: v for k, v in (adjust or {}).items() if isinstance(v, (int, float))}
+        cache_key = (self.base_url(), speaker_id, text, tuple(sorted(adjust.items())))
         with self._cache_lock:
             if cache_key in self._cache:
                 return self._cache[cache_key]
 
         query_json = self.request(f"/audio_query?text={urllib.parse.quote(text)}&speaker={speaker_id}",
                                   method="POST", data=b"", timeout=self.QUERY_TIMEOUT)
+        if adjust:
+            query = json.loads(query_json.decode("utf-8"))
+            for key, value in adjust.items():
+                if key in query:                # エンジンが知っている項目だけ変える
+                    query[key] = value
+            query_json = json.dumps(query).encode("utf-8")
         wav_data = self.request(f"/synthesis?speaker={speaker_id}", method="POST", data=query_json,
                                 timeout=self.SYNTHESIS_TIMEOUT)
 

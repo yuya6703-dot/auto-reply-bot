@@ -41,6 +41,8 @@ class SpeechJob:
     cancel: CancelToken = field(default_factory=CancelToken)
     # 出力先の名前。None なら呼び出し側の既定（読み上げの出力先）、"" ならPCの既定の出力（スピーカー）
     device: Optional[str] = None
+    # 読み方の調整（audio_query に入れる値。例 {"speedScale": 1.1}）。AI が決めた話し方（2026-10-16）。None なら変えない
+    adjust: Optional[dict] = None
     # 終わったら立つ（鳴り終わった・止めた・失敗した・捨てた）。outcome にどれだったかが入る
     finished: threading.Event = field(default_factory=threading.Event)
     outcome: Optional[str] = None
@@ -163,7 +165,8 @@ class SpeechService:
                 if wav is None:
                     voice = job.voice or self._default_voice()
                     job.voice = voice
-                    wav = self._synthesize(job.text, voice)
+                    wav = (self._synthesize(job.text, voice, job.adjust) if job.adjust
+                           else self._synthesize(job.text, voice))
                 if job.cancel.cancelled:
                     job.finish(EVENT_CANCELLED)
                     self._emit(EVENT_CANCELLED, job, "合成の後に止められた")

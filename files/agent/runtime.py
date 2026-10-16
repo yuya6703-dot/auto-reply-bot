@@ -99,6 +99,8 @@ class AgentDeps:
     journal: object = None
     # 調べる (tool, 調べる言葉, CancelToken) -> tools.lookup.LookupResult。無ければ調べない
     lookup: Callable = None
+    # () -> 今の AI の声で使える声の様子（スタイル）の名前のリスト。AI が文ごとに選ぶ（読み上げツールに渡す）
+    voice_styles: Callable = None
 
 
 class AgentRuntime:
@@ -561,14 +563,16 @@ class AgentRuntime:
         # 呼ばれたときは判断と文を1回で頼む（返事をする見込みが高いので、往復を1回減らして早く返す）
         combined = result.strong and self.config.combined_when_addressed
         prepared = None
+        voice_styles = self._voice_styles()
         builder = build_combined_request if combined else build_decide_request
         with self._lock:
             room = dict(self._room_info) if self._room_info else None
         keep_newlines = self.config.output_mode == OUTPUT_CHAT
         # 記憶: 覚えていること（事実）・久しぶり（時間の感覚）・オーナーのメモ・前のやりとり（ファイルから）
         memory_lines = {"facts": self.memory.recall(events), **self._journal_recall(events)}
+        extra = {"voice_styles": voice_styles} if combined else {}
         request = builder(events, self.window, self.persona, self.config, note, now,
-                          timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines)
+                          timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines, **extra)
         try:
             if combined:
                 decision, prepared = request_decision_with_text(self._provider, request, turn_id, cancel,
@@ -627,7 +631,7 @@ class AgentRuntime:
             self._set_state(STATE_GENERATING)
             request = build_generate_request(decision, events, self.window, self.persona, self.config,
                                              self._clock(), timeout=self.config.decide_timeout_seconds, room=room,
-                                             memory_lines=memory_lines, lookup=lookup)
+                                             memory_lines=memory_lines, lookup=lookup, voice_styles=voice_styles)
             try:
                 utterance = request_utterance(self._provider, request, turn_id, cancel,
                                               self._usage_recorder(turn_id, PURPOSE_GENERATE), keep_newlines)
@@ -685,7 +689,12 @@ class AgentRuntime:
                 self._utterance_times = [t for t in self._utterance_times if started - t < 3600] + [started]
         self._set_state(STATE_SPEAKING)
         label = "🗣️ 参加" if decision.action == ENGAGE else "💬 短く反応"
-        self.log.write(f"{label}:「{utterance.text}」")
+        how = "・".join(x for x in (utterance.style,
+                                    *(f"{label}{getattr(utterance, name):g}" for name, label in
+                                      (("speed", "速さ"), ("intonation", "抑揚"), ("pitch", "高さ"), ("pause", "間"),
+                                       ("volume", "大きさ"), ("tempo", "緩急"))
+                                      if getattr(utterance, name, None) is not None)) if x)
+        self.log.write(f"{label}{f'（{how}）' if how else ''}:「{utterance.text}」")
         try:
             outcome = self.deps.speak(utterance, speech_cancel)
         except Exception:
@@ -1056,6 +1065,16 @@ class AgentRuntime:
             return
         self.log.write(f"📝 {day} のまとめを作りました（{os.path.basename(os.path.dirname(os.path.dirname(path)))}"
                        f"／まとめ／{day}.md）。")
+
+    def _voice_styles(self):
+        """今の AI の声で使える声の様子（声で答えるときだけ。分からなければ空）"""
+        if self.config.output_mode == OUTPUT_CHAT or self.deps.voice_styles is None:
+            return []
+        try:
+            return [str(name) for name in (self.deps.voice_styles() or [])][:12]
+        except Exception:
+            self.deps.on_error(traceback.format_exc())
+            return []
 
     def _journal_recall(self, events):
         """

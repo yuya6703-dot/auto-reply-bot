@@ -89,6 +89,7 @@ from agent.config import (AgentConfig, NAMES_MAX_CHARS as AGENT_NAMES_MAX_CHARS,
                           IGNORED_MAX_CHARS as AGENT_IGNORED_MAX_CHARS,
                           load_account_profiles, save_account_profiles,
                           OUTPUT_VOICE as AGENT_OUTPUT_VOICE, OUTPUT_CHAT as AGENT_OUTPUT_CHAT,
+                          OUTPUT_VOICE_ROOM as AGENT_OUTPUT_VOICE_ROOM,
                           CHAT_APPROVE as AGENT_CHAT_APPROVE, CHAT_AUTO as AGENT_CHAT_AUTO)
 from agent.events import (AgentEvent, make_manual_event, new_event_id as new_agent_event_id,
                           KIND_CHAT_MESSAGE as AGENT_KIND_MESSAGE, KIND_CHAT_NOTICE as AGENT_KIND_NOTICE,
@@ -99,6 +100,7 @@ from agent.persona import Persona
 from agent.memory.journal import ConversationJournal, FOLDER_NAME as AGENT_JOURNAL_FOLDER
 from agent.tools.lookup import Lookup as AgentLookup, user_agent as lookup_user_agent
 from agent.hearing import VoiceListener, list_input_devices as list_voice_input_devices
+from agent.voice_style import choose_style as choose_voice_style, speech_adjust
 from agent.generation import tidy_text as agent_tidy_text
 from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN_RESTORED, OPEN_RECREATED
 from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
@@ -7521,7 +7523,8 @@ class App(ctk.CTk):
             on_device_failed=self._warn_output_device_once)
         self.speech_service = SpeechService(
             synthesize=self.synthesize_voice_wav,
-            # 用件に出力先が無ければ読み上げの出力先へ。AI の声は "" （PCの既定＝スピーカー。ルームへは流さない）
+            # 用件に出力先が無ければ読み上げの出力先へ。AI の声は、応答のしかたが「ルームへ」なら読み上げの出力先、
+            # それ以外は ""（PCの既定＝スピーカー）
             play=lambda wav, volume, cancel, device: self.audio_player.play(
                 wav, volume, self.get_audio_output_device() if device is None else device, cancel),
             default_voice=self.get_speech_speaker_id,
@@ -9279,15 +9282,16 @@ class App(ctk.CTk):
             combined[display_name] = {style: f"{TTS_ENGINE_AIVISSPEECH}:{sid}" for style, sid in styles.items()}
         return combined
 
-    def synthesize_voice_wav(self, text, voice_selector):
+    def synthesize_voice_wav(self, text, voice_selector, adjust=None):
         """
         話者選択("engine:話者ID")に従って、正しいエンジンで音声を合成する。
         アラーム・読み上げのどちらも、実際の合成はここを通す。
+        adjust は読み方の調整（AI が決めた速さ・抑揚。audio_query に入れる値）。
         """
         engine, speaker_id = self._split_voice_selector(voice_selector)
         if engine == TTS_ENGINE_AIVISSPEECH:
-            return self.synthesize_aivisspeech_wav(text, speaker_id)
-        return self.synthesize_zundamon_wav(text, speaker_id)
+            return self.tts_engines[TTS_ENGINE_AIVISSPEECH].synthesize(text, speaker_id, adjust)
+        return self.tts_engines[TTS_ENGINE_VOICEVOX].synthesize(text, speaker_id, adjust)
 
     def _engine_request(self, engine, path, method="GET", data=None, timeout=30):
         """エンジン名に応じて、正しいエンジンへHTTPリクエストを投げる"""
@@ -9795,7 +9799,8 @@ class App(ctk.CTk):
             text="手で入れた出来事に対して、AIが「黙る」か「喋る」かを決める流れを確かめられます。\n"
                  "AIは設定タブ「🤖 AI API」で選んだ提供元を使います（テスト用（模擬）か Gemini）。\n"
                  "「💬 GRAVITYのチャットをAIに渡す」をONにすると、監視中に読んだチャット欄の新しい行もAIに届きます。\n"
-                 "応答のしかたは「声（PCのスピーカーだけ）」か「チャットに書き込む」を選べます。声はルームには流しません。",
+                 "応答のしかたは「声（PCのスピーカーだけ）」「声（読み上げの出力先＝ルームへ）」「チャットに書き込む」から選べます。\n"
+                 "声は読み上げツール（VOICEVOX / AivisSpeech）で作り、AIは文ごとに声の様子・速さ・抑揚を選びます。",
             justify="left", text_color="gray70"
         ).pack(anchor="w", pady=(0, 10))
 
@@ -10645,7 +10650,7 @@ class App(ctk.CTk):
         ok = messagebox.askyesno(
             "GRAVITYのチャットをAIに渡す",
             f"チャット欄に出た、ルームの他の人の名前と発言を、{info.label}に送ってAIに判断させます。{free_tier}\n\n"
-            "AIの声はPCのスピーカーにだけ鳴り、ルームには流しません。チャットにも書き込みません。\n\n送ってよいですか？")
+            "AIがルームで声を出したりチャットに書いたりするのは、「応答のしかた」でそう選んだときだけです。\n\n送ってよいですか？")
         if ok:
             self.db.save_setting(self.AGENT_GRAVITY_CONSENT_SETTING, info.provider_id)
         return ok
@@ -10838,6 +10843,7 @@ class App(ctk.CTk):
 
     # --- AIタブ: 応答のしかた（声 / チャット。段階5b） ---
     AGENT_OUTPUT_LABELS = {AGENT_OUTPUT_VOICE: "🔊 声で答える（PCのスピーカーだけ）",
+                           AGENT_OUTPUT_VOICE_ROOM: "📢 声で答える（読み上げの出力先＝ルームへ）",
                            AGENT_OUTPUT_CHAT: "💬 チャットに書き込む"}
     AGENT_CHAT_SEND_LABELS = {AGENT_CHAT_APPROVE: "毎回確認する（下書きを見せる）",
                               AGENT_CHAT_AUTO: "確認せずに送る"}
@@ -10860,6 +10866,15 @@ class App(ctk.CTk):
                 "送るのはメインタブの監視です（監視していないと送れません）。1分に1通・1時間に20通までです。\n"
                 "「チャットに送る前に」が「毎回確認する」なら、送る前に下書きを見せます（60秒で捨てます）。\n\n"
                 "チャットに書き込むようにしますか？"):
+            self.agent_output_var.set(self.AGENT_OUTPUT_LABELS[current])
+            return
+        if mode == AGENT_OUTPUT_VOICE_ROOM and not messagebox.askyesno(
+                "声でルームに答える",
+                "AIの声を、読み上げと同じ出力先（読み上げタブで選んだ VB-CABLE など）に流します。\n"
+                "GRAVITYのマイクがその出力を拾っていれば、ルームの全員に聞こえます。\n\n"
+                "声は読み上げタブの声（人格で声を選んでいればその声）で、AIが文ごとに声の様子・速さ・抑揚を選びます。\n"
+                "読み上げと同じ順番待ちに入ります。「⏹ 音声を止める」「🛑 緊急停止」で止まります。\n\n"
+                "声でルームに答えるようにしますか？"):
             self.agent_output_var.set(self.AGENT_OUTPUT_LABELS[current])
             return
         self._set_agent_config_value("output_mode", mode)
@@ -11000,6 +11015,7 @@ class App(ctk.CTk):
             post_chat=self._agent_post_chat,
             journal=ConversationJournal(AGENT_JOURNAL_DIR, enabled_getter=lambda: True),
             # 頼まれたら調べる（Wikipedia・天気）。⚠️ Wikimedia の決まりで、User-Agent にアプリ名と連絡先（公開リポジトリ）を入れる
+            voice_styles=self._agent_voice_styles,
             lookup=AgentLookup(lookup_user_agent("GraHojoTool", APP_VERSION,
                                                  f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")).run,
             stop_speech=self.speech_service.stop_all,
@@ -11047,9 +11063,19 @@ class App(ctk.CTk):
         AIの発言を音声サービスへ。鳴り終わる（止められる・失敗する）まで戻らない（エージェントのスレッドから呼ばれる）。
         ⚠️ 出力先は ""（PCの既定＝スピーカー）。読み上げの出力先（VB-CABLE でルームへ）には流さない
         """
-        persona = self.agent_runtime.persona if self.agent_runtime is not None else None
-        job = SpeechJob(text=utterance.text, source="AI", voice=getattr(persona, "voice", None),
-                        priority=utterance.priority, cancel=cancel, device="")
+        runtime = self.agent_runtime
+        persona = runtime.persona if runtime is not None else None
+        voice = getattr(persona, "voice", None) or self.get_speech_speaker_id()
+        # AI が選んだ声の様子（無ければ感情から近いもの）を、同じキャラのスタイルから探す
+        styles = self._agent_voice_style_map(voice)
+        style = choose_voice_style(list(styles), getattr(utterance, "style", None), getattr(utterance, "emotion", None))
+        if style:
+            voice = styles[style]
+        to_room = runtime is not None and runtime.config.output_mode == AGENT_OUTPUT_VOICE_ROOM
+        job = SpeechJob(text=utterance.text, source="AI", voice=voice, priority=utterance.priority, cancel=cancel,
+                        device=None if to_room else "",
+                        adjust=speech_adjust(**{name: getattr(utterance, name, None)
+                                                for name in ("speed", "intonation", "pitch", "pause", "volume", "tempo")}))
         if not self.speech_service.enqueue(job):
             return AGENT_SPEECH_FAILED
         while not job.finished.wait(0.5):
@@ -11057,6 +11083,22 @@ class App(ctk.CTk):
                 break
         return {SPEECH_EVENT_DONE: AGENT_SPOKEN,
                 SPEECH_EVENT_CANCELLED: AGENT_SPEECH_CANCELLED}.get(job.outcome, AGENT_SPEECH_FAILED)
+
+    def _agent_voice_style_map(self, voice):
+        """その声（"engine:話者ID"）と同じキャラのスタイル {名前: "engine:話者ID"}。分からなければ空（どのスレッドからでもよい）"""
+        try:
+            for styles in self.get_all_speakers().values():
+                if voice in styles.values():
+                    return dict(styles)
+        except Exception:
+            pass
+        return {}
+
+    def _agent_voice_styles(self):
+        """エージェントから。今の AI の声で使える声の様子の名前（AI が文ごとに選ぶ）"""
+        runtime = self.agent_runtime
+        persona = runtime.persona if runtime is not None else None
+        return list(self._agent_voice_style_map(getattr(persona, "voice", None) or self.get_speech_speaker_id()))
 
     def _append_agent_log(self, line):
         box = getattr(self, "agent_log_textbox", None)

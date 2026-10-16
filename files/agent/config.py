@@ -15,7 +15,10 @@ SETTING_PREFIX = "agent."
 # 応答のしかた（2026-10-15 本人「チャットモードと音声応答モードを切り替えられるように」）
 OUTPUT_VOICE = "voice"        # 声で答える（PCのスピーカーだけ。ルームへは流さない）
 OUTPUT_CHAT = "chat"          # GRAVITYのチャットに書き込む（既存の手入力送信の待ち行列を通す。送るのは監視ワーカーだけ）
-OUTPUT_MODES = (OUTPUT_VOICE, OUTPUT_CHAT)
+# 声で答えて、読み上げの出力先（VB-CABLE などからルームへ）に流す（2026-10-16 本人「連携してる読み上げツール…で話す仕組みにしたい」）。
+# ⚠️ ルームの全員に聞こえる。本人が選んだときだけ（選ぶときに確かめる）
+OUTPUT_VOICE_ROOM = "voice_room"
+OUTPUT_MODES = (OUTPUT_VOICE, OUTPUT_VOICE_ROOM, OUTPUT_CHAT)
 CHAT_APPROVE = "approve"      # 下書きを見せて、本人が「送る」を押したら送る（既定）
 CHAT_AUTO = "auto"            # 確かめずに送る（本人が選んだときだけ）
 CHAT_SEND_MODES = (CHAT_APPROVE, CHAT_AUTO)

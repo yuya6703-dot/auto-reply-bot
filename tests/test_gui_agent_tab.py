@@ -126,6 +126,15 @@ class Harness(ctk.CTk):
     on_agent_initiative_toggled = A.App.on_agent_initiative_toggled
     on_agent_lookup_toggled = A.App.on_agent_lookup_toggled
     unmute_agent = A.App.unmute_agent
+    _agent_voice_style_map = A.App._agent_voice_style_map
+    _agent_voice_styles = A.App._agent_voice_styles
+
+    def get_all_speakers(self):
+        return {"テストの声": {"ノーマル": "voicevox:3", "あまあま": "voicevox:1", "ツンツン": "voicevox:7"},
+                "べつの声": {"ノーマル": "voicevox:2"}}
+
+    def get_speech_speaker_id(self):
+        return "voicevox:3"
     NO_INPUT_DEVICE = A.App.NO_INPUT_DEVICE
     HEARING_THRESHOLD_MAX = A.App.HEARING_THRESHOLD_MAX
     build_agent_hearing_section = A.App.build_agent_hearing_section
@@ -158,7 +167,7 @@ class Harness(ctk.CTk):
         self.api_keys = K.ApiKeyStore(db, env={})
         self.logs, self.posted, self.played = [], [], []
         self.speech_service = SV.SpeechService(
-            synthesize=lambda text, voice: f"WAV:{text}".encode(), play=self._fake_play,
+            synthesize=lambda text, voice, adjust=None: f"WAV:{text}|{voice}|{adjust}".encode(), play=self._fake_play,
             default_voice=lambda: "voicevox:3", default_volume=lambda: 50)
         self.tab_agent = ctk.CTkFrame(self)
         self.tab_agent.pack(fill="both", expand=True)
@@ -784,6 +793,45 @@ check("また始めたら聞き始める", FakeListener.made[-1].started and not
 h.agent_hearing_var.set(False)
 h.on_agent_hearing_toggled()
 check("OFFでやめる", FakeListener.made[-1].stopped and db.get_setting("agent.hearing_enabled") == "0")
+
+print("■ 声で答える（読み上げツールで。ルームへも。2026-10-16）")
+check("応答のしかたに「声で答える（ルームへ）」", "📢 声で答える（読み上げの出力先＝ルームへ）" in h.AGENT_OUTPUT_LABELS.values())
+answers.append(False)
+h.agent_output_var.set(h.AGENT_OUTPUT_LABELS["voice_room"])
+h.on_agent_output_selected(h.AGENT_OUTPUT_LABELS["voice_room"])
+check("ルームへ流すのは確かめてから（いいえなら今のまま）", dialogs[-1][0] == "ask" and "ルームの全員に聞こえます" in dialogs[-1][2]
+      and db.get_setting("agent.output_mode") != "voice_room")
+answers.append(True)
+h.agent_output_var.set(h.AGENT_OUTPUT_LABELS["voice_room"])
+h.on_agent_output_selected(h.AGENT_OUTPUT_LABELS["voice_room"])
+check("「はい」なら、ルームへ（動いているエージェントにもすぐ効く）", db.get_setting("agent.output_mode") == "voice_room"
+      and h.agent_runtime.config.output_mode == "voice_room")
+check("AI に、今の声で使える声の様子を渡す（同じキャラのスタイル）", h._agent_voice_styles() == ["ノーマル", "あまあま", "ツンツン"])
+h.played.clear()
+from agent.generation import Utterance as _U
+from agent.cancel import CancelToken as _C
+box = []
+th = threading.Thread(target=lambda: box.append(h._agent_speak(
+    _U("やったね", "joy", "t", style="あまあま", speed=1.1, intonation=1.3), _C())))
+th.start()
+check("AI の声を読み上げツールで鳴らす", pump(h, lambda: bool(box), timeout=5.0) and box == ["spoken"], (box, h.played))
+wav_text, device = h.played[-1]
+check("選んだ声の様子（あまあま）の声で、速さ・抑揚を付けて合成する",
+      "|voicevox:1|" in wav_text and "'speedScale': 1.1" in wav_text and "'intonationScale': 1.3" in wav_text, wav_text)
+check("ルームへ＝読み上げの出力先（None）に流す", device is None)
+box.clear()
+th = threading.Thread(target=lambda: box.append(h._agent_speak(_U("こんにちは", "angry", "t"), _C())))
+th.start()
+pump(h, lambda: bool(box), timeout=5.0)
+check("AI が様子を選ばなければ、感情から近いもの（怒り → ツンツン）", "|voicevox:7|None" in h.played[-1][0], h.played[-1])
+for key, value in (("output_mode", "voice"),):
+    h._set_agent_config_value(key, value)
+h.agent_output_var.set(h.AGENT_OUTPUT_LABELS["voice"])
+box.clear()
+th = threading.Thread(target=lambda: box.append(h._agent_speak(_U("スピーカーだけ", "neutral", "t"), _C())))
+th.start()
+pump(h, lambda: bool(box), timeout=5.0)
+check("「PCのスピーカーだけ」なら、今まで通りスピーカー（\"\"）", h.played[-1][1] == "")
 
 print("■ ルームの様子")
 h._on_gravity_room({"name": "伏せ字1", "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2, "announcement": "x"})
