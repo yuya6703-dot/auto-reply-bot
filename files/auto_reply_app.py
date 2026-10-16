@@ -101,6 +101,7 @@ from agent.memory.journal import ConversationJournal, FOLDER_NAME as AGENT_JOURN
 from agent.tools.lookup import Lookup as AgentLookup, user_agent as lookup_user_agent
 from agent.hearing import VoiceListener, list_input_devices as list_voice_input_devices
 from agent.voice_style import choose_style as choose_voice_style, speech_adjust
+from agent.owner_profile import OwnerProfile, NOTES_FILE as OWNER_NOTES_FILE
 from agent.generation import tidy_text as agent_tidy_text
 from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN_RESTORED, OPEN_RECREATED
 from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
@@ -10429,6 +10430,13 @@ class App(ctk.CTk):
          "会話が静かなときに、前の日の会話の記録から「まとめ」を作り、「AIの記憶」の「まとめ」フォルダに残します。\n"
          "その日の会話の記録（ルームの他の人の名前と発言）を、AIの提供元へ送ります。AIを1日1回呼び、回数と費用の上限に数えます。\n"
          "「会話をファイルに残す」がONのときだけ動きます。\n\n1日のまとめを作るようにしますか？"),
+        ("owner_profile_enabled", "👑 オーナーの自己分析を読む・気づいたことを書き足す（下でフォルダを選ぶ）",
+         "下で選んだ「自己分析のフォルダ」のメモ（.md / .txt）を、AIが読んで「オーナーと話すときに役立つ人物像」に短くまとめます。\n"
+         "まとめるために、フォルダの中身をAIの提供元へ送ります（本名・会社名などはまとめに書かないように指示します）。\n"
+         "オーナーが会話にいるときだけ使い、ルームでオーナーの個人的なことは話題にしません。\n"
+         "「会話を覚える」もONなら、会話の整理のときに、オーナーの発言・ふるまいから気づいたこと（性格・人への接し方・癖・"
+         "言動のパターン。推定）を、そのフォルダの「AIが気づいたこと.md」に書き足します。\n\n"
+         "オーナーの自己分析を読むようにしますか？"),
         ("relationships_enabled", "関係の値を持つ（なじみ・やりとりの温かさ）",
          "AIとその人との「なじみ」（話した量）と「温かさ」（やりとりが和やかか）を数値で持ちます。\n"
          "1回に動く量には上限があり、値は口に出しません。接し方を変えるためだけに使います。\n"
@@ -10448,6 +10456,17 @@ class App(ctk.CTk):
             self.agent_memory_vars[name] = var
             ctk.CTkSwitch(section, text=label, variable=var,
                           command=lambda n=name: self.on_agent_memory_toggled(n)).pack(anchor="w", padx=12, pady=(0, 4))
+
+        owner_row = ctk.CTkFrame(section, fg_color="transparent")
+        owner_row.pack(anchor="w", fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(owner_row, text="自己分析のフォルダ:", anchor="w").pack(side="left", padx=(0, 6))
+        self.agent_owner_dir_label = ctk.CTkLabel(owner_row, text="", anchor="w", text_color="gray70")
+        self.agent_owner_dir_label.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(owner_row, text="📁 選ぶ", width=70, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.choose_agent_owner_dir).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(owner_row, text="📂 開く", width=70, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.open_agent_owner_dir).pack(side="left")
+        self._refresh_agent_owner_dir()
 
         lists = ctk.CTkFrame(section, fg_color="transparent")
         lists.pack(fill="x", padx=12, pady=(6, 4))
@@ -10489,6 +10508,10 @@ class App(ctk.CTk):
     def on_agent_memory_toggled(self, name):
         var = self.agent_memory_vars[name]
         on = bool(var.get())
+        if name == "owner_profile_enabled" and on and not self.db.get_setting("agent.owner_profile_dir", ""):
+            messagebox.showinfo("記憶", "先に「📁 選ぶ」で、自己分析のフォルダを選んでください。")
+            var.set(False)
+            return
         confirm = next(text for n, _label, text in self.AGENT_MEMORY_SWITCHES if n == name)
         if on and not messagebox.askyesno("記憶", confirm):
             var.set(False)
@@ -10557,6 +10580,33 @@ class App(ctk.CTk):
         store.delete_all_memories()
         self._append_agent_log("🗑 記憶を全部消しました。")
         self.refresh_agent_memory_list()
+
+    def _refresh_agent_owner_dir(self):
+        folder = self.db.get_setting("agent.owner_profile_dir", "") or ""
+        self.agent_owner_dir_label.configure(text=folder or "（まだ選んでいません）")
+
+    def choose_agent_owner_dir(self):
+        """オーナーの自己分析のフォルダを選ぶ（場所は設定に入れる。リポジトリには書かない）"""
+        folder = filedialog.askdirectory(title="自己分析のフォルダを選んでください",
+                                         initialdir=self.db.get_setting("agent.owner_profile_dir", "") or None)
+        if not folder:
+            return
+        folder = os.path.normpath(folder)
+        self.db.save_setting("agent.owner_profile_dir", folder)
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.owner_profile_dir = folder
+        self._refresh_agent_owner_dir()
+        self._append_agent_log(f"👑 自己分析のフォルダを選びました（気づいたことは「{OWNER_NOTES_FILE}」に書き足します）。")
+
+    def open_agent_owner_dir(self):
+        folder = self.db.get_setting("agent.owner_profile_dir", "") or ""
+        if not folder or not os.path.isdir(folder):
+            messagebox.showinfo("記憶", "自己分析のフォルダがまだ選ばれていないか、見つかりません。")
+            return
+        try:
+            os.startfile(folder)
+        except Exception as e:
+            messagebox.showerror("記憶", f"フォルダを開けませんでした。\n{folder}\n{e}")
 
     def make_agent_digest_now(self):
         """今日のここまでの会話の記録から、まとめを作る（AIを1回呼ぶ）"""
@@ -11075,6 +11125,7 @@ class App(ctk.CTk):
             # 頼まれたら調べる（Wikipedia・天気）。⚠️ Wikimedia の決まりで、User-Agent にアプリ名と連絡先（公開リポジトリ）を入れる
             voice_styles=self._agent_voice_styles,
             voice_profile=self._agent_voice_profile,
+            owner_profile=OwnerProfile(lambda: self.db.get_setting("agent.owner_profile_dir", "") or ""),
             lookup=AgentLookup(lookup_user_agent("GraHojoTool", APP_VERSION,
                                                  f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")).run,
             stop_speech=self.speech_service.stop_all,

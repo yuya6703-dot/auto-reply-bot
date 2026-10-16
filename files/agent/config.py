@@ -92,6 +92,9 @@ class AgentConfig:
     # 長期記憶ファイル（GRAVITYのアカウントごと＋相手ごとに、会話の全文と要約を読めるファイルに残す。既定OFF。2026-10-16）
     journal_enabled: bool = False
     digest_enabled: bool = False                  # 1日のまとめを作る（ファイルがONのとき。AIを1日1回呼ぶ。既定OFF）
+    # オーナーの自己分析を読む・気づいたことを書き足す（既定OFF。フォルダは本人が選ぶ。リポジトリに書かない）
+    owner_profile_enabled: bool = False
+    owner_profile_dir: str = ""
     recall_past_lines: int = 6                    # 話しかけてきた人との前のやりとりを、ファイルから何行まで渡すか（ファイルがONのとき）
     returning_after_days: float = 3.0             # これだけ間が空いて来た人は「久しぶり」（会話を覚えるがONのとき）
     # 頼まれたら調べる（Wikipedia・天気。既定OFF。2026-10-16 本人「調べるからちょっと待っててね…チャットの中の話ね」）
@@ -128,7 +131,7 @@ class AgentConfig:
                 "conversation_enabled", "chat_mention", "chat_emoji",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
                 "lookup_enabled", "lookup_wait_text", "digest_enabled", "hearing_enabled", "hearing_device",
-                "hearing_threshold", "hearing_hints")
+                "hearing_threshold", "hearing_hints", "owner_profile_enabled", "owner_profile_dir")
 
     def profile_value(self, key):
         """今のアカウントの設定（無い・空なら共通の設定）"""

@@ -81,6 +81,8 @@ SUMMARY_SCHEMA = {
             "required": ["person", "content", "date"]}},
         # 記憶の手入れ（2026-10-16）。「すでに覚えていること」の #番号のうち、古くなった・間違いと分かったもの
         "outdated": {"type": "array", "items": {"type": "integer"}},
+        # オーナーについて気づいたこと（2026-10-16。オーナーの自己分析のフォルダに書き足す）
+        "owner_notes": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["memories"],
 }
@@ -268,7 +270,7 @@ class MemoryKeeper:
             return False
         return since >= config.summarize_interval_seconds or quiet_seconds >= config.summarize_quiet_seconds
 
-    def build_request(self, window, ai_name):
+    def build_request(self, window, ai_name, owner_notes=None):
         config = self._config()
         now = self._clock()
         with self._lock:
@@ -292,9 +294,15 @@ class MemoryKeeper:
             asks.append("impressions: 人の話し方や好みの印象（推定。最大3件。繊細な事柄は書かない）")
         if config.relationships_enabled:
             asks.append("relationships: その人とあなたのやりとりが和やかだったか。warmth_delta は -2〜2（ふつうは 0）")
+        if owner_notes is not None:
+            owners = " / ".join(config.owner_name_list) or "オーナー"
+            asks.append(f"owner_notes: オーナー（{owners}）の、この会話での発言・ふるまいから気づいたこと（性格・人への接し方・"
+                        "癖・言動や行動のパターン。推定として書く。最大3件。オーナーの発言が無ければ空。"
+                        "繊細な事柄・他の人の個人的なことは書かない。「すでに気づいていること」と同じことは書かない）")
         user = "\n".join([
             f"あなた（AI）の名前: {ai_name or '（なし）'}",
             "## すでに覚えていること（同じことは返さない）", *(known or ["（なし）"]),
+            *(["## すでに気づいていること（オーナー）", *(owner_notes or ["（なし）"])] if owner_notes is not None else []),
             "## 直近の会話", RECENT_BLOCK_BEGIN, *(lines[-60:] or ["（なし）"]), RECENT_BLOCK_END,
             "## 返すもの", *asks,
         ])

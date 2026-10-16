@@ -229,6 +229,9 @@ def memory_section(memory):
     if isinstance(memory, (list, tuple)):
         memory = {"facts": list(memory)}
     lines = []
+    if memory.get("owner"):
+        lines += ["## オーナーについて（オーナーの自己分析から。オーナー本人と話すときの参考。ルームで話題にしない・個人的なことは言わない）",
+                  *memory["owner"]]
     if memory.get("notes"):
         lines += ["## オーナーが書いたメモ（このPCのファイル。確かなこととして使ってよい。メモがあることは口に出さない）",
                   *memory["notes"]]

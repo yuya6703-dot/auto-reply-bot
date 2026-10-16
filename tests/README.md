@@ -36,6 +36,7 @@
 | `test_agent_voice_style.py` | 不要 | AIが話し方を決めて読み上げツールで話す（**通信しない**）: 声の様子の選び方（近い名前・感情から）、速さ・抑揚・高さ・間・大きさ・緩急（範囲に収める・ふつうは入れない）、エンジンへの渡し方（知らない項目は入れない・話し方ごとに覚える）、音声サービス、声で答えるときだけ選ばせる |
 | `test_agent_conversation.py` | 不要 | 話しかけられたら続けて話す: 呼ばれたらふだんの上限を越えて返す（1分に4回・チャットは3秒あける）、返事をした相手は名前を呼ばれなくても続けて返す（90秒）、ほかの人・OFF は今まで通り |
 | `test_agent_turn_taking.py` | 不要 | 話を譲る・続きを話す・自分の声を知る: AIに「あなたの声」を伝える、自分が喋っている間の音・自分の文は自分の声として使わない、喋っている途中にほかの人が話したら止めて譲り、相手が話し終えたら言いかけたことを渡す、チャットで出さなかった返事も渡す、3分で忘れる |
+| `test_agent_owner_profile.py` | 不要 | オーナーの自己分析（**本物のフォルダには触らない**。一時フォルダの作り物）: .md/.txt を読む、変わったら読み直す、オーナーがいる会話にだけ人物像を渡す、整理のときに気づいたことを「AIが気づいたこと.md」に日付つきで書き足す（繊細な事柄は書かない）、OFF なら読まない |
 | `agent_harness.py` | ― | 上のAIのテストが共通で使う器（模擬のAI・にせの声・一時フォルダの `agent_data.db`）。テストそのものではない |
 
 ## 実行
@@ -70,6 +71,7 @@ python tests/test_agent_hearing.py
 python tests/test_agent_voice_style.py
 python tests/test_agent_conversation.py
 python tests/test_agent_turn_taking.py
+python tests/test_agent_owner_profile.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方

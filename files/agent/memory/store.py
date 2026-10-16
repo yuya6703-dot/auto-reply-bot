@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS memories (
     importance REAL, created_at REAL, updated_at REAL, expires_at REAL, pinned INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS relationships (
     person_key TEXT PRIMARY KEY, familiarity REAL, warmth REAL, updated_at REAL, history TEXT);
+CREATE TABLE IF NOT EXISTS notes (key TEXT PRIMARY KEY, value TEXT, updated_at REAL);
 """
 
 
@@ -433,6 +434,18 @@ class AgentStore:
             self._conn.execute("INSERT OR REPLACE INTO persona (persona_id, json) VALUES (?, ?)",
                                (persona.persona_id, persona.to_json()))
             self._conn.commit()
+
+    def save_note(self, key, value):
+        """小さな覚え書き（オーナーの人物像のまとめ など）"""
+        with self._lock:
+            self._conn.execute("INSERT OR REPLACE INTO notes (key, value, updated_at) VALUES (?, ?, ?)",
+                               (key, value, self._clock()))
+            self._conn.commit()
+
+    def load_note(self, key, default=""):
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM notes WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
 
     def delete_persona(self, persona_id):
         with self._lock:

@@ -46,6 +46,7 @@ PURPOSE_GENERATE = "generate"
 PURPOSE_SUMMARIZE = "summarize"
 PURPOSE_DIGEST = "digest"          # 1日のまとめ（2026-10-16）
 PURPOSE_TRANSCRIBE = "transcribe"  # 声を文字にする（2026-10-16）
+PURPOSE_PROFILE = "profile"        # オーナーの自己分析をまとめる（2026-10-16）
 PURPOSE_PING = "ping"
 
 

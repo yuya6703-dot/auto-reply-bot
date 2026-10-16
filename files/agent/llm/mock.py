@@ -8,7 +8,7 @@ AIタブの「模擬AIの返事」で、いつも沈黙・いつも反応… の
 
 from .base import (KIND_OK, KIND_TIMEOUT, PURPOSE_DECIDE, PURPOSE_GENERATE, PURPOSE_SUMMARIZE, STOP_END,
                    STOP_REFUSAL, LLMError, LLMResponse, LLMUsage, PingResult, PURPOSE_DIGEST,
-                   PURPOSE_TRANSCRIBE)
+                   PURPOSE_TRANSCRIBE, PURPOSE_PROFILE)
 
 # 判断の返し方
 MODE_SCRIPT = "script"       # 台本: 「？」があれば参加、「笑・w・草」があれば反応、ほかは沈黙
@@ -80,6 +80,9 @@ class MockProvider:
         if request.purpose == PURPOSE_TRANSCRIBE:
             item = self.script_transcribe.pop(0) if self.script_transcribe else None
             return self._respond(item, lambda _: {"text": "（模擬）聞こえた声"})
+        if request.purpose == PURPOSE_PROFILE:     # オーナーの人物像は文字で返す
+            return LLMResponse(text="- （模擬）ものづくりが好きで、理由を言葉にする人", structured=None, stop=STOP_END,
+                               usage=LLMUsage(100, 20), provider=self.name, model=self.model)
         if request.purpose == PURPOSE_DIGEST:      # 1日のまとめは文字で返す
             return LLMResponse(text="- （模擬）今日は穏やかな一日だった", structured=None, stop=STOP_END,
                                usage=LLMUsage(100, 20), provider=self.name, model=self.model)

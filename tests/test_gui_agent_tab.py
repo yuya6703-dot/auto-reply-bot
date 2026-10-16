@@ -101,6 +101,9 @@ class Harness(ctk.CTk):
     reset_agent_relationships = A.App.reset_agent_relationships
     open_agent_journal_folder = A.App.open_agent_journal_folder
     make_agent_digest_now = A.App.make_agent_digest_now
+    _refresh_agent_owner_dir = A.App._refresh_agent_owner_dir
+    choose_agent_owner_dir = A.App.choose_agent_owner_dir
+    open_agent_owner_dir = A.App.open_agent_owner_dir
     AGENT_ACCOUNT_NAMES_SETTING = A.App.AGENT_ACCOUNT_NAMES_SETTING
     ACCOUNT_NAME_VOTES = A.App.ACCOUNT_NAME_VOTES
     _load_task_account_names = A.App._load_task_account_names
@@ -745,6 +748,29 @@ h.on_agent_emoji_toggled()
 check("絵文字をOFFにできる", db.get_setting("agent.chat_emoji") == "0" and h.agent_runtime.config.chat_emoji is False)
 h.agent_emoji_var.set(True)
 h.on_agent_emoji_toggled()
+
+print("■ オーナーの自己分析（既定OFF。2026-10-16）")
+check("フォルダはまだ選んでいない", h.agent_owner_dir_label.cget("text") == "（まだ選んでいません）")
+h.agent_memory_vars["owner_profile_enabled"].set(True)
+h.on_agent_memory_toggled("owner_profile_enabled")
+check("フォルダを選ぶ前にONにしようとしたら案内してOFFのまま", dialogs[-1][0] == "info" and "フォルダを選んで" in dialogs[-1][2]
+      and h.agent_memory_vars["owner_profile_enabled"].get() is False)
+owner_dir = tempfile.mkdtemp()
+real_ask = A.filedialog.askdirectory
+A.filedialog.askdirectory = lambda **kw: owner_dir
+h.choose_agent_owner_dir()
+A.filedialog.askdirectory = real_ask
+check("選んだフォルダを設定に入れる（リポジトリには書かない）", db.get_setting("agent.owner_profile_dir") == os.path.normpath(owner_dir)
+      and h.agent_owner_dir_label.cget("text") == os.path.normpath(owner_dir))
+answers.append(True)
+h.agent_memory_vars["owner_profile_enabled"].set(True)
+h.on_agent_memory_toggled("owner_profile_enabled")
+check("ONにするとき、中身をAIの提供元へ送る・ルームで話題にしないと書いて確かめる",
+      "AIの提供元へ送ります" in dialogs[-1][2] and "話題にしません" in dialogs[-1][2]
+      and h.agent_runtime.config.owner_profile_enabled is True)
+check("エージェントは選んだフォルダを読む", h.agent_runtime.deps.owner_profile.folder() == os.path.normpath(owner_dir))
+h.agent_memory_vars["owner_profile_enabled"].set(False)
+h.on_agent_memory_toggled("owner_profile_enabled")
 
 print("■ 反応しない人・静かにを解く（2026-10-16）")
 h.agent_ignored_entry.insert(0, "荒らし、いたずら")
