@@ -104,6 +104,7 @@ class AgentConfig:
     account_profiles: dict = field(default_factory=dict)
     active_account: str = ""                      # 今チャットしている GRAVITY のアカウント（エージェントが入れる）
     active_account_named: bool = False            # そのアカウントの名前が分かっているか（「本体のGRAVITY」などの仮の呼び名でない）
+    self_voice: str = ""                          # 今の AI の声（キャラ名・スタイル。エージェントが入れる。自分の声を知る）
     react_max_chars: int = 40              # C2: 短い反応の上限（声）
     engage_max_chars: int = 120            # C2: 参加の上限（声）
     chat_react_max_chars: int = 60         # C2: チャットの短い反応の上限（チャットは読むので声より長くてよい）

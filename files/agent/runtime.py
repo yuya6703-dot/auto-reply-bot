@@ -21,7 +21,7 @@ from typing import Callable
 
 from .audit import AuditLog
 from .cancel import CancelToken
-from .config import OUTPUT_CHAT, split_names
+from .config import OUTPUT_CHAT, OUTPUT_VOICE_ROOM, split_names
 from .context import (ConversationWindow, build_combined_request, build_decide_request, build_generate_request,
                       max_chars_for, rules_note)
 from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HOLD, OBSERVE, SILENT, USE_TOOL,
@@ -102,6 +102,8 @@ class AgentDeps:
     lookup: Callable = None
     # () -> 今の AI の声で使える声の様子（スタイル）の名前のリスト。AI が文ごとに選ぶ（読み上げツールに渡す）
     voice_styles: Callable = None
+    # () -> 今の AI の声の名前（キャラ名・スタイル）。AI が自分の声を知るため
+    voice_profile: Callable = None
 
 
 class AgentRuntime:
@@ -158,6 +160,9 @@ class AgentRuntime:
         self._partners = {}                # 話している相手 {名前: この時刻まで}（返事をした相手。続けて話せるように）
         self._digest_request = None        # 「今のまとめを作る」と頼まれた日（画面から）
         self._heard = []                   # 文字にした声 [(時刻, 秒)]（1時間の上限）
+        self._own_voice = []               # ルームへ喋った時間 [(始め, 終わり)]（聞こえた声が自分の声かを見分ける）
+        self._current_text = None          # 今喋っている文（割り込まれたら「言いかけたこと」にする）
+        self._pending_thought = None       # 言いかけて止めたこと {"text", "at", "why"}（相手に譲った・会話が進んで出さなかった）
         self._hearing_capped = False       # 上限のことを言ったか（何度も言わない）
         self._digest_checked_at = 0.0      # 前の日のまとめが要るかを見た時刻
         self._owner_done = set()           # 扱ったオーナーの合図（同じ発言を2度扱わない）
@@ -284,6 +289,9 @@ class AgentRuntime:
         ⚠️ BGM などで「話している」が続きっぱなしになっても止まり続けないように、20秒で「話していない」とみる
         """
         with self._lock:
+            # ⚠️ 自分がルームへ喋っている間の音は、自分の声（自分の声で「誰かが話している」にしない）
+            if speaking and self._speaking and self.config.output_mode == OUTPUT_VOICE_ROOM:
+                return
             if speaking and not self._listening:
                 self._listening_since = self._clock()
             self._listening = bool(speaking)
@@ -599,6 +607,14 @@ class AgentRuntime:
         keep_newlines = self.config.output_mode == OUTPUT_CHAT
         # 記憶: 覚えていること（事実）・久しぶり（時間の感覚）・オーナーのメモ・前のやりとり（ファイルから）
         memory_lines = {"facts": self.memory.recall(events), **self._journal_recall(events)}
+        pending = self._pending_lines(now)
+        if pending:
+            memory_lines["pending"] = pending
+        if self.config.output_mode != OUTPUT_CHAT and self.deps.voice_profile is not None:
+            try:
+                self.config.self_voice = str(self.deps.voice_profile() or "")[:40]
+            except Exception:
+                self.config.self_voice = ""
         extra = {"voice_styles": voice_styles} if combined else {}
         request = builder(events, self.window, self.persona, self.config, note, now,
                           timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines, **extra)
@@ -676,6 +692,8 @@ class AgentRuntime:
         # --- 出す前の確認 ---
         # ⚠️ 調べた答えは、調べている間に会話が進んでも出す（頼まれたことの答えなので古くならない）
         check = self._precheck(utterance, decision, fresh_seq, allow_stale=lookup is not None, strong=result.strong)
+        if check == CHECK_STALE:
+            self._keep_pending(utterance.text, "会話が進んだので出さなかった")
         if check:
             self.deps.store.add_utterance(turn_id, utterance.text, utterance.emotion, self.persona.voice,
                                           f"dropped:{check}", None, None)
@@ -689,6 +707,9 @@ class AgentRuntime:
             delivered = self._speak(utterance, decision, turn_id)
         if delivered and decision.target and self._turn_in_gravity:
             self.memory.note_interaction(decision.target)
+        if delivered:
+            with self._lock:
+                self._pending_thought = None      # 話せたので、言いかけたことは終わり
         if delivered and decision.target:
             with self._lock:                # 返事をした相手とは、しばらく続けて話せる
                 self._partners[decision.target] = self._clock() + self.config.conversation_partner_seconds
@@ -727,11 +748,16 @@ class AgentRuntime:
                                        ("volume", "大きさ"), ("tempo", "緩急"))
                                       if getattr(utterance, name, None) is not None)) if x)
         self.log.write(f"{label}{f'（{how}）' if how else ''}:「{utterance.text}」")
+        with self._lock:
+            self._current_text = utterance.text
         try:
             outcome = self.deps.speak(utterance, speech_cancel)
         except Exception:
             outcome = SPEECH_FAILED
         ended = self._clock()
+        with self._lock:
+            self._current_text = None
+        self._note_own_voice(started, ended)
         with self._lock:
             self._speaking = False
             self._last_utterance_end = ended
@@ -867,6 +893,7 @@ class AgentRuntime:
                 outcome = SPEECH_FAILED
             with self._lock:
                 self._speaking = False
+            self._note_own_voice(started, self._clock())
             delivered = outcome == SPOKEN
         if delivered:
             self.window.add_own(text, started)
@@ -1000,9 +1027,14 @@ class AgentRuntime:
         unsure = str(data.get("confidence") or "").strip().lower() == "low"
         if not text:
             return None
+        if self._is_own_voice(text):
+            self.log.write(f"🔁 聞こえた声は自分の声なので使いません:「{text}」")
+            return None
         if self._is_echo(text, now):
             self.log.write(f"🔁 聞こえた声は、チャットの読み上げの聞き返しなので使いません:「{text}」")
             return None
+        if self._speaking and self.config.output_mode == OUTPUT_VOICE_ROOM:
+            self._yield_turn()             # 自分が喋っている途中に、ほかの人が話した → 譲る
         event_id = new_event_id()
         event = AgentEvent(event_id=event_id, kind=KIND_VOICE_UTTERANCE, source=SOURCE_VOICE, key=f"voice:{event_id}",
                            speaker=None, text=text, observed_at=now,
@@ -1041,6 +1073,56 @@ class AgentRuntime:
             "## 出てきそうな名前・言葉", " / ".join(words) or "（なし）",
             "## 直近の会話", RECENT_BLOCK_BEGIN, *(lines or ["（なし）"]), RECENT_BLOCK_END,
             "この音声の話し声を文字にしてください（heard・text・confidence）。"])
+
+    # --- 自分の声・話を譲る（2026-10-16 本人「自身の声はこーゆう声だって自己認識する仕組み」
+    #     「割り込みされた時に、会話の機会を相手に譲って…相手が会話を終わらせたタイミングで会話を再開する仕組み」） ---
+    OWN_VOICE_LATENCY = 1.5         # ルームへ流した声が iPad などに届くまでの遅れ（見込み）
+    PENDING_KEEP_SECONDS = 180.0    # 言いかけたことは3分で忘れる
+
+    def _note_own_voice(self, started, ended):
+        if self.config.output_mode != OUTPUT_VOICE_ROOM:
+            return
+        with self._lock:
+            self._own_voice = [(s, e) for s, e in self._own_voice if ended - e < 120] + [(started, ended)]
+
+    def _is_own_voice(self, text):
+        """聞こえた声が、自分が喋った（喋っている）文か。文字が同じか、喋った文の一部なら自分の声"""
+        norm = lambda t: "".join(ch for ch in unicodedata.normalize("NFKC", t or "") if ch.isalnum())     # noqa: E731
+        heard = norm(text)
+        if not heard:
+            return True
+        with self._lock:
+            mine = [self._current_text] if self._current_text else []
+        mine += [u.text for u in self.window.own_utterances()[-3:]]
+        for said in (norm(m) for m in mine if m):
+            if heard in said or difflib.SequenceMatcher(None, heard, said).ratio() >= 0.7:
+                return True
+        return False
+
+    def _yield_turn(self):
+        """喋っている途中で、ほかの人が話し始めた。止めて譲り、言いかけたことを覚えておく"""
+        with self._lock:
+            token, text = self._speech_cancel, self._current_text
+        if token is None or text is None:
+            return
+        token.cancel()
+        with self._lock:                   # 相手は話している途中（話し終わったら、聞くほうが知らせる）
+            self._listening, self._listening_since = True, self._clock()
+        self._keep_pending(text, "話している途中で、相手に譲った")
+        self.log.write("✋ ほかの人が話し始めたので、話を譲りました（言いかけたことは、相手が話し終えたら続けるか考えます）。")
+
+    def _keep_pending(self, text, why):
+        with self._lock:
+            self._pending_thought = {"text": text, "at": self._clock(), "why": why}
+
+    def _pending_lines(self, now):
+        with self._lock:
+            pending = self._pending_thought
+            if pending and now - pending["at"] > self.PENDING_KEEP_SECONDS:
+                self._pending_thought = pending = None
+        if not pending:
+            return []
+        return [f"「{pending['text']}」（{pending['why']}。{max(0, int(now - pending['at']))}秒前）"]
 
     def _is_echo(self, text, now):
         """

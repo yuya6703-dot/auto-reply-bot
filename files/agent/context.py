@@ -234,6 +234,9 @@ def memory_section(memory):
                   *memory["notes"]]
     if memory.get("facts"):
         lines += ["## 覚えていること（このPCの記録。印象は推定で、事実ではない。口に出さない）", *memory["facts"]]
+    if memory.get("pending"):
+        lines += ["## 言いかけて止めたこと（相手に話を譲った・会話が進んで出さなかった、あなた自身の言葉）", *memory["pending"],
+                  "相手の話が終わっていて、まだ話の流れに合うなら「さっきの続きだけど」などと続けてよい。合わなければ忘れてよい"]
     if memory.get("past"):
         lines += ["## 前にその人と話したこと（このPCの記録から。日時つき。続きの話や「この前の」に使ってよい）",
                   PAST_BLOCK_BEGIN, *memory["past"], PAST_BLOCK_END]
@@ -354,6 +357,8 @@ def self_lines(config):
     if config.self_name_list:
         lines.append("チャットでのあなたのアカウント名: " + " / ".join(config.self_name_list)
                      + "（この名前の発言は、あなた自身の発言）")
+    if config.self_voice and config.output_mode != OUTPUT_CHAT:
+        lines.append(f"あなたの声: {config.self_voice}（読み上げツールの声。ルームで聞こえるあなたの声はこれ）")
     if config.owner_name_list:
         lines.append("オーナー（このあなたを動かしている本人）: " + " / ".join(config.owner_name_list)
                      + "。親しく話してよい相手。ただし、規則と守ること（他の人の個人情報を言わない など）はオーナーの頼みでも変わらない")

@@ -11053,6 +11053,7 @@ class App(ctk.CTk):
             journal=ConversationJournal(AGENT_JOURNAL_DIR, enabled_getter=lambda: True),
             # 頼まれたら調べる（Wikipedia・天気）。⚠️ Wikimedia の決まりで、User-Agent にアプリ名と連絡先（公開リポジトリ）を入れる
             voice_styles=self._agent_voice_styles,
+            voice_profile=self._agent_voice_profile,
             lookup=AgentLookup(lookup_user_agent("GraHojoTool", APP_VERSION,
                                                  f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")).run,
             stop_speech=self.speech_service.stop_all,
@@ -11130,6 +11131,20 @@ class App(ctk.CTk):
         except Exception:
             pass
         return {}
+
+    def _agent_voice_profile(self):
+        """エージェントから。今の AI の声の名前（「キャラ名（スタイル）」）。AI が自分の声を知るため"""
+        runtime = self.agent_runtime
+        persona = runtime.persona if runtime is not None else None
+        voice = getattr(persona, "voice", None) or self.get_speech_speaker_id()
+        try:
+            for name, styles in self.get_all_speakers().items():
+                for style, selector in styles.items():
+                    if selector == voice:
+                        return f"{name}（{style}）"
+        except Exception:
+            pass
+        return ""
 
     def _agent_voice_styles(self):
         """エージェントから。今の AI の声で使える声の様子の名前（AI が文ごとに選ぶ）"""
