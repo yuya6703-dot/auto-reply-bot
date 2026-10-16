@@ -506,7 +506,7 @@ check("記憶の一覧に、どのアカウントで覚えたかを出す", "[�
       h.agent_memory_listbox.get(0, "end"))
 store.delete_all_memories()
 
-print("■ チャットしている自分のアカウント")
+print("■ チャットしているGRAVITYのアカウント")
 saved_self_names, h._agent_self_names = h._agent_self_names, []
 check("見分ける前で、名前も分からなければ「本体のGRAVITY」", h._gravity_account_name() == "本体のGRAVITY", h._gravity_account_name())
 h._agent_self_names = ["設定の名前"]
@@ -527,7 +527,7 @@ check("1回見ただけでは覚えない（他の人がたまたま同じ文を
 h._learn_gravity_account_name("テストちゃ👼", "またね")
 check("同じ名前を2回見たら覚える", h._agent_account_names.get("0") == "テストちゃ👼"
       and db.get_setting(A.App.AGENT_ACCOUNT_NAMES_SETTING) == '{"0": "テストちゃ👼"}')
-check("覚えたことを判断のログに出す", pump(h, lambda: "🪪 チャットしているアカウントを覚えました: 本体のGRAVITY「テストちゃ👼」"
+check("覚えたことを判断のログに出す", pump(h, lambda: "🪪 チャットしているGRAVITYのアカウントを覚えました: 本体のGRAVITY「テストちゃ👼」"
                                                   in agent_log(h)), agent_log(h)[-200:])
 check("覚えた名前がアカウントの名前になる・自分の発言の見分けにも使う",
       h._gravity_account_name() == "テストちゃ👼" and "テストちゃ👼" in h._agent_my_names())

@@ -3,9 +3,10 @@
 長期記憶ファイル（2026-10-16 本人「アカウント別にチャットした会話の内容を長期記憶ファイルに保存して欲しい」）。
 
 本人の決定: 自分のアカウントごと＋相手ごと / 会話の全文と要約の両方 / 読めるファイル（メモ帳で開ける）。
+アカウントは GRAVITY のアカウント（本人「アカウントはアカウントでもグラビティに限ったものだからね」）。書くのも GRAVITY のチャットだけ。
 
     AIの記憶/
-      <自分のアカウント名>/
+      <GRAVITYのアカウント名>/
         会話の記録/2026-10-16.md   … その日の全文（ルーム全体。出来事が届いた順）
         相手/<相手の名前>.md        … 覚えていること（要約。整理のたびに書き直す）＋その人の発言とAIの返事
         この場とAI自身.md           … この場の記憶・AIが言ったこと（要約）
@@ -95,7 +96,7 @@ class ConversationJournal:
             return None
 
     def _partner_header(self, account, name):
-        return (f"# {name} との会話\n\n（自分のアカウント: {account or UNKNOWN_ACCOUNT}）\n\n"
+        return (f"# {name} との会話\n\n（GRAVITYのアカウント: {account or UNKNOWN_ACCOUNT}）\n\n"
                 f"{SUMMARY_HEAD}\n{SUMMARY_NOTE}\n\n- （まだありません）\n\n{LOG_HEAD}\n")
 
     def record_events(self, events):

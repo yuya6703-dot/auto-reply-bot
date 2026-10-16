@@ -65,7 +65,7 @@ j.record_events([
 ])
 day_file = os.path.join(root, "テスト垢", "会話の記録", DAY + ".md")
 text = read(day_file)
-check("自分のアカウントのフォルダに、日ごとのファイル", os.path.exists(day_file))
+check("GRAVITYのアカウントのフォルダに、日ごとのファイル", os.path.exists(day_file))
 check("発言を届いた順に、時刻・名前つきで", text.index("たろう: こんばんは") < text.index("テストちゃ👼（自分）: いらっしゃい")
       < text.index("（お知らせ）はなこが音声ルームに参加しました"), text)
 check("改行は「 / 」にして1行に", "はなこ: 2行の / 発言" in text, text)
@@ -117,7 +117,7 @@ check("書き直したあとも、会話の記録の続きに書ける", ptext.r
 
 print("■ アカウントごとに分ける")
 j.record_events([gravity("別のアカウントで", account="複製の垢")])
-check("同じ名前の相手でも、自分のアカウントが違えば別のファイル",
+check("同じ名前の相手でも、GRAVITYのアカウントが違えば別のファイル",
       "別のアカウントで" in read(os.path.join(root, "複製の垢", "相手", "たろう.md"))
       and "別のアカウントで" not in read(partner))
 j.record_events([gravity("どこの", account="")])

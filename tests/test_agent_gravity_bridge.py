@@ -211,7 +211,7 @@ run_monitor([("［参加したとき］", "{名前}さん、いらっしゃい�
 said = [e for e in own if e.text == "伏せ字5さん、いらっしゃい！"]
 check("自動返信で送った文がチャット欄に出たら、AI には自分の発言として渡す", said and all(e.is_self for e in said), said)
 
-print("■ チャットしている自分のアカウント（長期記憶ファイル。2026-10-16）")
+print("■ チャットしているGRAVITYのアカウント（長期記憶ファイル。2026-10-16）")
 learned = []
 acc = A.GravityChatBridge(lambda events: None, account=lambda: "テスト垢",
                           on_own_name=lambda name, text: learned.append((name, text)))
@@ -219,7 +219,7 @@ old = acc.on_rows([msg("テストちゃ👼", "前からあった自分の文")]
 check("起動前からあった行では、名前を覚えない", learned == [] and old[0].backlog)
 new = acc.on_rows([msg("テストちゃ👼", "前からあった自分の文"), msg("テストちゃ👼", "送った文"), msg("伏せ字5", "他の人の文")],
                   is_own_text=lambda text: text == "送った文")
-check("出来事に、今チャットしている自分のアカウントの名前を付ける",
+check("出来事に、今チャットしているGRAVITYのアカウントの名前を付ける",
       old[0].meta["account"] == "テスト垢" and all(e.meta["account"] == "テスト垢" for e in new))
 check("自分が送った文の新しい行の、名前と本文を知らせる", learned == [("テストちゃ👼", "送った文")], learned)
 

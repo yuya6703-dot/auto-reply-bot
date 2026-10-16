@@ -114,7 +114,7 @@ DB_FILE = os.path.join(BASE_DIR, "app_data.db")
 DB_FILE_NAME = os.path.basename(DB_FILE)
 # AIのエージェントの記録（出来事・判断・発言・利用量）。他の人の名前・発言が入るので app_data.db とは分ける（設計書/07）
 AGENT_DB_FILE = os.path.join(BASE_DIR, AGENT_DB_FILE_NAME)
-# 長期記憶ファイル（会話の全文・要約。自分のアカウントごと・相手ごと。本人がONにしたときだけ書く）
+# 長期記憶ファイル（GRAVITYの会話の全文・要約。GRAVITYのアカウントごと・相手ごと。本人がONにしたときだけ書く）
 AGENT_JOURNAL_DIR = os.path.join(BASE_DIR, AGENT_JOURNAL_FOLDER)
 
 # アプリのアイコン（窓・タスクバー・exe・ショートカットで共通）。
@@ -1538,7 +1538,7 @@ class GravityChatBridge:
     def __init__(self, on_events, active=lambda: True, self_names=lambda: [], clock=time.time, on_room=None,
                  account=lambda: "", on_own_name=None):
         self._on_events = on_events     # (list[AgentEvent]) -> None
-        self.account = account          # () -> 今チャットしている自分のアカウントの名前（出来事の meta["account"] に付ける）
+        self.account = account          # () -> 今チャットしている GRAVITY のアカウントの名前（出来事の meta["account"] に付ける）
         self._on_own_name = on_own_name  # (名前, 本文) -> None。自分が送った文の行の名前＝自分のアカウント名（覚えるため）
         self.active = active            # 渡してよいか（AIが動いていて、本人がスイッチをONにしている）
         self.self_names = self_names    # () -> このアカウントの表示名のリスト（監視スレッドから呼ばれる）
@@ -4701,7 +4701,8 @@ class AutoReplyWorker:
         self._agent_bridge = None
         # AIタブの判断のログにも出したいこと（AIの文を実際に送れたか・チャット欄が隠れたか）。App が渡す（監視スレッドから呼ぶ）
         self.agent_note = None
-        # 今チャットしている自分のアカウント（MuMu の Android のユーザー。本体=0、複製=10〜）。AI へ渡すときに見分ける
+        # 今チャットしている GRAVITY のアカウントが、どの GRAVITY か（MuMu の Android のユーザー。本体=0、アプリ複製=10〜）。
+        # ⚠️ アカウントそのものは GRAVITY のアカウント（名前）。ユーザー番号は、名前を引くための手がかりにだけ使う
         self.agent_account_user = None
         self._agent_account_display = None
         self._agent_account_checked_at = 0.0
@@ -9757,7 +9758,7 @@ class App(ctk.CTk):
         self._agent_gravity_on = self.db.get_setting(self.AGENT_GRAVITY_SETTING, "0") == "1"
         # このアカウントの表示名（監視スレッドが読むので素の値で持つ。設定を保存したら入れ替える）
         self._agent_self_names = AgentConfig.load(self.db.get_setting).self_name_list
-        # チャットしている自分のアカウントの名前（Android のユーザーごと）。自分が送った文の行から覚える
+        # チャットしている GRAVITY のアカウントの名前（どの GRAVITY か＝Android のユーザーごと）。自分が送った文の行から覚える
         try:
             self._agent_account_names = json.loads(self.db.get_setting(self.AGENT_ACCOUNT_NAMES_SETTING, "") or "{}")
         except ValueError:
@@ -9999,8 +10000,9 @@ class App(ctk.CTk):
 
     # --- 記憶（2026-10-16。⚠️ 他の人のことを覚える。どれも本人がONにしたときだけ・このPCの中だけ・見て消せる） ---
     AGENT_MEMORY_SWITCHES = (
-        ("memory_enabled", "🧠 会話を覚える（人・この場・自分が言ったこと）",
-         "会話から、あとで役立つことをAIに選ばせて、このPCの記録（agent_data.db）に残します。\n"
+        ("memory_enabled", "🧠 会話を覚える（人・この場・自分が言ったこと。GRAVITYのアカウントごと）",
+         "GRAVITYのチャットの会話から、あとで役立つことをAIに選ばせて、このPCの記録（agent_data.db）に残します。\n"
+         "GRAVITYのアカウントごとに分けて覚えます（AIタブの手入力は覚えません）。\n"
          "ルームの他の人の名前と、その人について分かったこと（好きな話題など）も入ります。\n"
          "健康・信条・性的指向・犯罪歴・住所・本名などの繊細な事柄は覚えません。\n"
          "覚えたことは下の一覧で見られ、1件ずつ・全部消せます。使わない記憶は30〜180日で消えます。\n\n覚えるようにしますか？"),
@@ -10008,8 +10010,8 @@ class App(ctk.CTk):
          "人の話し方や好みの印象を、AIに推定させて覚えます（例: 冗談が好きそう〈推定・確からしさ低〉）。\n"
          "推定は事実として扱わず、本人に向かって言いません。接し方の参考にするだけです。\n"
          "「会話を覚える」がONのときだけ動きます。\n\n推定するようにしますか？"),
-        ("journal_enabled", "📒 会話をファイルに残す（自分のアカウントごと・相手ごと。メモ帳で読める）",
-         "GRAVITYのチャットの会話の全文を、アプリのフォルダの「AIの記憶」に、自分のアカウントごと・話した相手ごとのファイルで残します。\n"
+        ("journal_enabled", "📒 会話をファイルに残す（GRAVITYのアカウントごと・相手ごと。メモ帳で読める）",
+         "GRAVITYのチャットの会話の全文を、アプリのフォルダの「AIの記憶」に、GRAVITYのアカウントごと・話した相手ごとのファイルで残します。\n"
          "「会話を覚える」もONなら、相手ごとのファイルに、AIがまとめた「覚えていること」も書きます。\n"
          "ルームの他の人の名前と発言がそのまま入ります。このPCの中だけで、自動では消しません（フォルダを開いて、読む・消すができます）。\n\n"
          "会話をファイルに残すようにしますか？"),
@@ -10269,7 +10271,7 @@ class App(ctk.CTk):
 
     def _gravity_account_name(self):
         """
-        監視スレッドから。今チャットしている自分のアカウントの名前。
+        監視スレッドから。今チャットしている GRAVITY のアカウントの名前。
         見分け方の順: 自分が送った文の行から覚えた名前 → タスク機能が覚えた名前 → 設定の「自分のアカウント名」→ 「本体のGRAVITY」など
         """
         user = self._current_account_user()
@@ -10318,7 +10320,7 @@ class App(ctk.CTk):
         except Exception:
             pass
         label = gravity_account_label(user, name)
-        self._post_to_ui(lambda: self._append_agent_log(f"🪪 チャットしているアカウントを覚えました: {label}"))
+        self._post_to_ui(lambda: self._append_agent_log(f"🪪 チャットしているGRAVITYのアカウントを覚えました: {label}"))
 
     def _on_gravity_room(self, info):
         """監視スレッドから。ルームの様子を AI に渡し、判断のログに短く出す"""

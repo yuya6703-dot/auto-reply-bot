@@ -42,11 +42,14 @@ def wait_until(cond, timeout=3.0):
     return cond()
 
 
-def make_event(text, speaker="テスト", event_id=None, key=None, is_self=False, backlog=False, at=None):
-    return AgentEvent(event_id=event_id or new_event_id(), kind=KIND_CHAT_MESSAGE, source=SOURCE_TEST,
+def make_event(text, speaker="テスト", event_id=None, key=None, is_self=False, backlog=False, at=None,
+               source=SOURCE_TEST, account=None):
+    meta = {"backlog": True} if backlog else {}
+    if account is not None:
+        meta["account"] = account
+    return AgentEvent(event_id=event_id or new_event_id(), kind=KIND_CHAT_MESSAGE, source=source,
                       key=key or new_event_id(), speaker=speaker, text=text,
-                      observed_at=time.time() if at is None else at,
-                      meta={"backlog": True} if backlog else {}, is_self=is_self)
+                      observed_at=time.time() if at is None else at, meta=meta, is_self=is_self)
 
 
 class FakeSpeaker:

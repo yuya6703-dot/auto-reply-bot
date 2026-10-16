@@ -10,6 +10,7 @@
 import os, tempfile, time
 
 from agent_harness import Agent, check, finish, make_event, wait_until
+from agent.events import SOURCE_GRAVITY
 from agent.config import AgentConfig
 from agent.llm.mock import MODE_ENGAGE, MODE_SILENT
 from agent.memory.recall import MemoryKeeper, is_sensitive, same_person
@@ -22,6 +23,11 @@ check("同じ名前は同じ人（「..」は除く）", same_person("たろう.
 check("繊細な事柄を見分ける", is_sensitive("最近病院に通っている") and is_sensitive("宗教の話") and not is_sensitive("猫が好き"))
 
 
+def chat(text, speaker="テスト", **kw):
+    """GRAVITY のチャットの発言（記憶に入るのは GRAVITY のチャットだけ。アカウントは監視が付ける）"""
+    return make_event(text, speaker=speaker, source=SOURCE_GRAVITY, **kw)
+
+
 def keeper(**config):
     store = AgentStore(os.path.join(tempfile.mkdtemp(), "agent_data.db"))
     store.open()
@@ -31,14 +37,14 @@ def keeper(**config):
 
 print("■ OFFなら何も覚えない（既定）")
 mk, store, cfg = keeper()
-mk.observe([make_event("猫を飼い始めた", speaker="たろう")])
+mk.observe([chat("猫を飼い始めた", speaker="たろう")])
 check("人も覚えない", store.persons() == [])
 check("整理もしない", mk.due(9999) is False)
-check("思い出しも渡さない", mk.recall([make_event("x", speaker="たろう")]) == [])
+check("思い出しも渡さない", mk.recall([chat("x", speaker="たろう")]) == [])
 
 print("■ 覚える（整理の返事を記憶にする）")
 mk, store, cfg = keeper(memory_enabled=True, summarize_min_lines=2)
-mk.observe([make_event("猫を飼い始めた", speaker="たろう"), make_event("いいね！", speaker="はなこ")])
+mk.observe([chat("猫を飼い始めた", speaker="たろう"), chat("いいね！", speaker="はなこ")])
 check("発言した人を覚える", {r[0] for r in store.persons()} == {"たろう", "はなこ"})
 check("発言がたまって静かになったら整理する", mk.due(quiet_seconds=200) is True and mk.due(quiet_seconds=10) is False)
 kept, dropped = mk.apply_summary({
@@ -63,20 +69,20 @@ check("関係の値は、ONのときだけ", store.relationships() == [])
 check("整理したら、たまった数を戻す", mk.due(quiet_seconds=9999) is False)
 
 print("■ 思い出す")
-lines = mk.recall([make_event("ただいま", speaker="たろう")])
+lines = mk.recall([chat("ただいま", speaker="たろう")])
 check("今回の発言者の記憶を先に", lines and lines[0] == "[たろう] 最近猫を飼い始めた", lines)
 check("この場・自分のことも", "[この場] 夜はゲームの話が多い" in lines and "[あなた自身] たろうに猫の名前を聞くと約束した" in lines, lines)
-check("知らない人だけのときも、この場のことは渡す", "[この場] 夜はゲームの話が多い" in mk.recall([make_event("はじめまして", speaker="じろう")]))
+check("知らない人だけのときも、この場のことは渡す", "[この場] 夜はゲームの話が多い" in mk.recall([chat("はじめまして", speaker="じろう")]))
 check("思い出しても、知らない人を新しく覚えない", "じろう" not in {r[0] for r in store.persons()})
 
 print("■ 人の印象・関係の値（ONのとき）")
 mk, store, cfg = keeper(memory_enabled=True, impressions_enabled=True, relationships_enabled=True)
-mk.observe([make_event("こんばんは", speaker="たろう")])
+mk.observe([chat("こんばんは", speaker="たろう")])
 mk.apply_summary({"memories": [],
                   "impressions": [{"person": "たろう", "content": "冗談が好きそう", "confidence": "low"},
                                   {"person": "たろう", "content": "政治の話が好き", "confidence": "mid"}],
                   "relationships": [{"person": "たろう", "warmth_delta": 9, "reason": "楽しく話した"}]}, ["たろう"])
-lines = mk.recall([make_event("やあ", speaker="たろう")])
+lines = mk.recall([chat("やあ", speaker="たろう")])
 check("印象は「推定・確からしさ」を付けて渡す", "[たろう・印象（推定・確からしさ低）] 冗談が好きそう" in lines, lines)
 check("繊細な事柄の印象は覚えない", not any("政治" in line for line in lines))
 rel = store.relationship("たろう")
@@ -85,7 +91,7 @@ check("関係は数値でなく言葉で渡す", any("あなたとは: まだあ
 for _ in range(30):
     mk.note_interaction("たろう")
 check("話しかけるたびに、なじみが少し上がる（上限100）", store.relationship("たろう")["familiarity"] == 60.0)
-check("なじみが上がると言葉も変わる", any("よく話す" in line for line in mk.recall([make_event("やあ", speaker="たろう")])))
+check("なじみが上がると言葉も変わる", any("よく話す" in line for line in mk.recall([chat("やあ", speaker="たろう")])))
 
 print("■ 消す・期限")
 mid = store.memories()[0][0]
@@ -111,21 +117,41 @@ a = Agent(mode=MODE_SILENT, memory_enabled=True, summarize_min_lines=2, summariz
           summarize_interval_seconds=999)
 a.mock.script_summarize = [{"memories": [{"scope": "person", "person": "たろう", "content": "猫を飼っている",
                                           "importance": 0.8, "confidence": "high"}]}]
-a.say("猫を飼い始めた", speaker="たろう")
-a.say("いいね", speaker="はなこ")
+a.runtime.submit(chat("猫を飼い始めた", speaker="たろう"))
+a.runtime.submit(chat("いいね", speaker="はなこ"))
 check("会話が静かになったら整理する（AIを呼ぶ）", wait_until(lambda: any("覚えておくことを整理しました（新しく1件）" in line
                                                        for line in a.logs), 5.0), a.logs[-3:])
 check("利用量に「整理」として数える", wait_until(lambda: a.runtime.today_usage()[0] >= 2))
 a.mock.mode = MODE_ENGAGE
-a.say("ただいま", speaker="たろう")
+a.runtime.submit(chat("ただいま", speaker="たろう"))
 check("次の判断に「覚えていること」が入る", wait_until(lambda: len(a.decide_calls()) >= 2)
       and "[たろう] 猫を飼っている" in a.decide_calls()[-1].messages[0].content)
 check("「印象は推定。口に出さない」と固定の指示に書く", "本人に向かって言わないでください" in a.decide_calls()[-1].system)
 a.close()
 a = Agent(mode=MODE_SILENT, summarize_min_lines=1, summarize_quiet_seconds=0.1)
-a.say("猫を飼い始めた", speaker="たろう")
+a.runtime.submit(chat("猫を飼い始めた", speaker="たろう"))
 time.sleep(1.0)
 check("OFFなら整理しない（AIを呼ばない）", a.runtime.today_usage()[0] == 1 and a.store.persons() == [])
+a.close()
+
+print("■ GRAVITY のアカウントの記憶だけ（本人「アカウントはアカウントでもグラビティに限ったものだからね」）")
+mk, store, cfg = keeper(memory_enabled=True, summarize_min_lines=1)
+mk.observe([make_event("AIタブから試しに", speaker="ためし")])
+check("AIタブの手入力・テストの出来事では、人を覚えない・整理もしない", store.persons() == [] and mk.due(9999) is False)
+a = Agent(mode=MODE_SILENT, memory_enabled=True, summarize_min_lines=1, summarize_quiet_seconds=0.2,
+          summarize_interval_seconds=999)
+a.say("手入力で試す", speaker="ためし")
+time.sleep(1.0)
+check("エージェントでも、手入力だけなら整理しない（GRAVITYのアカウントの記憶に混ぜない）",
+      a.runtime.today_usage()[0] == 1 and a.store.persons() == [], (a.runtime.today_usage(), a.store.persons()))
+a.mock.script_summarize = [{"memories": [{"scope": "person", "person": "たろう", "content": "猫を飼っている",
+                                          "importance": 0.8}]}]
+a.runtime.submit(chat("猫を飼い始めた", speaker="たろう", account="テスト垢"))
+check("GRAVITY のチャットなら、そのアカウントで覚える", wait_until(lambda: [r[1] for r in a.store.memories_with_account(5)]
+                                                      == ["テスト垢"], 5.0), a.store.memories_with_account(5))
+requests = [r for r in a.mock.requests if r.purpose == "summarize"]
+check("整理に渡す会話にも、手入力の発言は入れない", requests and "手入力で試す" not in requests[-1].messages[0].content
+      and "猫を飼い始めた" in requests[-1].messages[0].content)
 a.close()
 
 finish()

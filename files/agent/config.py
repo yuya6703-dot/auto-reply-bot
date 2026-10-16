@@ -67,7 +67,7 @@ class AgentConfig:
     summarize_interval_seconds: float = 600.0     # 覚えることを整理する間隔（10分）
     summarize_quiet_seconds: float = 120.0        # 会話がこれだけ静かになったら、10分たっていなくても整理する
     summarize_min_lines: int = 6                  # 他の人の発言がこれだけたまってから整理する
-    # 長期記憶ファイル（自分のアカウントごと＋相手ごとに、会話の全文と要約を読めるファイルに残す。既定OFF。2026-10-16）
+    # 長期記憶ファイル（GRAVITYのアカウントごと＋相手ごとに、会話の全文と要約を読めるファイルに残す。既定OFF。2026-10-16）
     journal_enabled: bool = False
     react_max_chars: int = 40              # C2: 短い反応の上限（声）
     engage_max_chars: int = 120            # C2: 参加の上限（声）

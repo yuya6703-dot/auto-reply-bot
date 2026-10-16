@@ -15,7 +15,7 @@ import re
 import threading
 import time
 
-from ..events import KIND_SYSTEM, RECENT_BLOCK_BEGIN, RECENT_BLOCK_END, clean_name, describe_event
+from ..events import KIND_SYSTEM, RECENT_BLOCK_BEGIN, RECENT_BLOCK_END, SOURCE_GRAVITY, clean_name, describe_event
 from ..llm.base import PURPOSE_SUMMARIZE, LLMMessage, LLMRequest
 
 DAY = 24 * 3600
@@ -105,7 +105,7 @@ def warmth_label(value):
     return "ふつう"
 
 
-ACCOUNT_SEPARATOR = "／"      # 人の目印は「自分のアカウント／相手の名前」（自分のアカウントが違えば別の人として覚える）
+ACCOUNT_SEPARATOR = "／"      # 人の目印は「GRAVITYのアカウント／相手の名前」（アカウントが違えば別の人として覚える）
 
 
 def display_of(person_key):
@@ -118,7 +118,7 @@ class MemoryKeeper:
         self._store = store
         self._config = config_getter
         self._clock = clock
-        # 今チャットしている自分のアカウント（2026-10-16 本人「アカウント別に」）。空ならアカウントを分けない
+        # 今チャットしている GRAVITY のアカウント（2026-10-16 本人「アカウント別に」「グラビティに限ったもの」）。空ならアカウントを分けない
         self._account = account_getter
         self._lock = threading.Lock()
         self._last_summary_at = clock()
@@ -140,7 +140,7 @@ class MemoryKeeper:
         return key
 
     def _known_key(self, name):
-        """会話に出てきた名前のうち、今の自分のアカウントで知っている人の目印（新しく作らない）"""
+        """会話に出てきた名前のうち、今の GRAVITY のアカウントで知っている人の目印（新しく作らない）"""
         name = clean_name(name)
         for key, display, _first, _last in self._store.persons(account=self._account() or ""):
             if same_person(name, display_of(key)) or same_person(name, display):
@@ -148,11 +148,20 @@ class MemoryKeeper:
         return None
 
     # --- 出来事を見る ---
+    def in_current_account(self, event):
+        """
+        記憶に入れてよい出来事か: 今の GRAVITY のアカウントのチャットの発言だけ。
+        ⚠️ アカウントは GRAVITY のもの（本人「アカウントはアカウントでもグラビティに限ったものだからね」）。
+           AIタブの手入力・テストの出来事は、GRAVITY のどのアカウントの会話でもないので覚えない（混ぜない）
+        """
+        return event.source == SOURCE_GRAVITY and (event.meta.get("account") or "") == (self._account() or "")
+
     def observe(self, events):
-        """他の人の新しい発言を数え、人を覚える（覚えるがONのときだけ）"""
+        """他の人の新しい発言を数え、人を覚える（覚えるがONのときだけ。GRAVITY のチャットだけ）"""
         if not self._config().memory_enabled:
             return
-        fresh = [e for e in events if not e.is_self and not e.backlog and e.kind != KIND_SYSTEM]
+        fresh = [e for e in events if self.in_current_account(e) and not e.is_self and not e.backlog
+                 and e.kind != KIND_SYSTEM]
         for event in fresh:
             if event.speaker:
                 self.person_key(event.speaker)
@@ -185,7 +194,8 @@ class MemoryKeeper:
         now = self._clock()
         with self._lock:
             since = self._last_summary_at
-        lines = [describe_event(e, now) for e in window.recent_events() if e.observed_at >= since - 60]
+        lines = [describe_event(e, now) for e in window.recent_events()
+                 if e.observed_at >= since - 60 and self.in_current_account(e)]
         known = []
         for _id, scope, key, content, conf, _imp, _upd, _pin in self._store.memories(limit=30, account=self._account() or ""):
             known.append(f"- [{display_of(key) if key else scope}] {content}")
@@ -274,7 +284,7 @@ class MemoryKeeper:
 
     def summary_for_files(self):
         """
-        長期記憶ファイル用に、今の自分のアカウントの「覚えていること」を相手ごとにまとめる（journal.py が書き出す）。
+        長期記憶ファイル用に、今の GRAVITY のアカウントの「覚えていること」を相手ごとにまとめる（journal.py が書き出す）。
         戻り値: {"people": {相手の名前: [行, ...]}, "room": [行, ...]}
         """
         config = self._config()

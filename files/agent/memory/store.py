@@ -19,7 +19,7 @@ import time
 from ..events import AgentEvent
 from ..persona import Persona
 
-SCHEMA_VERSION = 3     # 2: 記憶（persons・memories・relationships）を足した。3: 自分のアカウントごとに分けた（account 列。2026-10-16）
+SCHEMA_VERSION = 3     # 2: 記憶（persons・memories・relationships）を足した。3: GRAVITYのアカウントごとに分けた（account 列。2026-10-16）
 FILE_NAME = "agent_data.db"
 BACKUP_PREFIX = "agent_data_"
 BACKUP_KEEP = 7
@@ -210,7 +210,7 @@ class AgentStore:
             self._conn.commit()
 
     def persons(self, account=None):
-        """[(person_key, display_name, first_seen, last_seen)]。account を渡すと、その自分のアカウントの人だけ"""
+        """[(person_key, display_name, first_seen, last_seen)]。account を渡すと、その GRAVITY のアカウントの人だけ"""
         with self._lock:
             if account is None:
                 return self._conn.execute("SELECT person_key, display_name, first_seen, last_seen FROM persons"
@@ -235,7 +235,7 @@ class AgentStore:
             self._conn.commit()
 
     def memories(self, person_key=None, limit=200, account=None):
-        """新しい順 [(id, scope, person_key, content, confidence, importance, updated_at, pinned)]。account で自分のアカウントに絞る"""
+        """新しい順 [(id, scope, person_key, content, confidence, importance, updated_at, pinned)]。account で GRAVITY のアカウントに絞る"""
         with self._lock:
             if person_key is None and account is not None:
                 rows = self._conn.execute(

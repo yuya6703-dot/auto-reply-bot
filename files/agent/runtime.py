@@ -28,7 +28,7 @@ from .gate import OBSERVE as GATE_OBSERVE
 from .gate import Gate, GateSnapshot, is_strong_signal
 from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, precheck, request_decision_with_text,
                          request_utterance)
-from .events import KIND_SYSTEM, SOURCE_SYSTEM, AgentEvent, new_event_id
+from .events import KIND_SYSTEM, SOURCE_GRAVITY, SOURCE_SYSTEM, AgentEvent, new_event_id
 from .inbox import Inbox
 from .memory.recall import MemoryKeeper
 from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_GENERATE, PURPOSE_SUMMARIZE,
@@ -103,8 +103,9 @@ class AgentRuntime:
         self.window = ConversationWindow(clock=self._clock)
         self.usage = UsageTracker(deps.store, clock=self._clock)
         self.persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
-        # 今チャットしている自分のアカウント（出来事の meta["account"] から。監視が見分けて付ける）
+        # 今チャットしている GRAVITY のアカウント（出来事の meta["account"] から。監視が見分けて付ける）
         self._account = ""
+        self._turn_in_gravity = False       # 今の回が GRAVITY のチャットの出来事か（AIタブの手入力は記憶に入れない）
         self.memory = MemoryKeeper(deps.store, lambda: self.config, clock=self._clock,
                                    account_getter=lambda: self._account)
 
@@ -429,6 +430,7 @@ class AgentRuntime:
         account = next((e.meta.get("account") for e in events if e.meta.get("account")), None)
         if account:
             self._account = account
+        self._turn_in_gravity = any(e.source == SOURCE_GRAVITY for e in events)
         self.memory.observe(events)
         self._journal("record_events", events)
         # --- 規則の関所（AI を呼ばない） ---
@@ -542,7 +544,7 @@ class AgentRuntime:
             delivered = self._post_chat(utterance, decision, turn_id)
         else:
             delivered = self._speak(utterance, decision, turn_id)
-        if delivered and decision.target:
+        if delivered and decision.target and self._turn_in_gravity:
             self.memory.note_interaction(decision.target)
         if delivered:
             self._journal("record_reply", self._account, decision.target, utterance.text,
@@ -635,7 +637,8 @@ class AgentRuntime:
                 or snap.cost_month >= c.monthly_cost_limit_usd):
             self.memory.postpone()
             return
-        speakers = [e.speaker for e in self.window.recent_events() if e.speaker and not e.is_self]
+        speakers = [e.speaker for e in self.window.recent_events()
+                    if e.speaker and not e.is_self and self.memory.in_current_account(e)]
         request = self.memory.build_request(self.window, self.config.display_name)
         cancel = CancelToken()
         with self._lock:
