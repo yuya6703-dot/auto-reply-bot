@@ -16,6 +16,7 @@ import threading
 import time
 
 from ..events import KIND_SYSTEM, RECENT_BLOCK_BEGIN, RECENT_BLOCK_END, SOURCE_GRAVITY, clean_name, describe_event
+from ..gate import is_ignored
 from ..llm.base import PURPOSE_SUMMARIZE, LLMMessage, LLMRequest
 
 DAY = 24 * 3600
@@ -172,8 +173,9 @@ class MemoryKeeper:
         """他の人の新しい発言を数え、人を覚える（覚えるがONのときだけ。GRAVITY のチャットだけ）"""
         if not self._config().memory_enabled:
             return
+        config = self._config()
         fresh = [e for e in events if self.in_current_account(e) and not e.is_self and not e.backlog
-                 and e.kind != KIND_SYSTEM]
+                 and e.kind != KIND_SYSTEM and not is_ignored(e, config)]     # 反応しない人のことは覚えない
         now = self._clock()
         gap = self._config().returning_after_days * DAY
         for event in fresh:
@@ -186,6 +188,30 @@ class MemoryKeeper:
                 self.person_key(event.speaker)
         with self._lock:
             self._pending_lines += len(fresh)
+
+    def remember_from_owner(self, content):
+        """
+        オーナーの合図「〇〇って覚えておいて」（owner.py）。(覚えたか, わけ: "off" / "sensitive" / 人の名前 / "")。
+        ⚠️ なりすましもありうるので「（オーナーから）」と付けたふつうの記憶にする（確かなメモではない。一覧で見て消せる）
+        """
+        if not self._config().memory_enabled:
+            return False, "off"
+        content = " ".join((content or "").split())[:MAX_CONTENT_CHARS]
+        if not content:
+            return False, ""
+        if is_sensitive(content):
+            return False, "sensitive"
+        account = self._account() or ""
+        key, who = None, ""
+        for person_key, display, _first, _last in sorted(self._store.persons(account=account),
+                                                         key=lambda r: -len(r[1] or "")):
+            name = clean_name(display)
+            if len(name) >= 2 and name in content:
+                key, who = person_key, name
+                break
+        self._store.add_memory(SCOPE_PERSON if key else SCOPE_ROOM, key, "（オーナーから）" + content, "mid", 0.8,
+                               180 * DAY, account)
+        return True, who
 
     def note_interaction(self, name, reason="話しかけた"):
         """AI がその人に話しかけた（関係の値がONのとき、なじみを少し上げる）。「久しぶり」はここで終わり"""

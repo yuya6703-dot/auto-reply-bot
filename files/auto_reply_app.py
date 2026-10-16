@@ -86,6 +86,7 @@ from agent.speech.service import (SpeechService, SpeechJob,
 # AIのエージェント（段階3: 骨組み。模擬のAIと手入力の出来事で試す。設計書/09 の S3）
 from agent.config import (AgentConfig, NAMES_MAX_CHARS as AGENT_NAMES_MAX_CHARS,
                           WAIT_TEXT_MAX_CHARS as AGENT_WAIT_TEXT_MAX_CHARS,
+                          IGNORED_MAX_CHARS as AGENT_IGNORED_MAX_CHARS,
                           load_account_profiles, save_account_profiles,
                           OUTPUT_VOICE as AGENT_OUTPUT_VOICE, OUTPUT_CHAT as AGENT_OUTPUT_CHAT,
                           CHAT_APPROVE as AGENT_CHAT_APPROVE, CHAT_AUTO as AGENT_CHAT_AUTO)
@@ -9820,6 +9821,10 @@ class App(ctk.CTk):
         self.agent_resume_btn.pack(side="left", padx=5)
         ctk.CTkButton(buttons, text="⏹ 音声を止める", width=120, fg_color="#8B0000", hover_color="#5C0000",
                       command=self.stop_speech).pack(side="left", padx=5)
+        # オーナーの合図「静かにして」の解除（PC の前からも戻せる）
+        self.agent_unmute_btn = ctk.CTkButton(buttons, text="🔈 静かにを解く", width=120, fg_color="#555555",
+                                              hover_color="#3a3a3a", command=self.unmute_agent, state="disabled")
+        self.agent_unmute_btn.pack(side="left", padx=5)
 
         self.agent_gravity_var = ctk.BooleanVar(value=self._agent_gravity_on)
         ctk.CTkSwitch(control, text="💬 GRAVITYのチャットをAIに渡す（メインタブで監視している間だけ）",
@@ -9881,6 +9886,16 @@ class App(ctk.CTk):
         if config.owner_names:
             self.agent_owner_entry.insert(0, config.owner_names)
         ctk.CTkLabel(owner_row, text="（AIはこの人と親しく話す。規則は同じ）", text_color="gray70").pack(side="left")
+        ignored_row = ctk.CTkFrame(settings, fg_color="transparent")
+        ignored_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(ignored_row, text="反応しない人:", width=110, anchor="w").pack(side="left")
+        self.agent_ignored_entry = ctk.CTkEntry(ignored_row, width=260, placeholder_text="名前を「、」で区切って複数")
+        self.agent_ignored_entry.pack(side="left", padx=(0, 8))
+        self.agent_ignored_entry.bind("<Button-3>", self._show_entry_context_menu)
+        if config.ignored_people:
+            self.agent_ignored_entry.insert(0, config.ignored_people)
+        ctk.CTkLabel(ignored_row, text="（荒らしなど。この人の発言には反応せず、覚えない。記録には残る）",
+                     text_color="gray70").pack(side="left")
         ctk.CTkLabel(row, text="1日にAIを呼ぶ上限:", anchor="w").pack(side="left", padx=(0, 6))
         self.agent_limit_entry = ctk.CTkEntry(row, width=70)
         self.agent_limit_entry.pack(side="left", padx=(0, 4))
@@ -10496,6 +10511,12 @@ class App(ctk.CTk):
             self.agent_runtime.config.initiative_enabled = on
         self._append_agent_log("💭 静かなときに自分から話しかけます。" if on else "💭 自分から話しかけるのをやめました。")
 
+    def unmute_agent(self):
+        """オーナーの合図「静かにして」を PC から解く"""
+        if self.agent_runtime is not None:
+            self.agent_runtime.set_muted(0)
+        self._refresh_agent_state()
+
     def on_agent_lookup_toggled(self):
         on = bool(self.agent_lookup_var.get())
         wait = self.agent_wait_text_entry.get().strip()
@@ -10905,8 +10926,11 @@ class App(ctk.CTk):
     def _refresh_agent_state(self):
         runtime = self.agent_runtime
         state = runtime.state if runtime is not None else AGENT_STOPPED
-        self.agent_state_label.configure(text=f"状態: {AGENT_STATE_LABELS.get(state, state)}",
+        muted = runtime.muted_until if runtime is not None else None
+        quiet = f"（オーナーの合図で静か: {time.strftime('%H:%M', time.localtime(muted))}まで）" if muted else ""
+        self.agent_state_label.configure(text=f"状態: {AGENT_STATE_LABELS.get(state, state)}{quiet}",
                                          text_color="#FF6B6B" if state == AGENT_EMERGENCY else ("gray90" if state == AGENT_STOPPED else "#7CFC9A"))
+        self.agent_unmute_btn.configure(state="normal" if muted else "disabled")
         running = runtime is not None and runtime.running
         emergency = state == AGENT_EMERGENCY
         self.agent_start_btn.configure(state="normal" if not running and not emergency else "disabled")
@@ -10977,6 +11001,10 @@ class App(ctk.CTk):
         name = self.agent_name_entry.get().strip()
         self_names = self.agent_self_names_entry.get().strip()
         owner_names = self.agent_owner_entry.get().strip()
+        ignored = self.agent_ignored_entry.get().strip()
+        if len(ignored) > AGENT_IGNORED_MAX_CHARS:
+            messagebox.showwarning("AI", f"反応しない人は、全部で{AGENT_IGNORED_MAX_CHARS}文字までにしてください。")
+            return
         if max(len(name), len(self_names), len(owner_names)) > AGENT_NAMES_MAX_CHARS:
             messagebox.showwarning("AI", f"呼ばれ方・自分のアカウント名・オーナーの名前は、それぞれ{AGENT_NAMES_MAX_CHARS}文字までにしてください。")
             return
@@ -11000,6 +11028,7 @@ class App(ctk.CTk):
         model = next((code for code, label in GEMINI_MODELS if label == self.agent_model_var.get()), GEMINI_DEFAULT_MODEL)
         config.ai_name, config.self_names, config.daily_call_limit = name, self_names, limit
         config.owner_names = owner_names
+        config.ignored_people = ignored
         config.daily_cost_limit_usd, config.monthly_cost_limit_usd, config.model = cost_day, cost_month, model
         config.save(self.db.save_setting)
         self._agent_self_names = config.self_name_list
@@ -11007,9 +11036,11 @@ class App(ctk.CTk):
             live = self.agent_runtime.config
             live.ai_name, live.self_names, live.daily_call_limit = name, self_names, limit
             live.owner_names = owner_names
+            live.ignored_people = ignored
             live.daily_cost_limit_usd, live.monthly_cost_limit_usd, live.model = cost_day, cost_month, model
         self._append_agent_log(f"⚙️ 設定を保存しました（呼ばれ方: {'・'.join(config.ai_names) or '（なし）'}、"
-                               f"自分のアカウント名: {'・'.join(config.self_name_list) or '（なし）'}、1日の上限: {limit}回、"
+                               f"自分のアカウント名: {'・'.join(config.self_name_list) or '（なし）'}、"
+                               f"反応しない人: {'・'.join(config.ignored_name_list) or '（なし）'}、1日の上限: {limit}回、"
                                f"費用の上限: 1日 ${cost_day:g}・1か月 ${cost_month:g}、モデル: {model}）。"
                                "モデルの変更は、次に「▶ 開始」したときから使います。")
         self._refresh_agent_provider_label()

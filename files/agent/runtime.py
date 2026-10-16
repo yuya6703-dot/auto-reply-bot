@@ -25,12 +25,13 @@ from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HO
                        Decision, DecisionFailed, call_llm, request_decision)
 from .gate import HOLD as GATE_HOLD
 from .gate import OBSERVE as GATE_OBSERVE
-from .gate import Gate, GateSnapshot, is_strong_signal
+from .gate import Gate, GateSnapshot, is_ignored, is_ignored_name, is_strong_signal
 from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, Utterance, precheck, request_decision_with_text,
                          request_utterance)
 from .events import KIND_SYSTEM, SOURCE_GRAVITY, SOURCE_SYSTEM, AgentEvent, new_event_id
 from .inbox import Inbox
 from .memory.recall import MemoryKeeper
+from .owner import CMD_MUTE, CMD_REMEMBER, CMD_UNMUTE, is_owner, parse_command
 from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_GENERATE, PURPOSE_SUMMARIZE,
                        LLMError)
 from .persona import DEFAULT_PERSONA_ID, Persona, account_persona_id
@@ -104,7 +105,8 @@ class AgentRuntime:
         self.log = AuditLog(deps.on_log, deps.on_notice)
         self.gate = Gate(config)
         self.inbox = Inbox(config.inbox_max, config.settle_seconds,
-                           strong_signal=lambda e: is_strong_signal(e, self.config.call_names))
+                           strong_signal=lambda e: (is_strong_signal(e, self.config.call_names)
+                                                    and not is_ignored(e, self.config)))
         self.window = ConversationWindow(clock=self._clock)
         self.usage = UsageTracker(deps.store, clock=self._clock)
         self._persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
@@ -143,6 +145,8 @@ class AgentRuntime:
         self._room_info = None             # ルームの様子（ルーム名・ゲスト・席・アナウンス）。監視から届く
         self._last_fresh_at = None         # 他の人の新しい出来事が最後に届いた時刻
         self._last_initiative_at = 0.0     # 自分から話すか考えた時刻
+        self._muted_until = None           # オーナーの合図で静かにしている間（この時刻まで）
+        self._owner_done = set()           # 扱ったオーナーの合図（同じ発言を2度扱わない）
 
     # ================= 操作（画面のスレッドから） =================
     @property
@@ -263,6 +267,25 @@ class AgentRuntime:
         with self._lock:
             self._listening = bool(speaking)
         if not speaking:
+            self.inbox.wake()
+        self._report_state()
+
+    # --- オーナーの合図で静かにする（2026-10-16） ---
+    @property
+    def muted_until(self):
+        with self._lock:
+            until = self._muted_until
+        return until if until is not None and until > self._clock() else None
+
+    def set_muted(self, minutes):
+        """minutes 分だけ静かにする（0 で静かにするのをやめる）。画面からも呼ぶ"""
+        with self._lock:
+            self._muted_until = self._clock() + minutes * 60 if minutes else None
+        if minutes:
+            self.log.write(f"🤐 {minutes}分、静かにします（{time.strftime('%H:%M', time.localtime(self._muted_until))}まで。"
+                           "記録だけして、話しかけられても答えません）。")
+        else:
+            self.log.write("🔈 静かにするのをやめました。")
             self.inbox.wake()
         self._report_state()
 
@@ -430,6 +453,7 @@ class AgentRuntime:
         now = self._clock()
         with self._lock:
             if (not c.initiative_enabled or self._degraded or self._listening or self._emergency
+                    or (self._muted_until is not None and self._muted_until > now)
                     or self._held or self._last_fresh_at is None):
                 return []
             quiet = now - self._last_fresh_at
@@ -470,7 +494,8 @@ class AgentRuntime:
                                 speaking=self._speaking, last_utterance_end=self._last_utterance_end,
                                 utterance_times=list(self._utterance_times),
                                 decision_times=list(self._decision_times), calls_today=calls,
-                                cost_today=cost_today, cost_month=cost_month)
+                                cost_today=cost_today, cost_month=cost_month,
+                                muted=self._muted_until is not None and self._muted_until > now)
 
     def _hold(self, events, wait_seconds):
         with self._lock:
@@ -489,6 +514,13 @@ class AgentRuntime:
         self._turn_in_gravity = any(e.source == SOURCE_GRAVITY for e in events)
         self.memory.observe(events)
         self._journal("record_events", events)
+        # --- オーナーの合図（静かにして・もういいよ・覚えておいて。AI を呼ばない） ---
+        handled = self._owner_commands(events, turn_id)
+        if handled:
+            events = [e for e in events if e.event_id not in handled]
+            if not any(not e.is_self and not e.backlog for e in events):
+                self._record(Decision(OBSERVE, "オーナーの合図", DECIDED_BY_RULE, turn_id, rule_id="OWNER"))
+                return
         # --- 規則の関所（AI を呼ばない） ---
         snap = self._snapshot(now)
         self._warn_budget(snap)
@@ -558,6 +590,9 @@ class AgentRuntime:
             decision = replace(decision, action=ENGAGE)
             prepared = None
 
+        if decision.target and is_ignored_name(decision.target, self.config):
+            self.log.write(f"🤫 沈黙: 「{decision.target}」は反応しない人です。")
+            return
         if decision.action in (SILENT, OBSERVE):
             mark = "📝 記録だけ" if decision.action == OBSERVE else "🤫 沈黙"
             self.log.write(f"{mark}: {decision.reason}")
@@ -628,7 +663,8 @@ class AgentRuntime:
             return CHECK_LIMIT
         return None
 
-    def _speak(self, utterance, decision, turn_id):
+    def _speak(self, utterance, decision, turn_id, count=True):
+        """count=False は発言の回数の上限に数えない（オーナーの合図への決まった返事）"""
         speech_cancel = CancelToken()
         started = self._clock()
         with self._lock:
@@ -636,7 +672,8 @@ class AgentRuntime:
                 return
             self._speech_cancel = speech_cancel
             self._speaking = True
-            self._utterance_times = [t for t in self._utterance_times if started - t < 3600] + [started]
+            if count:
+                self._utterance_times = [t for t in self._utterance_times if started - t < 3600] + [started]
         self._set_state(STATE_SPEAKING)
         label = "🗣️ 参加" if decision.action == ENGAGE else "💬 短く反応"
         self.log.write(f"{label}:「{utterance.text}」")
@@ -656,6 +693,55 @@ class AgentRuntime:
         elif outcome == SPEECH_FAILED:
             self.log.write("⚠️ 声にできませんでした（音声エンジンを確かめてください）。")
         return outcome == SPOKEN
+
+    OWNER_REPLIES = {"mute": "わかった、静かにしてるね", "unmute": "はーい、戻ったよ！", "remembered": "覚えたよ！",
+                     "memory_off": "ごめん、今は覚える設定がOFFなんだ", "sensitive": "それは覚えないでおくね"}
+
+    def _owner_commands(self, events, turn_id):
+        """オーナーの合図を見て扱う。扱った出来事の id を返す（その出来事は AI の判断に回さない）"""
+        handled = set()
+        for e in events:
+            if (e.event_id in self._owner_done or e.is_self or e.backlog or e.kind == KIND_SYSTEM
+                    or not is_owner(e, self.config)):
+                continue
+            command = parse_command(e.text, self.config.call_names)
+            if command is None:
+                continue
+            self._owner_done.add(e.event_id)
+            handled.add(e.event_id)
+            kind, value = command
+            if kind == CMD_MUTE:
+                self.log.write(f"👑 オーナーの合図: 静かにして（{value}分）")
+                self._say_fixed(self.OWNER_REPLIES["mute"], turn_id, e.speaker)
+                self.set_muted(value)
+            elif kind == CMD_UNMUTE:
+                self.log.write("👑 オーナーの合図: もういいよ")
+                self.set_muted(0)
+                self._say_fixed(self.OWNER_REPLIES["unmute"], turn_id, e.speaker)
+            elif kind == CMD_REMEMBER:
+                ok, why = self.memory.remember_from_owner(value)
+                if ok:
+                    self.log.write(f"👑 オーナーの合図: 覚えて →「（オーナーから）{value}」" + (f"（{why}の記憶）" if why else ""))
+                    reply = self.OWNER_REPLIES["remembered"]
+                else:
+                    self.log.write(f"👑 オーナーの合図: 覚えて → 覚えませんでした（{'会話を覚えるがOFF' if why == 'off' else '繊細な事柄'}）")
+                    reply = self.OWNER_REPLIES["memory_off" if why == "off" else "sensitive"]
+                self._say_fixed(reply, turn_id, e.speaker)
+        if len(self._owner_done) > 500:
+            self._owner_done = set(list(self._owner_done)[-200:])
+        return handled
+
+    def _say_fixed(self, text, turn_id, target):
+        """
+        決まった返事（オーナーの合図への返事）。ふつうの発言と同じく、チャットなら下書きの設定に従う。
+        ⚠️ 発言の回数の上限には数えない（数えると「もういいよ」のあと1分ほど返事ができない。チャットは1分1通）
+        """
+        decision = Decision(ENGAGE, "オーナーの合図への返事", DECIDED_BY_RULE, turn_id, target=target)
+        utterance = Utterance(text=text, emotion="calm", turn_id=turn_id)
+        if self.config.output_mode == OUTPUT_CHAT:
+            self._post_chat(utterance, decision, turn_id, count=False)
+        else:
+            self._speak(utterance, decision, turn_id, count=False)
 
     def _look_up(self, decision, turn_id, cancel):
         """
@@ -737,8 +823,8 @@ class AgentRuntime:
         self.deps.store.add_utterance(turn_id, text, "neutral", "chat" if chat else self.persona.voice,
                                       f"wait:{outcome}", started, self._clock())
 
-    def _post_chat(self, utterance, decision, turn_id):
-        """チャットに書き込む（確認は post_chat の側）。送れたときだけ「発言した」に数える"""
+    def _post_chat(self, utterance, decision, turn_id, count=True):
+        """チャットに書き込む（確認は post_chat の側）。送れたときだけ「発言した」に数える（count=False なら数えない）"""
         token = CancelToken()
         with self._lock:
             if self._emergency:
@@ -755,7 +841,8 @@ class AgentRuntime:
         ended = self._clock()
         if outcome == POSTED:
             with self._lock:
-                self._utterance_times = [t for t in self._utterance_times if ended - t < 3600] + [ended]
+                if count:
+                    self._utterance_times = [t for t in self._utterance_times if ended - t < 3600] + [ended]
                 self._last_utterance_end = ended
             self.window.add_own(utterance.text, ended)
             self.log.write("📨 送信待ちに入れました（監視が送ります）。")
@@ -784,7 +871,8 @@ class AgentRuntime:
             self.memory.postpone()
             return
         speakers = [e.speaker for e in self.window.recent_events()
-                    if e.speaker and not e.is_self and self.memory.in_current_account(e)]
+                    if e.speaker and not e.is_self and self.memory.in_current_account(e)
+                    and not is_ignored(e, self.config)]
         request = self.memory.build_request(self.window, self.config.display_name)
         cancel = CancelToken()
         with self._lock:

@@ -123,6 +123,7 @@ class Harness(ctk.CTk):
     edit_common_agent_persona = A.App.edit_common_agent_persona
     on_agent_initiative_toggled = A.App.on_agent_initiative_toggled
     on_agent_lookup_toggled = A.App.on_agent_lookup_toggled
+    unmute_agent = A.App.unmute_agent
     save_agent_wait_text = A.App.save_agent_wait_text
     AGENT_OUTPUT_LABELS = A.App.AGENT_OUTPUT_LABELS
     AGENT_CHAT_SEND_LABELS = A.App.AGENT_CHAT_SEND_LABELS
@@ -673,6 +674,25 @@ h.move_unknown_agent_memories()
 check("選んだアカウントの記憶にする", "" not in dict(store.memory_accounts())
       and dict(store.memory_accounts()).get("テストちゃ👼") == 1, store.memory_accounts())
 store.delete_all_memories()
+
+print("■ 反応しない人・静かにを解く（2026-10-16）")
+h.agent_ignored_entry.insert(0, "荒らし、いたずら")
+h.save_agent_settings()
+check("反応しない人を保存する（動いているエージェントにもすぐ効く）", db.get_setting("agent.ignored_people") == "荒らし、いたずら"
+      and h.agent_runtime.config.ignored_name_list == ["荒らし", "いたずら"])
+h.agent_ignored_entry.insert("end", "あ" * 300)
+h.save_agent_settings()
+check("長すぎたら保存しない", dialogs[-1][0] == "warning" and db.get_setting("agent.ignored_people") == "荒らし、いたずら")
+h.agent_ignored_entry.delete(0, "end")
+h.agent_ignored_entry.insert(0, "荒らし、いたずら")
+check("静かにしていなければ「静かにを解く」は押せない", h.agent_unmute_btn.cget("state") == "disabled")
+h.agent_runtime.set_muted(5)
+h._refresh_agent_state()
+check("オーナーの合図で静かな間は、状態に出る・解くボタンが押せる",
+      "オーナーの合図で静か" in h.agent_state_label.cget("text") and h.agent_unmute_btn.cget("state") == "normal",
+      h.agent_state_label.cget("text"))
+h.unmute_agent()
+check("PCから解ける", h.agent_runtime.muted_until is None and h.agent_unmute_btn.cget("state") == "disabled")
 
 print("■ ルームの様子")
 h._on_gravity_room({"name": "伏せ字1", "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2, "announcement": "x"})

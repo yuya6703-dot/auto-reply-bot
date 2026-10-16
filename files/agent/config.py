@@ -21,6 +21,7 @@ CHAT_AUTO = "auto"            # 確かめずに送る（本人が選んだとき
 CHAT_SEND_MODES = (CHAT_APPROVE, CHAT_AUTO)
 NAME_SEPARATORS = re.compile(r"[、,，/／]")
 NAMES_MAX_CHARS = 60
+IGNORED_MAX_CHARS = 300
 WAIT_TEXT_MAX_CHARS = 40
 # GRAVITYのアカウントごとの設定（呼ばれ方・オーナーの名前）。{アカウント名: {"ai_name": ..., "owner_names": ...}}
 ACCOUNT_PROFILES_SETTING = SETTING_PREFIX + "account_profiles"
@@ -42,6 +43,7 @@ class AgentConfig:
     ai_name: str = ""                      # 呼ばれ方（「、」で区切って複数。含まれていたら R6 を越えて判断する。強い合図）
     self_names: str = ""                   # GRAVITYでのこのアカウントの表示名（「、」で区切って複数）。この名前の発言は自分の発言
     owner_names: str = ""                  # オーナー（このAIを動かしている本人）の表示名。親しく話してよい相手
+    ignored_people: str = ""               # 反応しない人の表示名（「、」で区切って複数）。荒らしなどに付き合わない（2026-10-16）
     settle_seconds: float = 2.5            # 最後の出来事からこれだけ静かになったら、まとめて判断する
     inbox_max: int = 100                   # 受付箱の上限
     min_gap_after_speaking: float = 8.0    # R6: 自分が喋り終わってから、これだけは自分から話さない
@@ -98,7 +100,7 @@ class AgentConfig:
     degraded_check_seconds: float = 60.0   # AI を呼ばない状態で、回復を確かめる間隔
 
     # 画面で変える項目
-    EDITABLE = ("ai_name", "self_names", "owner_names", "daily_call_limit", "daily_cost_limit_usd",
+    EDITABLE = ("ai_name", "self_names", "owner_names", "ignored_people", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
                 "lookup_enabled", "lookup_wait_text")
@@ -126,6 +128,10 @@ class AgentConfig:
         if self.active_account_named and self.active_account and self.active_account not in names:
             names.append(self.active_account)
         return names
+
+    @property
+    def ignored_name_list(self):
+        return split_names(self.ignored_people)
 
     @property
     def owner_name_list(self):
@@ -176,6 +182,7 @@ class AgentConfig:
             config.chat_send_mode = CHAT_APPROVE
         config.self_names = config.self_names.strip()[:NAMES_MAX_CHARS]
         config.owner_names = config.owner_names.strip()[:NAMES_MAX_CHARS]
+        config.ignored_people = config.ignored_people.strip()[:IGNORED_MAX_CHARS]
         config.lookup_wait_text = " ".join(config.lookup_wait_text.split())[:WAIT_TEXT_MAX_CHARS]
         config.account_profiles = load_account_profiles(get_setting)
         return config

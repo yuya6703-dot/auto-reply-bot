@@ -9,6 +9,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .events import name_matches
+
 PASS = "pass"          # AI に判断させる
 OBSERVE = "observe"    # 記録だけ（AI を呼ばない）
 HOLD = "hold"          # 今は判断しない。少し後で見直す
@@ -22,6 +24,8 @@ RULE_TEXTS = {
     "R8": "AIを呼ぶ回数・費用の上限",
     "R9": "中身が無い・無視する言葉",
     "R10": "判断の頻度の上限",
+    "R11": "反応しない人の発言だけ",
+    "R12": "オーナーに静かにと言われている",
 }
 
 # 記号・空白だけ（R9）。文字・数字が1つも無いもの
@@ -43,6 +47,7 @@ class GateSnapshot:
     calls_today: int = 0
     cost_today: float = 0.0
     cost_month: float = 0.0
+    muted: bool = False                     # オーナーの合図で静かにしている（R12）
 
 
 @dataclass(frozen=True)
@@ -84,6 +89,15 @@ def is_strong_signal(event, ai_names):
     return not event.is_self and not event.backlog and mentions_name(event.text, ai_names)
 
 
+def is_ignored_name(name, config):
+    """反応しない人か（オーナーが AIタブで決めた名前。切れて出ても見分ける）"""
+    return bool(name) and any(name_matches(name, wanted) for wanted in config.ignored_name_list)
+
+
+def is_ignored(event, config):
+    return not event.is_self and is_ignored_name(event.speaker, config)
+
+
 def is_meaningless(event, ignore_words):
     text = (event.text or "").strip()
     return not text or bool(_NO_WORD.match(text)) or text in ignore_words
@@ -100,6 +114,11 @@ class Gate:
             return GateResult(OBSERVE, "R2")
         if not fresh:
             return GateResult(OBSERVE, "R3")
+        if snap.muted:
+            return GateResult(OBSERVE, "R12")
+        fresh = [e for e in fresh if not is_ignored(e, c)]
+        if not fresh:
+            return GateResult(OBSERVE, "R11")
         strong = any(is_strong_signal(e, c.call_names) for e in fresh)
         if snap.listening:
             return GateResult(HOLD, "R5", None, strong)
