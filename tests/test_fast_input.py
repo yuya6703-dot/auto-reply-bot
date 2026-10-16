@@ -136,6 +136,59 @@ d = FakeRoomInput(field="消せない文字", direct_broken=True)
 w._clear_input(d)
 check("消すのに失敗しても止まらない（そのあとの入れ方が中身を置き換える）", d.calls == ["focused.clear_text"], d.calls)
 
+print("■ メンションはアイコンのダブルタップで（2026-10-16 本人「直接入力だとメンションされないため」）")
+with open(os.path.join(_HERE, "fixtures", "voiceroom_guest.xml"), encoding="utf-8") as f:
+    ROOM = f.read()
+
+
+class FakeMentionRoom:
+    """音声ルーム。アイコンをダブルタップ（2回のタップを1回の shell で）すると、入力欄に「@名前 」が入る"""
+
+    def __init__(self, inserts=True, opens_profile=False):
+        self.commands = []
+        self.inserts, self.opens_profile = inserts, opens_profile
+        self.field = ""
+
+    def shell(self, command):
+        self.commands.append(str(command))
+        if str(command).count("tap 49 646") == 2 and "&" in str(command):
+            if self.inserts:
+                self.field = "@伏せ字3 "
+        return type("R", (), {"output": ""})()
+
+    def dump_hierarchy(self, compressed=True):
+        if self.opens_profile and self.commands:
+            return ROOM.replace('resource-id="anonymous.sns.community.gravity:id/etText"', 'resource-id="x:id/none"')                 .replace("</hierarchy>", '<node resource-id="anonymous.sns.community.gravity:id/design_bottom_sheet" '
+                                         'display-id="2" bounds="[0,500][540,960]" /></hierarchy>')
+        return ROOM.replace('text="メッセージを送信"', f'text="{self.field}"') if self.field else ROOM
+
+
+notes = []
+w = worker()
+w.agent_note = notes.append
+d = FakeMentionRoom()
+prefix = w._mention_by_icon(d, "伏せ字3")
+check("その人のいちばん新しい発言の行のアイコンを、すばやく2回タップする（1回の shell で）",
+      d.commands and d.commands[0].count("input -d 2 tap 49 646") == 2 and "& sleep 0.08;" in d.commands[0], d.commands)
+check("入力欄に入ったメンション（「@名前 」）を返す", prefix == "@伏せ字3 ", repr(prefix))
+check("判断のログに", any("メンションを入れました" in n for n in notes), notes)
+d = FakeMentionRoom()
+check("その人の発言がチャット欄に見えなければ、タップしない（メンションなし）", w._mention_by_icon(d, "いない人") is None
+      and d.commands == [] and "見えないので" in notes[-1])
+d = FakeMentionRoom(inserts=False, opens_profile=True)
+check("ダブルタップでメンションが入らず、プロフィールなどが開いたら閉じる（メンションなしで送る）",
+      w._mention_by_icon(d, "伏せ字3") is None and any("input -d 2 keyevent 4" in c for c in d.commands), d.commands)
+d = FakeRoomInput(field="@伏せ字3 ")
+w = worker()
+check("メンションが入っていたら、入力欄を空にせず、メンションの後ろに文を入れて送る",
+      w._send_reply(d, "こんばんは！", prefix="@伏せ字3 ") is True and d.sent == ["@伏せ字3 こんばんは！"]
+      and "focused.clear_text" not in d.calls, (d.sent, d.calls))
+w.is_running = True
+w.is_alive = lambda: True
+ok, _ = w.enqueue_agent_text("こんばんは", mention="伏せ字3")
+check("AIの文には、メンションする相手を付けて積む", ok and w._manual_queue[-1].mention == "伏せ字3"
+      and w._manual_queue[-1] == "こんばんは")
+
 print()
 if FAILS:
     print(f"失敗 {len(FAILS)} 件: {FAILS}")

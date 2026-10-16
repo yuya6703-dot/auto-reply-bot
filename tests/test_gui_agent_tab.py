@@ -36,6 +36,7 @@ class FakeWorker:
     def __init__(self):
         self.bridge = None
         self.agent_texts = []
+        self.agent_mentions = []
         self.agent_account_user = None
         self.sent = []
 
@@ -45,8 +46,9 @@ class FakeWorker:
     def set_agent_bridge(self, bridge):
         self.bridge = bridge
 
-    def enqueue_agent_text(self, text):
+    def enqueue_agent_text(self, text, mention=None):
         self.agent_texts.append(text)
+        self.agent_mentions.append(mention)
         return True, ""
 
     def discard_agent_texts(self):
@@ -460,8 +462,15 @@ h.on_agent_chat_send_selected(h.AGENT_CHAT_SEND_LABELS["auto"])
 th, box = post_in_thread("確認せずに送る文")
 th.join(2.0)
 check("確認せずに送るなら、下書きを見せずに送信待ちへ", box == ["posted"] and h.worker.agent_texts[-1] == "確認せずに送る文")
+box = []
+th = threading.Thread(target=lambda: box.append(h._agent_post_chat(
+    Utterance("こんばんは", "calm", "t", mention="たろう"), CancelToken())))
+th.start()
+th.join(2.0)
+check("メンションする相手も送信待ちへ渡す（送るときにアイコンをダブルタップする）", box == ["posted"]
+      and h.worker.agent_texts[-1] == "こんばんは" and h.worker.agent_mentions[-1] == "たろう", (box, h.worker.agent_mentions))
 h.emergency_stop_agent()
-check("緊急停止で、送信待ちの AI の文を捨てる", h.worker.agent_texts == [] and any("AIの文2件を捨てました" in m for m in h.logs),
+check("緊急停止で、送信待ちの AI の文を捨てる", h.worker.agent_texts == [] and any("AIの文3件を捨てました" in m for m in h.logs),
       h.logs[-2:])
 h.resume_agent()
 h.worker.is_running = False

@@ -60,40 +60,46 @@ time.sleep(1.5)
 check("話している相手は時間が過ぎたら終わり（ふだんの上限に戻る）", len(a.chat.posted) == 2, a.logs[-3:])
 a.close()
 
-print("■ 特定の人にチャットで返すときはメンション（2026-10-16 本人「特定の誰かにチャットで返信する場合メンションするように」）")
+print("■ 特定の人にチャットで返すときはメンション（アイコンのダブルタップだけ。2026-10-16 本人「直接入力だとメンションされないため」）")
 check("既定はON", AgentConfig().chat_mention is True)
 a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto", conversation_min_gap_seconds=0.0,
           conversation_max_per_minute=10, max_decisions_per_minute=20)
+
+
+def last():
+    u = a.chat.utterances[-1]
+    return u.text, u.mention
+
+
 a.mock.script_decide = [{"action": "engage", "reason": "x", "target": "ながいなまえの", "text": "こんばんは！", "emotion": "joy"}]
 a.say("アイ、こんばんは", speaker="ながいなまえのひと")
-check("文の頭に @名前 を付ける（切れて出た名前は、切れていない名前に）", wait_until(lambda: a.chat.posted, 5.0)
-      and a.chat.posted[-1] == "@ながいなまえのひと こんばんは！", a.chat.posted)
-a.mock.script_decide = [{"action": "engage", "reason": "x", "target": "たろう", "text": "@たろう もう付いてる", "emotion": "joy"}]
+check("文に @ は付けず、メンションする相手（アカウント名。切れて出た名前は切れていない方）を渡す",
+      wait_until(lambda: a.chat.posted, 5.0) and last() == ("こんばんは！", "ながいなまえのひと"), a.chat.utterances[-1:])
+a.mock.script_decide = [{"action": "engage", "reason": "x", "target": "たろう", "text": "@たろう 書いちゃった", "emotion": "joy"}]
 a.say("アイ、ねえ", speaker="たろう")
-check("もう @名前 があれば付けない", wait_until(lambda: len(a.chat.posted) == 2, 5.0) and a.chat.posted[-1] == "@たろう もう付いてる",
-      a.chat.posted)
+check("AI が文に @ を書いても外す（文字の @ ではメンションにならない）", wait_until(lambda: len(a.chat.posted) == 2, 5.0)
+      and last() == ("書いちゃった", "たろう"), a.chat.utterances[-1:])
 a.mock.script_decide = [{"action": "engage", "reason": "x", "target": None, "text": "みんなおつかれ！", "emotion": "joy"}]
 a.say("アイ、みんなに一言", speaker="たろう")
-check("場全体に向けた文には付けない", wait_until(lambda: len(a.chat.posted) == 3, 5.0) and a.chat.posted[-1] == "みんなおつかれ！")
+check("場全体に向けた文はメンションしない", wait_until(lambda: len(a.chat.posted) == 3, 5.0) and last() == ("みんなおつかれ！", None))
 a.mock.script_decide = [{"action": "engage", "reason": "x", "target": "はなこ"}]
 a.mock.script_generate = [{"text": "わかった", "emotion": "calm"}]
 a.say("アイ、聞いて", speaker="はなこ")
-check("文を作るときに「@ はツールが付ける」と伝える", wait_until(lambda: len(a.chat.posted) == 4, 5.0)
-      and "ツールが文の頭に @相手の名前 を付ける" in a.generate_calls()[-1].messages[0].content
-      and a.chat.posted[-1] == "@はなこ わかった", a.chat.posted)
+check("文を作るときに「メンションはツールがアイコンから付ける。@ は書かない」と伝える",
+      wait_until(lambda: len(a.chat.posted) == 4, 5.0)
+      and "ツールが相手のアイコンからメンションを付ける" in a.generate_calls()[-1].messages[0].content
+      and last() == ("わかった", "はなこ"), a.chat.utterances[-1:])
 a.mock.script_decide = [{"action": "engage", "reason": "x", "target": "はなこさん", "text": "呼び方で返した", "emotion": "calm"}]
 a.say("アイ、ねえねえ", speaker="はなこ")
-check("AI が「はなこさん」と呼び方で返しても、アカウント名（@はなこ）にする", wait_until(lambda: len(a.chat.posted) == 5, 5.0)
-      and a.chat.posted[-1] == "@はなこ 呼び方で返した", a.chat.posted)
+check("AI が「はなこさん」と呼び方で返しても、アカウント名（はなこ）にする", wait_until(lambda: len(a.chat.posted) == 5, 5.0)
+      and last() == ("呼び方で返した", "はなこ"))
 a.mock.script_decide = [{"action": "engage", "reason": "x", "target": "知らない人", "text": "だれ？", "emotion": "calm"}]
 a.say("アイ、あの人だれ？", speaker="はなこ")
-check("チャット欄に出ていない名前には付けない（作った名前でメンションしない）", wait_until(lambda: len(a.chat.posted) == 6, 5.0)
-      and a.chat.posted[-1] == "だれ？", a.chat.posted)
+check("チャット欄に出ていない名前にはメンションしない", wait_until(lambda: len(a.chat.posted) == 6, 5.0) and last() == ("だれ？", None))
 a.runtime.config.chat_mention = False
 a.mock.script_decide = [{"action": "engage", "reason": "x", "target": "はなこ", "text": "メンションなし", "emotion": "calm"}]
 a.say("アイ、もう一回", speaker="はなこ")
-check("OFFなら付けない", wait_until(lambda: len(a.chat.posted) == 7, 5.0) and a.chat.posted[-1] == "メンションなし",
-      (a.chat.posted[-2:], a.logs[-4:]))
+check("OFFならメンションしない", wait_until(lambda: len(a.chat.posted) == 7, 5.0) and last() == ("メンションなし", None))
 a.close()
 
 finish()

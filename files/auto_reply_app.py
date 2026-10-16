@@ -1080,6 +1080,26 @@ def find_by_id(xml_dump, resource_name, display=None, text=None):
     return boxes
 
 
+def find_chat_portrait(xml_dump, display, name):
+    """
+    チャット欄で、その人（名前が切れて出ても）のいちばん新しい発言の行のアイコン（押せる ivPortrait）の真ん中 (x, y)。
+    見つからなければ None。ダブルタップでメンションを入れるのに使う（GRAVITY画面部品.md の userMessageView）
+    """
+    root = ET.fromstring(xml_dump)
+    found = None
+    for row in _display_nodes(root, display):
+        if _resource_name(row) != "userMessageView":
+            continue
+        shown = next((n.get("text") or "" for n in row.iter("node") if _resource_name(n) == "shimmerTextView"), "")
+        if not shown or not friend_name_matches(shown.strip(), name):
+            continue
+        icons = [n for n in row.iter("node") if _resource_name(n) == "ivPortrait" and n.get("clickable") == "true"]
+        box = _node_box(icons[0]) if icons else None
+        if box:
+            found = ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2)     # 下の行ほど新しい。最後に見つかったものを使う
+    return found
+
+
 def read_room_info(xml_dump, display=None):
     """
     音声ルームの画面から、ルームの様子を読む（押さない。読むだけ）。ルームの画面でなければ None。
@@ -4649,8 +4669,10 @@ class MuMuController:
 class AgentChatText(str):
     """
     AI がチャットに書き込む文（段階5b）。手入力送信の待ち行列に、手入力の文と一緒に並ぶ。
-    ふつうの文字列と同じに送られるが、印が付いているので緊急停止で AI の分だけ捨てられる（本人の手入力は消さない。T50）
+    ふつうの文字列と同じに送られるが、印が付いているので緊急停止で AI の分だけ捨てられる（本人の手入力は消さない。T50）。
+    mention はメンションする相手のアカウント名（送るときに、その人のアイコンをダブルタップする）
     """
+    mention = None
 
 
 class AutoReplyWorker:
@@ -4782,6 +4804,43 @@ class AutoReplyWorker:
 
     AGENT_ACCOUNT_RECHECK_SECONDS = 60
 
+    def _mention_by_icon(self, d, name):
+        """
+        チャット欄の、その人のいちばん新しい発言の行のアイコンをダブルタップして、メンションを入れる
+        （2026-10-16 本人「メンションは文字を直接入力するのではなく、話したい相手のアイコンをダブルタップするのみにする。
+        直接入力だとメンションされないため」）。入力欄に「@」が入ったら、入った文字（「@名前 」）を返す。入らなければ None
+        （⚠️ 開いた画面があれば閉じる。メンションなしで送る）
+        """
+        try:
+            xml = d.dump_hierarchy(compressed=True)
+        except Exception:
+            return None
+        point = find_chat_portrait(xml, self._target_display, name)
+        if point is None:
+            self._agent_note(f"@ 「{name}」の発言がチャット欄に見えないので、メンションなしで送ります。")
+            return None
+        tap = self._input_command("tap", *point)
+        try:
+            # ⚠️ 1回ずつ送ると間が空きすぎてダブルタップにならない。1回目を裏で走らせ、少しだけ空けて2回目
+            d.shell(f"{tap} & sleep {self.DOUBLE_TAP_GAP}; {tap}")
+        except Exception:
+            return None
+        time.sleep(1.0)
+        text = self._current_input_text(d).strip()
+        if text.startswith("@"):
+            self._agent_note(f"@ アイコンのダブルタップで「{name}」にメンションを入れました。")
+            return text + " "
+        try:                                # プロフィールなどが開いたかもしれない。入力欄のないシートなら閉じる
+            xml = d.dump_hierarchy(compressed=True)
+            if find_by_id(xml, ROOM_SHEET_ID, self._target_display) and not find_by_id(xml, ROOM_INPUT_ID, self._target_display):
+                self._keyevent(d, ANDROID_KEYCODE_BACK)
+        except Exception:
+            pass
+        self._agent_note(f"⚠️ アイコンをダブルタップしてもメンションが入らなかったので、メンションなしで送ります（「{name}」）。")
+        return None
+
+    DOUBLE_TAP_GAP = 0.08
+
     def _update_agent_account(self, d):
         """
         今の画面がどのアカウント（本体・複製）かを見分ける。画面が変わったときと、1分ごとだけ dumpsys を読む（毎周回は読まない）
@@ -4850,9 +4909,10 @@ class AutoReplyWorker:
             return 1, f"送信待ちに追加しました（順番待ち{waiting}件）。"
         return 1, "送信待ちに追加しました。"
 
-    def enqueue_agent_text(self, text):
+    def enqueue_agent_text(self, text, mention=None):
         """
         AI の文を1件、送信待ちに積む（段階5b）。戻り値: (受け付けたか, 理由)。
+        mention はメンションする相手のアカウント名（送るときに、その人のアイコンをダブルタップする）。
         ⚠️ 送るのは手入力と同じく監視スレッドだけ。送った文は自分の発言として覚える（自分に自動返信しない）
         """
         text = (text or "").strip()
@@ -4863,7 +4923,9 @@ class AutoReplyWorker:
         with self._manual_lock:
             if len(self._manual_queue) >= self.MAX_MANUAL_QUEUE:
                 return False, "送信待ちが一杯です。"
-            self._manual_queue.append(AgentChatText(text))
+            item = AgentChatText(text)
+            item.mention = (mention or "").strip() or None
+            self._manual_queue.append(item)
         return True, ""
 
     def discard_agent_texts(self):
@@ -6089,11 +6151,19 @@ class AutoReplyWorker:
         except Exception:
             pass
 
-    def _send_reply(self, d, reply_message):
-        """入力欄に返信ワードを入れて送信する（入力欄は呼び出し側でタップ済み）"""
-        self._clear_input(d)
+    def _send_reply(self, d, reply_message, prefix=None):
+        """
+        入力欄に返信ワードを入れて送信する（入力欄は呼び出し側でタップ済み）。
+        prefix はアイコンのダブルタップで入ったメンション（「@名前 」）。⚠️ 入力欄を空にしない（メンションが消える）。
+        貼り付けが使えれば後ろに貼り付け、使えなければ「メンション＋文」で入れ直す（MuMu は貼り付けが使えない）
+        """
+        if prefix:
+            fill = reply_message if self._clipboard_paste_available else prefix.rstrip() + " " + reply_message
+        else:
+            self._clear_input(d)
+            fill = reply_message
 
-        if not self._fill_reply_text(d, reply_message):
+        if not self._fill_reply_text(d, fill):
             return False
 
         time.sleep(0.4)
@@ -6225,7 +6295,7 @@ class AutoReplyWorker:
         return self._config_cache
 
     def _execute_reply(self, d, nodes, half_y, y_min_internal, y_max_internal, reply_message,
-                       failure_count, FAILURE_WARN_THRESHOLD, all_nodes=None):
+                       failure_count, FAILURE_WARN_THRESHOLD, all_nodes=None, prefix=None):
         """
         入力欄タップ〜送信〜スクロールまでを実行し、(更新後のfailure_count, 送信できたか) を返す。
 
@@ -6235,7 +6305,7 @@ class AutoReplyWorker:
         sent_ok = False
         if self._find_and_tap_input(d, nodes, half_y, all_nodes=all_nodes):
             time.sleep(1.0)
-            sent_ok = self._send_reply(d, reply_message)
+            sent_ok = self._send_reply(d, reply_message, prefix=prefix)
 
             if sent_ok:
                 failure_count = 0
@@ -6281,9 +6351,17 @@ class AutoReplyWorker:
 
             self.log(f"🤖 AIの文を送信します:「{text}」" if isinstance(text, AgentChatText)
                      else f"✍️ 手入力送信します:「{text}」")
+            prefix = None
+            if isinstance(text, AgentChatText) and text.mention:
+                prefix = self._mention_by_icon(d, text.mention)
+                try:                       # ダブルタップで画面が変わった。入力欄・送るボタンの位置を読み直す
+                    xml_dump = d.dump_hierarchy(compressed=True)
+                    _, _, nodes, all_nodes = self._extract_chat_texts(xml_dump, y_min_internal, y_max_internal)
+                except Exception:
+                    pass
             failure_count, sent_ok = self._execute_reply(
                 d, nodes, half_y, y_min_internal, y_max_internal, text,
-                failure_count, FAILURE_WARN_THRESHOLD, all_nodes=all_nodes
+                failure_count, FAILURE_WARN_THRESHOLD, all_nodes=all_nodes, prefix=prefix
             )
             sent_any = True
             if not sent_ok:
@@ -11165,7 +11243,7 @@ class App(ctk.CTk):
             if not holder["ok"]:
                 return AGENT_CHAT_DISCARDED
             text = holder["text"]
-        ok, _reason = self.worker.enqueue_agent_text(text)
+        ok, _reason = self.worker.enqueue_agent_text(text, mention=getattr(utterance, "mention", None))
         return AGENT_POSTED if ok else AGENT_CHAT_FAILED
 
     def _show_agent_chat_draft(self, text, holder, done, cancel, seconds):

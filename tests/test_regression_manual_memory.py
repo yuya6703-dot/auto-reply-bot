@@ -42,7 +42,7 @@ def make_running_worker():
     w.is_running = True
     w.thread = type("T", (), {"is_alive": staticmethod(lambda: True)})()
     # 送信そのものは検証対象ではないので、成功したことにして先へ進める
-    w._execute_reply = lambda d, nodes, half_y, y1, y2, text, fc, thr, all_nodes=None: (fc, True)
+    w._execute_reply = lambda d, nodes, half_y, y1, y2, text, fc, thr, all_nodes=None, prefix=None: (fc, True)
     w._update_target_display = lambda xml: None
     w._extract_chat_texts = lambda xml, a, b: ([], [], "nodes", "all")
     return w

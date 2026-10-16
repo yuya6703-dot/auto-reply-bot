@@ -12,6 +12,7 @@
 import difflib
 import os
 import random
+import re
 import threading
 import time
 import traceback
@@ -865,21 +866,24 @@ class AgentRuntime:
 
     HONORIFICS = ("さん", "ちゃん", "くん", "君", "様", "さま", "氏")
 
+    _LEADING_MENTION = re.compile(r"^\s*@\S+\s*")
+
     def _with_mention(self, utterance, target):
         """
-        特定の人に返すチャットの文の頭に「@アカウント名 」を付ける（メンションがONで、相手がいるときだけ）。
-        ⚠️ AI が返す相手の名前は「たろうさん」のような呼び方のこともある。チャット欄に出ているアカウント名に当てはめ、
-           当てはまらなければ付けない（2026-10-16 本人「@名前という感じより@アカウント名みたいな感じで」）。もう付いていれば付けない
+        特定の人に返すチャットで、メンションする相手（アカウント名）を付ける。送るときに、監視がその人のアイコンを
+        ダブルタップしてメンションを入れる（2026-10-16 本人「メンションは文字を直接入力するのではなく、話したい相手のアイコンを
+        ダブルタップするのみにする。直接入力だとメンションされないため」）。⚠️ 文に「@名前」を文字で書かない（書いてあれば外す）。
+        AI が返す相手の名前は「たろうさん」のような呼び方のこともあるので、チャット欄に出ているアカウント名に当てはめる（無ければ付けない）
         """
+        text = self._LEADING_MENTION.sub("", utterance.text) or utterance.text     # 文字の @ ではメンションにならない
+        if text != utterance.text:
+            utterance = replace(utterance, text=text)
         if not self.config.chat_mention or not target or is_ignored_name(target, self.config):
             return utterance
         name = self._account_name_of(target)
         if not name or any(name_matches(name, mine) for mine in self.config.self_name_list):
             return utterance
-        text = utterance.text
-        if f"@{name}" in text or f"@{name[:max(2, len(name) - 2)]}" in text:
-            return utterance
-        return replace(utterance, text=f"@{name} {text}")
+        return replace(utterance, mention=name)
 
     def _account_name_of(self, target):
         """

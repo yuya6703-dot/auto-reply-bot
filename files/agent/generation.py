@@ -51,6 +51,7 @@ class Utterance:
     volume: Optional[float] = None    # 声の大きさ（1.0 がふつう）
     tempo: Optional[float] = None     # 緩急（1.0 がふつう。AivisSpeech の声だけ効く）
     skip_approval: bool = False     # 下書きを見せずに送る（調べる前の「待って」の一言だけ。本人の決定 2026-10-16）
+    mention: Optional[str] = None   # チャットでメンションする相手のアカウント名（送るときに、その人のアイコンをダブルタップする）
 
 
 MAX_CHAT_LINES = 3      # チャットは改行2つ（3行）まで

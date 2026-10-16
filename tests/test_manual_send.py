@@ -128,7 +128,7 @@ w.thread = type("T", (), {"is_alive": staticmethod(lambda: True)})()
 sent = []
 redumps = []
 
-def fake_execute(d, nodes, half_y, y1, y2, text, fc, thr, all_nodes=None):
+def fake_execute(d, nodes, half_y, y1, y2, text, fc, thr, all_nodes=None, prefix=None):
     sent.append((text, nodes))
     return fc, True
 
