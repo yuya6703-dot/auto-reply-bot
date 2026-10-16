@@ -129,6 +129,7 @@ class Harness(ctk.CTk):
     on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
     _agent_voice_style_map = A.App._agent_voice_style_map
     _agent_voice_styles = A.App._agent_voice_styles
+    _agent_voice_profile = A.App._agent_voice_profile
 
     def get_all_speakers(self):
         return {"テストの声": {"ノーマル": "voicevox:3", "あまあま": "voicevox:1", "ツンツン": "voicevox:7"},
@@ -825,6 +826,7 @@ h.on_agent_output_selected(h.AGENT_OUTPUT_LABELS["voice_room"])
 check("「はい」なら、ルームへ（動いているエージェントにもすぐ効く）", db.get_setting("agent.output_mode") == "voice_room"
       and h.agent_runtime.config.output_mode == "voice_room")
 check("AI に、今の声で使える声の様子を渡す（同じキャラのスタイル）", h._agent_voice_styles() == ["ノーマル", "あまあま", "ツンツン"])
+check("AI に、自分の声の名前を渡す（キャラ名・スタイル）", h._agent_voice_profile() == "テストの声（ノーマル）")
 h.played.clear()
 from agent.generation import Utterance as _U
 from agent.cancel import CancelToken as _C
