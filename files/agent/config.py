@@ -84,6 +84,11 @@ class AgentConfig:
     lookup_wait_text: str = "ちょっと調べるね、待ってて！"   # 調べる前に出す一言（空なら出さない）。⚠️ 下書きを見せる設定でも確かめずに送る（本人の決定）
     lookup_max_per_hour: int = 10
     lookup_timeout_seconds: float = 8.0
+    # 声を聞く（PC の音声入力。iPad など。既定OFF。2026-10-16 本人「iPad mini 6から音を拾う仕組み」→「1から6まで」の6）
+    hearing_enabled: bool = False
+    hearing_device: str = ""                      # 音声入力の名前（MME）
+    hearing_threshold: float = 0.02               # これより大きい音を「話している」とみる（0〜1）
+    hearing_max_minutes_per_hour: float = 10.0    # 1時間に文字にする量の上限（BGM で上限まで使い切らないように）
     # GRAVITYのアカウントごとの設定（2026-10-16 本人「全部やろうか」）。空の項目は共通の設定を使う
     account_profiles: dict = field(default_factory=dict)
     active_account: str = ""                      # 今チャットしている GRAVITY のアカウント（エージェントが入れる）
@@ -104,7 +109,8 @@ class AgentConfig:
     EDITABLE = ("ai_name", "self_names", "owner_names", "ignored_people", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
-                "lookup_enabled", "lookup_wait_text", "digest_enabled")
+                "lookup_enabled", "lookup_wait_text", "digest_enabled", "hearing_enabled", "hearing_device",
+                "hearing_threshold")
 
     def profile_value(self, key):
         """今のアカウントの設定（無い・空なら共通の設定）"""

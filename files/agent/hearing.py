@@ -1,0 +1,212 @@
+# -*- coding: utf-8 -*-
+"""
+声を聞く（2026-10-16 本人「Windowsに接続したiPad mini 6から音を拾う仕組みがあったら（AIの名前）もはっきりと音を聞き取れる」
+→「1から6まで」の6）。
+
+PC の音声入力（iPad をつないだライン入力・USB の音声入力・仮想ケーブル など）から音を取り、話し声のかたまりを見つけて渡す。
+文字にするのはエージェント（runtime.hear。AI の提供元に音を送る。Gemini は音声を入力にできる）。
+
+- 区切り方: 30ミリ秒ごとの音の大きさ（RMS）が しきい値 を超えたら話し始め、0.8秒 下回り続けたら終わり。
+  0.5秒より短いもの（咳・物音）は捨て、15秒で切る（長く続く音楽で1回の量が増えすぎないように）
+- 音は PC に保存しない（メモリの中だけ。文字にしたら捨てる）
+- ⚠️ 誰が話したかは分からない（声の出来事の speaker は None）
+- ⚠️ ルームで BGM が流れていると音楽も拾う → 文字にするときに「話し声だけ」と頼み、1時間に文字にする量に上限を付ける（runtime）
+- ⚠️ ここは tkinter・auto_reply_app を import しない（設計書/04 の D3）。sounddevice は使うときだけ import する
+"""
+import io
+import math
+import queue
+import threading
+import time
+import wave
+from array import array
+
+FRAME_SECONDS = 0.03
+START_FRAMES = 3                 # しきい値を超えるフレームがこれだけ続いたら話し始め（ぷつっという物音で始めない）
+END_SECONDS = 0.8
+MIN_SECONDS = 0.5
+MAX_SECONDS = 15.0
+PRE_ROLL_SECONDS = 0.3           # 話し始めの少し前から入れる（頭が切れないように）
+
+
+def frame_level(pcm):
+    """int16 のモノラルの PCM（bytes）の大きさ 0〜1（RMS）"""
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - len(pcm) % 2])
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(s * s for s in samples) / len(samples)) / 32768.0
+
+
+def to_wav(pcm, rate):
+    """int16 モノラルの PCM を WAV にする（AI の提供元へ送る形）"""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(rate))
+        w.writeframes(pcm)
+    return buffer.getvalue()
+
+
+class VoiceSegmenter:
+    """音のフレームを順に受け取り、話し声のかたまりを返す（機材に触らない。テストしやすいように分けた）"""
+
+    def __init__(self, rate, threshold=0.02):
+        self.rate = int(rate)
+        self.threshold = threshold
+        self.frame_bytes = int(self.rate * FRAME_SECONDS) * 2
+        self._pre = []               # 話し始める前の少しの音
+        self._voice = []             # 今のかたまり
+        self._loud_run = 0
+        self._quiet_run = 0
+        self._active_frames = 0      # 話し始めてからのフレーム数（話し始めの前の音は数えない）
+        self.active = False
+        self.level = 0.0
+
+    def feed(self, pcm):
+        """フレーム（だいたい30ミリ秒）を足す。かたまりが終わったら [(pcm, 秒)] を返す"""
+        level = frame_level(pcm)
+        self.level = level
+        loud = level >= self.threshold
+        done = []
+        if not self.active:
+            self._pre.append(pcm)
+            keep = max(1, int(PRE_ROLL_SECONDS / FRAME_SECONDS))
+            if len(self._pre) > keep + START_FRAMES:
+                self._pre.pop(0)
+            self._loud_run = self._loud_run + 1 if loud else 0
+            if self._loud_run >= START_FRAMES:
+                self.active = True
+                self._voice = list(self._pre)
+                self._pre = []
+                self._quiet_run = 0
+                self._active_frames = START_FRAMES
+            return done
+        self._voice.append(pcm)
+        self._active_frames += 1
+        self._quiet_run = 0 if loud else self._quiet_run + 1
+        seconds = len(self._voice) * FRAME_SECONDS
+        if self._quiet_run * FRAME_SECONDS >= END_SECONDS or seconds >= MAX_SECONDS:
+            voice, self._voice = self._voice, []
+            self.active = False
+            self._loud_run = 0
+            spoken = (self._active_frames - self._quiet_run) * FRAME_SECONDS     # 話し始めてから、終わりの静けさまで
+            if spoken >= MIN_SECONDS:
+                done.append((b"".join(voice), round(seconds, 2)))
+        return done
+
+
+def list_input_devices():
+    """
+    音声入力の名前の一覧（MME のものだけ。⚠️ 出す側で DirectSound は音が消えることがあった。聞く側も MME にそろえる）。
+    sounddevice が無い・機材が読めなければ空
+    """
+    try:
+        import sounddevice as sd
+        devices, apis = sd.query_devices(), sd.query_hostapis()
+    except Exception:
+        return []
+    names = []
+    for d in devices:
+        if d.get("max_input_channels", 0) > 0 and apis[d["hostapi"]]["name"] == "MME" and d["name"] not in names:
+            names.append(d["name"])
+    return names
+
+
+class VoiceListener:
+    """
+    音声入力を開いて聞き続ける（自分のスレッド）。かたまりができたら on_segment(wav, 秒) を呼ぶ（そのスレッドから。
+    呼ばれた側が文字にするあいだ、次の音はたまっていく）。level は画面の音量の表示用
+    """
+
+    def __init__(self, device_name, threshold, on_segment, on_error=lambda message: None, stream_factory=None):
+        self.device_name = device_name
+        self.threshold = threshold
+        self._on_segment = on_segment
+        self._on_error = on_error
+        self._stream_factory = stream_factory      # テストでは にせもの
+        self._frames = queue.Queue(maxsize=2000)
+        self._stop = threading.Event()
+        self._thread = None
+        self._stream = None
+        self.segmenter = None
+        self.rate = 0
+
+    @property
+    def level(self):
+        return self.segmenter.level if self.segmenter is not None else 0.0
+
+    @property
+    def running(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def set_threshold(self, value):
+        self.threshold = value
+        if self.segmenter is not None:
+            self.segmenter.threshold = value
+
+    def start(self):
+        """(始めたか, わけ)"""
+        try:
+            self._stream, self.rate = self._open()
+        except Exception as e:
+            return False, f"音声入力を開けませんでした（{type(e).__name__}: {str(e)[:80]}）"
+        self.segmenter = VoiceSegmenter(self.rate, self.threshold)
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="voice-listener", daemon=True)
+        self._thread.start()
+        return True, ""
+
+    def stop(self):
+        self._stop.set()
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+        if self._thread is not None:
+            self._thread.join(2.0)
+        self._thread = None
+
+    def _open(self):
+        if self._stream_factory is not None:
+            return self._stream_factory(self._push)
+        import sounddevice as sd
+        index = None
+        for i, d in enumerate(sd.query_devices()):
+            if d["name"] == self.device_name and d.get("max_input_channels", 0) > 0 \
+                    and sd.query_hostapis(d["hostapi"])["name"] == "MME":
+                index = i
+                break
+        if index is None:
+            raise ValueError(f"「{self.device_name}」が見つかりません")
+        rate = int(sd.query_devices(index)["default_samplerate"]) or 44100
+        stream = sd.RawInputStream(device=index, samplerate=rate, channels=1, dtype="int16",
+                                   blocksize=int(rate * FRAME_SECONDS),
+                                   callback=lambda data, frames, t, status: self._push(bytes(data)))
+        stream.start()
+        return stream, rate
+
+    def _push(self, pcm):
+        try:
+            self._frames.put_nowait(pcm)
+        except queue.Full:
+            pass                      # 文字にするのが追いつかないときは、古い音を捨てる（遅れて聞くより取りこぼす方がまし）
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                pcm = self._frames.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                for voice, seconds in self.segmenter.feed(pcm):
+                    if self._stop.is_set():
+                        break
+                    self._on_segment(to_wav(voice, self.rate), seconds)
+            except Exception as e:
+                self._on_error(f"{type(e).__name__}: {e}")
+                time.sleep(0.5)

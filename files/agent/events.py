@@ -111,5 +111,5 @@ def describe_event(event, now=None):
     if event.kind == KIND_SYSTEM:
         return f"{ago}（このツールからの知らせ）{event.text}"
     if event.kind == KIND_VOICE_UTTERANCE:
-        return f"{ago}声 {who}{mark}: {event.text}"
+        return f"{ago}声（{event.speaker or 'だれか'}）{mark}: {event.text}"
     return f"{ago}{who}{mark}: {event.text}"

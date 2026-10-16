@@ -26,6 +26,7 @@ def check(name, cond, detail=""):
 TMP = tempfile.mkdtemp()
 A.AGENT_DB_FILE = os.path.join(TMP, "agent_data.db")
 A.AGENT_JOURNAL_DIR = os.path.join(TMP, "AIの記憶")
+A.list_voice_input_devices = lambda: ["テストの入力（ライン）", "テストのマイク"]     # 機材に触らない
 
 
 class FakeWorker:
@@ -125,6 +126,18 @@ class Harness(ctk.CTk):
     on_agent_initiative_toggled = A.App.on_agent_initiative_toggled
     on_agent_lookup_toggled = A.App.on_agent_lookup_toggled
     unmute_agent = A.App.unmute_agent
+    NO_INPUT_DEVICE = A.App.NO_INPUT_DEVICE
+    HEARING_THRESHOLD_MAX = A.App.HEARING_THRESHOLD_MAX
+    build_agent_hearing_section = A.App.build_agent_hearing_section
+    refresh_agent_hearing_devices = A.App.refresh_agent_hearing_devices
+    _selected_hearing_device = A.App._selected_hearing_device
+    on_agent_hearing_toggled = A.App.on_agent_hearing_toggled
+    on_agent_hearing_device_selected = A.App.on_agent_hearing_device_selected
+    on_agent_hearing_threshold_changed = A.App.on_agent_hearing_threshold_changed
+    _start_voice_listener = A.App._start_voice_listener
+    _stop_voice_listener = A.App._stop_voice_listener
+    _on_voice_segment = A.App._on_voice_segment
+    _poll_voice_level = A.App._poll_voice_level
     save_agent_wait_text = A.App.save_agent_wait_text
     AGENT_OUTPUT_LABELS = A.App.AGENT_OUTPUT_LABELS
     AGENT_CHAT_SEND_LABELS = A.App.AGENT_CHAT_SEND_LABELS
@@ -715,6 +728,62 @@ check("オーナーの合図で静かな間は、状態に出る・解くボタ�
       h.agent_state_label.cget("text"))
 h.unmute_agent()
 check("PCから解ける", h.agent_runtime.muted_until is None and h.agent_unmute_btn.cget("state") == "disabled")
+
+print("■ 声を聞く（既定OFF。2026-10-16）")
+
+
+class FakeListener:
+    made = []
+
+    def __init__(self, device, threshold, on_segment, on_error=None):
+        self.device, self.threshold, self.on_segment = device, threshold, on_segment
+        self.level, self.started, self.stopped = 0.05, False, False
+        FakeListener.made.append(self)
+
+    def start(self):
+        self.started = True
+        return True, ""
+
+    def stop(self):
+        self.stopped = True
+
+    def set_threshold(self, value):
+        self.threshold = value
+
+
+h._voice_listener_factory = FakeListener
+check("既定はOFF・音声入力を選べる", h.agent_hearing_var.get() is False
+      and h.agent_hearing_device_menu.cget("values") == ["テストの入力（ライン）", "テストのマイク"]
+      and h.agent_hearing_device_var.get() == "テストの入力（ライン）")
+answers.append(False)
+h.agent_hearing_var.set(True)
+h.on_agent_hearing_toggled()
+check("ONにするときは、声をAIの提供元へ送る・保存しない・上限を書いて確かめる。「いいえ」ならOFF",
+      dialogs[-1][0] == "ask" and "AIの提供元へ送ります" in dialogs[-1][2] and "保存しません" in dialogs[-1][2]
+      and "10分" in dialogs[-1][2] and h.agent_hearing_var.get() is False and not FakeListener.made)
+answers.append(True)
+h.agent_hearing_var.set(True)
+h.on_agent_hearing_toggled()
+listener = FakeListener.made[-1] if FakeListener.made else None
+check("「はい」ならON。AIが動いていれば、選んだ入力で聞き始める", db.get_setting("agent.hearing_enabled") == "1"
+      and listener is not None and listener.started and listener.device == "テストの入力（ライン）"
+      and "聞いています" in h.agent_hearing_status.cget("text"))
+h.on_agent_hearing_threshold_changed(0.08)
+check("しきい値を変えると、聞いている途中でも効く・保存する", listener.threshold == 0.08
+      and db.get_setting("agent.hearing_threshold") == "0.08")
+h._poll_voice_level()
+check("今の音量を出す", abs(h.agent_hearing_level.get() - 0.25) < 0.01, h.agent_hearing_level.get())
+h.agent_hearing_device_var.set("テストのマイク")
+h.on_agent_hearing_device_selected()
+check("入力を変えると聞き直す", listener.stopped and FakeListener.made[-1].device == "テストのマイク"
+      and db.get_setting("agent.hearing_device") == "テストのマイク")
+h.stop_agent()
+check("AIを止めたら聞くのもやめる", FakeListener.made[-1].stopped and h._voice_listener is None)
+h.start_agent()
+check("また始めたら聞き始める", FakeListener.made[-1].started and not FakeListener.made[-1].stopped)
+h.agent_hearing_var.set(False)
+h.on_agent_hearing_toggled()
+check("OFFでやめる", FakeListener.made[-1].stopped and db.get_setting("agent.hearing_enabled") == "0")
 
 print("■ ルームの様子")
 h._on_gravity_room({"name": "伏せ字1", "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2, "announcement": "x"})

@@ -18,6 +18,7 @@ Gemini（Google）のアダプター（設計書/05 の 2.3・2.4。段階4。20
 ⚠️ 通信先はこのホストだけ。リダイレクトは追わない（キーのヘッダーを別のところへ送らないため）。
 ⚠️ 失敗の文にキーや相手の返した本文を入れない（ログに出るため。種類と HTTP の番号だけ）。
 """
+import base64
 import json
 import socket
 import time
@@ -151,7 +152,9 @@ class GeminiProvider:
 
     # --- 送受信 ---
     def build_payload(self, request):
-        contents = [{"role": "model" if m.role == "assistant" else "user", "parts": [{"text": m.content}]}
+        contents = [{"role": "model" if m.role == "assistant" else "user",
+                     "parts": [{"text": m.content}] + [{"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode("ascii")}}
+                                                       for mime, data in getattr(m, "attachments", None) or []]}
                     for m in request.messages]
         config = {"maxOutputTokens": int(request.max_output_tokens)}
         if request.response_schema is not None:

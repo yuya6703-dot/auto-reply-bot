@@ -45,6 +45,7 @@ PURPOSE_DECIDE = "decide"
 PURPOSE_GENERATE = "generate"
 PURPOSE_SUMMARIZE = "summarize"
 PURPOSE_DIGEST = "digest"          # 1日のまとめ（2026-10-16）
+PURPOSE_TRANSCRIBE = "transcribe"  # 声を文字にする（2026-10-16）
 PURPOSE_PING = "ping"
 
 
@@ -62,6 +63,7 @@ class PingResult:
 class LLMMessage:
     role: str                              # "user" / "assistant"
     content: str
+    attachments: list = field(default_factory=list)   # [(MIME の型, bytes)]。声を文字にするときの音（audio/wav）
 
 
 @dataclass

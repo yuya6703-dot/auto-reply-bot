@@ -28,7 +28,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from ..events import KIND_CHAT_MESSAGE, KIND_CHAT_NOTICE, SOURCE_GRAVITY, clean_name
+from ..events import KIND_CHAT_MESSAGE, KIND_CHAT_NOTICE, SOURCE_GRAVITY, SOURCE_VOICE, clean_name
 from .recall import same_person
 
 FOLDER_NAME = "AIの記憶"
@@ -137,7 +137,7 @@ class ConversationJournal:
             return
         with self._lock:
             for e in events:
-                if e.source != SOURCE_GRAVITY or e.backlog or e.event_id in self._written:
+                if e.source not in (SOURCE_GRAVITY, SOURCE_VOICE) or e.backlog or e.event_id in self._written:
                     continue
                 self._written[e.event_id] = True
                 while len(self._written) > MAX_REMEMBERED_EVENTS:
@@ -147,6 +147,8 @@ class ConversationJournal:
                 text = (e.text or "").replace("\n", " / ")
                 if e.kind == KIND_CHAT_NOTICE:
                     line = f"- {stamp} （お知らせ）{text}"
+                elif e.source == SOURCE_VOICE:
+                    line = f"- {stamp} （声）{clean_name(e.speaker) or 'だれか'}: {text}"    # 声を聞く（誰かは分からない）
                 else:
                     mark = "（自分）" if e.is_self else ""
                     line = f"- {stamp} {clean_name(e.speaker) or '名前不明'}{mark}: {text}"

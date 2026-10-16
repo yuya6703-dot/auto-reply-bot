@@ -98,6 +98,7 @@ from agent.llm.gemini import GeminiProvider, MODELS as GEMINI_MODELS, DEFAULT_MO
 from agent.persona import Persona
 from agent.memory.journal import ConversationJournal, FOLDER_NAME as AGENT_JOURNAL_FOLDER
 from agent.tools.lookup import Lookup as AgentLookup, user_agent as lookup_user_agent
+from agent.hearing import VoiceListener, list_input_devices as list_voice_input_devices
 from agent.generation import tidy_text as agent_tidy_text
 from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN_RESTORED, OPEN_RECREATED
 from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
@@ -9947,6 +9948,7 @@ class App(ctk.CTk):
                      text_color="gray70").pack(anchor="w", padx=12, pady=(0, 10))
 
         self.build_agent_accounts_section(frame)
+        self.build_agent_hearing_section(frame)
         self.build_agent_persona_section(frame)
         self.build_agent_memory_section(frame)
 
@@ -10098,6 +10100,152 @@ class App(ctk.CTk):
             move_row, text="📦 このアカウントの記憶にする", width=190, fg_color="#555555", hover_color="#3a3a3a",
             command=self.move_unknown_agent_memories)
         self.agent_unknown_memories_button.pack(side="left")
+
+    # --- 声を聞く（2026-10-16 本人「iPad mini 6から音を拾う仕組み」→「1から6まで」の6） ---
+    NO_INPUT_DEVICE = "（音声入力が見つかりません）"
+    HEARING_THRESHOLD_MAX = 0.2
+
+    def build_agent_hearing_section(self, parent):
+        section = ctk.CTkFrame(parent)
+        section.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(section, text="👂 声を聞く（PCの音声入力。iPadなど）", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(section, text="ルームの音をPCの音声入力に入れると（iPadをライン入力につなぐ・仮想ケーブル など）、"
+                                   "話し声を文字にしてAIに渡します。\n"
+                                   "誰が話したかは分かりません。音はPCに保存しません。BGMが流れていると音楽も拾うので、"
+                                   "下の音量の表示を見て、しきい値を声だけが超えるくらいにしてください。",
+                     justify="left", text_color="gray70").pack(anchor="w", padx=12, pady=(0, 6))
+        config = AgentConfig.load(self.db.get_setting)
+        self._voice_listener = None
+        self._voice_listener_factory = VoiceListener
+        self.agent_hearing_var = ctk.BooleanVar(value=config.hearing_enabled)
+        ctk.CTkSwitch(section, text="👂 声を聞く（文字にするために、音をAIの提供元へ送ります）", variable=self.agent_hearing_var,
+                      command=self.on_agent_hearing_toggled).pack(anchor="w", padx=12, pady=(0, 6))
+        row = ctk.CTkFrame(section, fg_color="transparent")
+        row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(row, text="音声入力:", width=110, anchor="w").pack(side="left")
+        self.agent_hearing_device_var = ctk.StringVar(value=config.hearing_device or self.NO_INPUT_DEVICE)
+        self.agent_hearing_device_menu = ctk.CTkOptionMenu(row, variable=self.agent_hearing_device_var,
+                                                           values=[self.NO_INPUT_DEVICE], width=320,
+                                                           command=self.on_agent_hearing_device_selected)
+        self.agent_hearing_device_menu.pack(side="left", padx=(0, 6))
+        ctk.CTkButton(row, text="🔄", width=40, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.refresh_agent_hearing_devices).pack(side="left")
+        level_row = ctk.CTkFrame(section, fg_color="transparent")
+        level_row.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(level_row, text="しきい値:", width=110, anchor="w").pack(side="left")
+        self.agent_hearing_threshold = ctk.CTkSlider(level_row, from_=0.005, to=self.HEARING_THRESHOLD_MAX, width=200,
+                                                     command=self.on_agent_hearing_threshold_changed)
+        self.agent_hearing_threshold.set(min(self.HEARING_THRESHOLD_MAX, max(0.005, config.hearing_threshold)))
+        self.agent_hearing_threshold.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(level_row, text="今の音量:").pack(side="left", padx=(0, 4))
+        self.agent_hearing_level = ctk.CTkProgressBar(level_row, width=160)
+        self.agent_hearing_level.set(0)
+        self.agent_hearing_level.pack(side="left")
+        self.agent_hearing_status = ctk.CTkLabel(section, text="止まっています", anchor="w", text_color="gray70")
+        self.agent_hearing_status.pack(anchor="w", padx=12, pady=(0, 10))
+        self.refresh_agent_hearing_devices()
+
+    def refresh_agent_hearing_devices(self):
+        devices = list_voice_input_devices()
+        self.agent_hearing_device_menu.configure(values=devices or [self.NO_INPUT_DEVICE])
+        current = self.agent_hearing_device_var.get()
+        if current not in devices:
+            saved = self.db.get_setting("agent.hearing_device", "") or ""
+            self.agent_hearing_device_var.set(saved if saved in devices else (devices[0] if devices else self.NO_INPUT_DEVICE))
+
+    def _selected_hearing_device(self):
+        device = self.agent_hearing_device_var.get()
+        return "" if device == self.NO_INPUT_DEVICE else device
+
+    def on_agent_hearing_toggled(self):
+        on = bool(self.agent_hearing_var.get())
+        if on and not messagebox.askyesno(
+                "声を聞く",
+                "PCの音声入力（iPadをつないだライン入力など）から、ルームの話し声を聞いて文字にし、AIに渡します。\n"
+                "文字にするために、ルームの他の人の声をAIの提供元へ送ります。音はPCに保存しません"
+                "（文字にした内容は、チャットと同じように記録・ファイルに残ることがあります）。\n"
+                "誰が話したかは分かりません。1時間に文字にするのは10分ぶんまでです（BGMを拾うとすぐ上限になります）。\n\n"
+                "声を聞くようにしますか？"):
+            self.agent_hearing_var.set(False)
+            return
+        if on and not self._selected_hearing_device():
+            messagebox.showinfo("声を聞く", "音声入力が見つかりません。iPadなどをつないでから「🔄」を押してください。")
+            self.agent_hearing_var.set(False)
+            return
+        self.db.save_setting("agent.hearing_enabled", "1" if on else "0")
+        self.db.save_setting("agent.hearing_device", self._selected_hearing_device())
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.hearing_enabled = on
+            self.agent_runtime.config.hearing_device = self._selected_hearing_device()
+        if on:
+            self._append_agent_log(f"👂 声を聞きます（{self._selected_hearing_device()}）。"
+                                   + ("" if self.agent_runtime is not None and self.agent_runtime.running
+                                      else "「▶ 開始」すると聞き始めます。"))
+            self._start_voice_listener()
+        else:
+            self._stop_voice_listener()
+            self._append_agent_log("👂 声を聞くのをやめました。")
+
+    def on_agent_hearing_device_selected(self, _value=None):
+        device = self._selected_hearing_device()
+        self.db.save_setting("agent.hearing_device", device)
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.hearing_device = device
+        if self._voice_listener is not None:          # 聞いている途中なら、新しい入力で聞き直す
+            self._stop_voice_listener()
+            self._start_voice_listener()
+
+    def on_agent_hearing_threshold_changed(self, value):
+        value = round(float(value), 3)
+        self.db.save_setting("agent.hearing_threshold", str(value))
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.hearing_threshold = value
+        if self._voice_listener is not None:
+            self._voice_listener.set_threshold(value)
+
+    def _start_voice_listener(self):
+        """AIが動いていて、声を聞くがONで、入力が選んであれば聞き始める"""
+        runtime = self.agent_runtime
+        device = self._selected_hearing_device()
+        if (self._voice_listener is not None or runtime is None or not runtime.running
+                or not self.agent_hearing_var.get() or not device):
+            return
+        listener = self._voice_listener_factory(
+            device, float(self.agent_hearing_threshold.get()), self._on_voice_segment,
+            on_error=lambda message: write_error_log(f"声を聞くところでエラー: {message}"))
+        ok, why = listener.start()
+        if not ok:
+            self._append_agent_log(f"⚠️ {why}")
+            self.agent_hearing_status.configure(text=why)
+            return
+        self._voice_listener = listener
+        self.agent_hearing_status.configure(text=f"聞いています（{device}）")
+        self._poll_voice_level()
+
+    def _stop_voice_listener(self):
+        listener, self._voice_listener = self._voice_listener, None
+        if listener is not None:
+            listener.stop()
+        self.agent_hearing_level.set(0)
+        self.agent_hearing_status.configure(text="止まっています")
+
+    def _on_voice_segment(self, wav, seconds):
+        """聞くスレッドから。文字にしてAIへ（runtime.hear が提供元へ送る）。⚠️ Tk に触らない"""
+        runtime = self.agent_runtime
+        if runtime is None:
+            return
+        text = runtime.hear(wav, seconds)
+        if text:
+            self._post_to_ui(lambda: self.agent_hearing_status.configure(
+                text=f"聞いています — 最後に聞こえた: 「{text[:40]}」"))
+
+    def _poll_voice_level(self):
+        listener = self._voice_listener
+        if listener is None:
+            return
+        self.agent_hearing_level.set(min(1.0, listener.level / self.HEARING_THRESHOLD_MAX))
+        self.after(200, self._poll_voice_level)
 
     def _known_gravity_accounts(self):
         """選べる GRAVITY のアカウント（覚えた名前・タスク機能の名前・設定の名前・アカウントごとの設定・記憶があるもの）"""
@@ -10989,9 +11137,12 @@ class App(ctk.CTk):
         ok, message = runtime.start()
         if not ok:
             messagebox.showinfo("AI", message)
+        else:
+            self._start_voice_listener()
         self._refresh_agent_state()
 
     def stop_agent(self):
+        self._stop_voice_listener()
         if self.agent_runtime is not None:
             self.agent_runtime.stop()
         self._refresh_agent_state()
@@ -11002,6 +11153,7 @@ class App(ctk.CTk):
         dropped = self.worker.discard_agent_texts()
         if dropped:
             self.append_log(f"🛑 送信待ちにあったAIの文{dropped}件を捨てました。")
+        self._stop_voice_listener()
         if self.agent_runtime is not None:
             self.agent_runtime.emergency_stop()
         else:
@@ -11012,6 +11164,8 @@ class App(ctk.CTk):
     def resume_agent(self):
         if self.agent_runtime is not None:
             self.agent_runtime.resume()
+            if self.agent_runtime.running:
+                self._start_voice_listener()
         self._refresh_agent_state()
 
     def save_agent_settings(self):
@@ -14086,6 +14240,9 @@ class App(ctk.CTk):
         self.phone_bridge.stop()
         # マイクの転送も止める。開いたままだと音声デバイスを掴み続けてしまう
         self.stop_input_passthrough()
+        # 声を聞くのも止める（音声入力を掴んだまま閉じない）
+        if getattr(self, "_voice_listener", None) is not None:
+            self._stop_voice_listener()
         # AIを止める（新しい出来事を受け付けない）。喋っている途中の分は、次の読み上げの停止で止まる
         runtime = getattr(self, "agent_runtime", None)
         if runtime is not None:
