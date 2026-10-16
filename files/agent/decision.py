@@ -44,6 +44,8 @@ DECISION_SCHEMA = {
         # 調べる（use_tool）とき。⚠️ null を混ぜた enum は書かない（本番で通った「null を許す型」だけ）。値は parse_decision が確かめる
         "tool": {"type": ["string", "null"], "description": "use_tool のとき: wikipedia / weather"},
         "tool_query": {"type": ["string", "null"], "description": "use_tool のとき: 調べる言葉・地名"},
+        # 心の中（2026-10-16 本人「考えながら話をする仕組み…いわゆる心の中」）。口に出さない
+        "inner": {"type": ["string", "null"], "description": "心の中で思ったこと（口に出さない。60字以内）"},
     },
     "required": ["action", "reason"],
 }
@@ -67,6 +69,7 @@ class Decision:
     mood: str = ""
     tool: Optional[str] = None            # use_tool のとき: wikipedia / weather
     tool_query: Optional[str] = None      # use_tool のとき: 調べる言葉・地名
+    inner: Optional[str] = None           # 心の中で思ったこと（口に出さない）
 
 
 class DecisionFailed(Exception):
@@ -103,7 +106,9 @@ def parse_decision(data, turn_id, model=None):
     return Decision(action=action, reason=reason.strip()[:60], decided_by=DECIDED_BY_LLM, turn_id=turn_id,
                     urgency=min(1.0, max(0.0, urgency)), target=target, hold_seconds=hold, model=model,
                     topic=str(data.get("topic") or "")[:40], mood=str(data.get("mood") or "")[:20],
-                    tool=tool, tool_query=query)
+                    tool=tool, tool_query=query,
+                    inner=" ".join(data["inner"].split())[:80] if isinstance(data.get("inner"), str) and data["inner"].strip()
+                    else None)
 
 
 def call_llm(provider, request, cancel, on_call):

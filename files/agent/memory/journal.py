@@ -305,6 +305,18 @@ class ConversationJournal:
             entries.append(f"[{when}] {body}"[:MAX_PAST_LINE_CHARS])
         return entries
 
+    # --- 心の中（2026-10-16） ---
+    def record_thought(self, account, text):
+        """AI の心の中（口に出さなかったこと）を「心の中/日付.md」に書く"""
+        if not self.enabled or not text:
+            return
+        with self._lock:
+            now = self._clock()
+            day = time.strftime("%Y-%m-%d", time.localtime(now))
+            path = os.path.join(self.account_dir(account), "心の中", day + ".md")
+            self._append(path, f"- {time.strftime('%H:%M', time.localtime(now))} {text}",
+                         header=f"# 心の中（{account or UNKNOWN_ACCOUNT}） {day}\n\n（AIが口に出さずに思ったこと）\n\n")
+
     # --- 1日のまとめ（2026-10-16） ---
     def day_file(self, account, day):
         return os.path.join(self.account_dir(account), "会話の記録", day + ".md")

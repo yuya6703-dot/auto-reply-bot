@@ -103,6 +103,36 @@ check("OFFなら「絵文字は使わない」", wait_until(lambda: len(a.decide
       and "絵文字は使わない" in a.decide_calls()[0].messages[0].content)
 a.close()
 
+print("■ 心の中（2026-10-16 本人「考えながら話をする仕組み…いわゆる心の中」）")
+import os, tempfile
+from agent.decision import DECISION_SCHEMA, parse_decision
+from agent.events import SOURCE_GRAVITY
+from agent.memory.journal import ConversationJournal
+from agent_harness import make_event
+check("判断の形に「心の中」（口に出さない）", "inner" in DECISION_SCHEMA["properties"]
+      and parse_decision({"action": "silent", "reason": "x", "inner": " 今は言わなくていいかも "}, "t").inner == "今は言わなくていいかも")
+a = Agent(mode=MODE_ENGAGE, start=False, journal_enabled=True, ai_name="アイ", min_gap_after_speaking=0.0)
+root = os.path.join(tempfile.mkdtemp(), "AIの記憶")
+a.runtime.deps.journal = ConversationJournal(root, lambda: True)
+a.runtime.start()
+a.mock.script_decide = [{"action": "silent", "reason": "様子見", "inner": "この話は深掘りしないほうがよさそう"},
+                        {"action": "engage", "reason": "呼ばれた", "target": "たろう", "inner": "さっき黙ったけど、今なら聞ける",
+                         "text": "どうしたの？", "emotion": "calm"}]
+a.runtime.submit(make_event("ちょっと疲れたな", speaker="たろう", source=SOURCE_GRAVITY, account="テスト垢"))
+check("心の中を判断のログに（口に出さない）", wait_until(lambda: any("💭 心の中:「この話は深掘りしないほうがよさそう」" in line
+                                                         for line in a.logs), 5.0) and a.speaker.spoken == [])
+a.runtime.submit(make_event("アイ、聞いてる？", speaker="たろう", source=SOURCE_GRAVITY, account="テスト垢"))
+check("次の判断に「さっきの心の中」を渡す（考えの続き）", wait_until(lambda: len(a.decide_calls()) >= 2, 5.0)
+      and "## さっきの心の中" in a.decide_calls()[-1].messages[0].content
+      and "この話は深掘りしないほうがよさそう" in a.decide_calls()[-1].messages[0].content)
+check("固定の指示に「inner は口に出さない本音」", "口に出さない本音" in a.decide_calls()[-1].system)
+day_file = os.path.join(root, "テスト垢", "心の中", time.strftime("%Y-%m-%d") + ".md")
+check("会話をファイルに残すがONなら「心の中/日付.md」にも", wait_until(lambda: os.path.exists(day_file), 3.0)
+      and "この話は深掘りしないほうがよさそう" in open(day_file, encoding="utf-8").read())
+a.runtime._thoughts = [(t - 1300, x) for t, x in a.runtime._thoughts]
+check("20分で忘れる", a.runtime._thought_lines(time.time()) == [])
+a.close()
+
 print("■ 言いかけたことは3分で忘れる")
 a = Agent(mode=MODE_ENGAGE)
 a.runtime._keep_pending("古い話", "テスト")

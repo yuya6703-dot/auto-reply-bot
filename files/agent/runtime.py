@@ -166,6 +166,7 @@ class AgentRuntime:
         self._own_voice = []               # ルームへ喋った時間 [(始め, 終わり)]（聞こえた声が自分の声かを見分ける）
         self._current_text = None          # 今喋っている文（割り込まれたら「言いかけたこと」にする）
         self._pending_thought = None       # 言いかけて止めたこと {"text", "at", "why"}（相手に譲った・会話が進んで出さなかった）
+        self._thoughts = []                # 心の中 [(時刻, 思ったこと)]（次の判断に渡す。考えの続き）
         self._hearing_capped = False       # 上限のことを言ったか（何度も言わない）
         self._digest_checked_at = 0.0      # 前の日のまとめが要るかを見た時刻
         self._owner_done = set()           # 扱ったオーナーの合図（同じ発言を2度扱わない）
@@ -614,6 +615,9 @@ class AgentRuntime:
         pending = self._pending_lines(now)
         if pending:
             memory_lines["pending"] = pending
+        thoughts = self._thought_lines(now)
+        if thoughts:
+            memory_lines["thoughts"] = thoughts
         owner = self._owner_lines(events)
         if owner:
             memory_lines["owner"] = owner
@@ -645,6 +649,7 @@ class AgentRuntime:
         if cancel.cancelled:
             return          # 止めた・緊急停止した。結果は捨てる
         self._record(decision)
+        self._keep_thought(decision.inner)
 
         # --- 調べる（頼まれたとき。「待って」の一言を出してから調べ、調べた結果で答える） ---
         lookup = None
@@ -1169,6 +1174,25 @@ class AgentRuntime:
             self._listening, self._listening_since = True, self._clock()
         self._keep_pending(text, "話している途中で、相手に譲った")
         self.log.write("✋ ほかの人が話し始めたので、話を譲りました（言いかけたことは、相手が話し終えたら続けるか考えます）。")
+
+    # --- 心の中（2026-10-16 本人「考えながら話をする仕組み作っておきたい。いわゆる心の中ってやつやな」） ---
+    THOUGHT_KEEP_SECONDS = 1200.0
+    MAX_THOUGHTS = 5
+
+    def _keep_thought(self, text):
+        if not text:
+            return
+        now = self._clock()
+        with self._lock:
+            self._thoughts = [(t, x) for t, x in self._thoughts if now - t < self.THOUGHT_KEEP_SECONDS][-(self.MAX_THOUGHTS - 1):]
+            self._thoughts.append((now, text))
+        self.log.write(f"💭 心の中:「{text}」")
+        self._journal("record_thought", self._account, text)
+
+    def _thought_lines(self, now):
+        with self._lock:
+            thoughts = [(t, x) for t, x in self._thoughts if now - t < self.THOUGHT_KEEP_SECONDS]
+        return [f"[{max(0, int(now - t))}秒前] {x}" for t, x in thoughts]
 
     def _keep_pending(self, text, why):
         with self._lock:
