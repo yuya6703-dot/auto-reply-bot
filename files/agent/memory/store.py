@@ -19,7 +19,7 @@ import time
 from ..events import AgentEvent
 from ..persona import Persona
 
-SCHEMA_VERSION = 2     # 2: 記憶（persons・memories・relationships）を足した（2026-10-16）
+SCHEMA_VERSION = 3     # 2: 記憶（persons・memories・relationships）を足した。3: 自分のアカウントごとに分けた（account 列。2026-10-16）
 FILE_NAME = "agent_data.db"
 BACKUP_PREFIX = "agent_data_"
 BACKUP_KEEP = 7
@@ -88,6 +88,8 @@ class AgentStore:
                 status = OPEN_RESTORED if restored else OPEN_RECREATED
                 self._conn = self._connect_checked(self.path)
             self._conn.executescript(_SCHEMA)
+            self._add_column_if_missing("memories", "account", "TEXT DEFAULT ''")
+            self._add_column_if_missing("persons", "account", "TEXT DEFAULT ''")
             if self._conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0:
                 self._conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
             else:
@@ -98,6 +100,11 @@ class AgentStore:
             self.purge()
             self.open_status = status
             return status
+
+    def _add_column_if_missing(self, table, column, definition):
+        columns = [row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")]
+        if column not in columns:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @staticmethod
     def _connect_checked(path):
@@ -188,13 +195,13 @@ class AgentStore:
         self._conn.execute("DELETE FROM relationships WHERE person_key = ?", (person_key,))
         self._conn.execute("DELETE FROM persons WHERE person_key = ?", (person_key,))
 
-    def upsert_person(self, person_key, display_name):
+    def upsert_person(self, person_key, display_name, account=""):
         with self._lock:
             now = self._clock()
             row = self._conn.execute("SELECT display_name FROM persons WHERE person_key = ?", (person_key,)).fetchone()
             if row is None:
-                self._conn.execute("INSERT INTO persons (person_key, display_name, first_seen, last_seen) VALUES (?, ?, ?, ?)",
-                                   (person_key, display_name, now, now))
+                self._conn.execute("INSERT INTO persons (person_key, display_name, first_seen, last_seen, account)"
+                                   " VALUES (?, ?, ?, ?, ?)", (person_key, display_name, now, now, account or ""))
             else:
                 # 切れていない（長い）名前を残す
                 name = display_name if len(display_name or "") > len(row[0] or "") else row[0]
@@ -202,30 +209,39 @@ class AgentStore:
                                    (name, now, person_key))
             self._conn.commit()
 
-    def persons(self):
+    def persons(self, account=None):
+        """[(person_key, display_name, first_seen, last_seen)]。account を渡すと、その自分のアカウントの人だけ"""
         with self._lock:
+            if account is None:
+                return self._conn.execute("SELECT person_key, display_name, first_seen, last_seen FROM persons"
+                                          " ORDER BY last_seen DESC").fetchall()
             return self._conn.execute("SELECT person_key, display_name, first_seen, last_seen FROM persons"
-                                      " ORDER BY last_seen DESC").fetchall()
+                                      " WHERE IFNULL(account, '') = ? ORDER BY last_seen DESC", (account,)).fetchall()
 
-    def add_memory(self, scope, person_key, content, confidence, importance, ttl_seconds):
+    def add_memory(self, scope, person_key, content, confidence, importance, ttl_seconds, account=""):
         with self._lock:
             now = self._clock()
             same = self._conn.execute("SELECT id FROM memories WHERE scope = ? AND IFNULL(person_key, '') = ?"
-                                      " AND content = ?", (scope, person_key or "", content)).fetchone()
+                                      " AND content = ? AND IFNULL(account, '') = ?",
+                                      (scope, person_key or "", content, account or "")).fetchone()
             if same:      # 同じ内容は覚え直す（期限を延ばす）
                 self._conn.execute("UPDATE memories SET updated_at = ?, expires_at = MAX(expires_at, ?) WHERE id = ?",
                                    (now, now + ttl_seconds, same[0]))
             else:
                 self._conn.execute(
                     "INSERT INTO memories (scope, person_key, content, confidence, importance, created_at, updated_at,"
-                    " expires_at, pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                    (scope, person_key, content, confidence, importance, now, now, now + ttl_seconds))
+                    " expires_at, pinned, account) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                    (scope, person_key, content, confidence, importance, now, now, now + ttl_seconds, account or ""))
             self._conn.commit()
 
-    def memories(self, person_key=None, limit=200):
-        """新しい順 [(id, scope, person_key, content, confidence, importance, updated_at, pinned)]"""
+    def memories(self, person_key=None, limit=200, account=None):
+        """新しい順 [(id, scope, person_key, content, confidence, importance, updated_at, pinned)]。account で自分のアカウントに絞る"""
         with self._lock:
-            if person_key is None:
+            if person_key is None and account is not None:
+                rows = self._conn.execute(
+                    "SELECT id, scope, person_key, content, confidence, importance, updated_at, pinned FROM memories"
+                    " WHERE IFNULL(account, '') = ? ORDER BY updated_at DESC LIMIT ?", (account, limit))
+            elif person_key is None:
                 rows = self._conn.execute(
                     "SELECT id, scope, person_key, content, confidence, importance, updated_at, pinned FROM memories"
                     " ORDER BY updated_at DESC LIMIT ?", (limit,))
@@ -234,6 +250,14 @@ class AgentStore:
                     "SELECT id, scope, person_key, content, confidence, importance, updated_at, pinned FROM memories"
                     " WHERE person_key = ? ORDER BY importance DESC, updated_at DESC LIMIT ?", (person_key, limit))
             return rows.fetchall()
+
+    def memories_with_account(self, limit=200):
+        """画面の一覧用 [(id, account, scope, display_name, content, confidence)]（人の記憶は人の表示名を付ける）"""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT m.id, IFNULL(m.account, ''), m.scope, IFNULL(p.display_name, m.person_key), m.content, m.confidence"
+                " FROM memories m LEFT JOIN persons p ON p.person_key = m.person_key"
+                " ORDER BY m.updated_at DESC LIMIT ?", (limit,)).fetchall()
 
     def delete_memory(self, memory_id):
         with self._lock:

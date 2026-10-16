@@ -67,6 +67,8 @@ class AgentConfig:
     summarize_interval_seconds: float = 600.0     # 覚えることを整理する間隔（10分）
     summarize_quiet_seconds: float = 120.0        # 会話がこれだけ静かになったら、10分たっていなくても整理する
     summarize_min_lines: int = 6                  # 他の人の発言がこれだけたまってから整理する
+    # 長期記憶ファイル（自分のアカウントごと＋相手ごとに、会話の全文と要約を読めるファイルに残す。既定OFF。2026-10-16）
+    journal_enabled: bool = False
     react_max_chars: int = 40              # C2: 短い反応の上限（声）
     engage_max_chars: int = 120            # C2: 参加の上限（声）
     chat_react_max_chars: int = 60         # C2: チャットの短い反応の上限（チャットは読むので声より長くてよい）
@@ -82,7 +84,7 @@ class AgentConfig:
     # 画面で変える項目
     EDITABLE = ("ai_name", "self_names", "owner_names", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
-                "memory_enabled", "impressions_enabled", "relationships_enabled")
+                "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled")
 
     @property
     def ai_names(self):

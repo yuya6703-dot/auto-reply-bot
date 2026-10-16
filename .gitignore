@@ -18,6 +18,8 @@
 **/agent_data.db-*
 **/agent_data.db.broken_*
 **/backup/agent_data_*.db
+# 長期記憶ファイル（会話の全文。自分のアカウントごと・相手ごと）。同じ理由で追跡しない
+**/AIの記憶/
 
 # 実行ファイル・配布用アーカイブ
 *.exe

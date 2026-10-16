@@ -211,4 +211,45 @@ run_monitor([("［参加したとき］", "{名前}さん、いらっしゃい�
 said = [e for e in own if e.text == "伏せ字5さん、いらっしゃい！"]
 check("自動返信で送った文がチャット欄に出たら、AI には自分の発言として渡す", said and all(e.is_self for e in said), said)
 
+print("■ チャットしている自分のアカウント（長期記憶ファイル。2026-10-16）")
+learned = []
+acc = A.GravityChatBridge(lambda events: None, account=lambda: "テスト垢",
+                          on_own_name=lambda name, text: learned.append((name, text)))
+old = acc.on_rows([msg("テストちゃ👼", "前からあった自分の文")], is_own_text=lambda text: True)
+check("起動前からあった行では、名前を覚えない", learned == [] and old[0].backlog)
+new = acc.on_rows([msg("テストちゃ👼", "前からあった自分の文"), msg("テストちゃ👼", "送った文"), msg("伏せ字5", "他の人の文")],
+                  is_own_text=lambda text: text == "送った文")
+check("出来事に、今チャットしている自分のアカウントの名前を付ける",
+      old[0].meta["account"] == "テスト垢" and all(e.meta["account"] == "テスト垢" for e in new))
+check("自分が送った文の新しい行の、名前と本文を知らせる", learned == [("テストちゃ👼", "送った文")], learned)
+
+
+class FakeShell:
+    def __init__(self, text):
+        self.text, self.calls = text, 0
+
+    def shell(self, command):
+        self.calls += 1
+        return type("R", (), {"output": self.text})()
+
+
+db = A.DatabaseManager(os.path.join(tempfile.mkdtemp(), "t.db"))
+db.save_setting("mumu_target_package", GRAVITY)
+w = A.AutoReplyWorker(db, lambda message: None)
+dev = FakeShell(fixture("dumpsys_activities_clone.txt"))
+w._target_display = 16
+w._update_agent_account(dev)
+check("今の画面のアカウントを見分ける（アプリ複製はユーザー10〜）", w.agent_account_user == "10", w.agent_account_user)
+w._update_agent_account(dev)
+check("同じ画面なら、毎周回は読み直さない", dev.calls == 1)
+w._agent_account_checked_at -= A.AutoReplyWorker.AGENT_ACCOUNT_RECHECK_SECONDS + 1
+w._update_agent_account(dev)
+check("1分たったら読み直す（同じ画面で別のアカウントに替えたとき）", dev.calls == 2)
+w._recent_manual_texts.append("こんばんは")
+w._remember_own_text("伏せ字5さん、いらっしゃい！")
+check("送った文とまったく同じ本文か（手入力・AI・自動返信）",
+      w.was_sent_exactly("こんばんは") and w.was_sent_exactly(" 伏せ字5さん、いらっしゃい！ "))
+check("含むだけでは数えない（他の人の「こんばんは、みなさん」）", not w.was_sent_exactly("こんばんは、みなさん")
+      and not w.was_sent_exactly(""))
+
 finish()

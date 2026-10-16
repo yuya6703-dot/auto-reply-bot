@@ -25,6 +25,7 @@ def check(name, cond, detail=""):
 
 TMP = tempfile.mkdtemp()
 A.AGENT_DB_FILE = os.path.join(TMP, "agent_data.db")
+A.AGENT_JOURNAL_DIR = os.path.join(TMP, "AIの記憶")
 
 
 class FakeWorker:
@@ -34,6 +35,11 @@ class FakeWorker:
     def __init__(self):
         self.bridge = None
         self.agent_texts = []
+        self.agent_account_user = None
+        self.sent = []
+
+    def was_sent_exactly(self, text):
+        return text in self.sent
 
     def set_agent_bridge(self, bridge):
         self.bridge = bridge
@@ -92,6 +98,14 @@ class Harness(ctk.CTk):
     delete_selected_agent_memory = A.App.delete_selected_agent_memory
     delete_all_agent_memory = A.App.delete_all_agent_memory
     reset_agent_relationships = A.App.reset_agent_relationships
+    open_agent_journal_folder = A.App.open_agent_journal_folder
+    AGENT_ACCOUNT_NAMES_SETTING = A.App.AGENT_ACCOUNT_NAMES_SETTING
+    ACCOUNT_NAME_VOTES = A.App.ACCOUNT_NAME_VOTES
+    _load_task_account_names = A.App._load_task_account_names
+    _current_account_user = A.App._current_account_user
+    _gravity_account_name = A.App._gravity_account_name
+    _agent_my_names = A.App._agent_my_names
+    _learn_gravity_account_name = A.App._learn_gravity_account_name
     on_agent_initiative_toggled = A.App.on_agent_initiative_toggled
     AGENT_OUTPUT_LABELS = A.App.AGENT_OUTPUT_LABELS
     AGENT_CHAT_SEND_LABELS = A.App.AGENT_CHAT_SEND_LABELS
@@ -414,7 +428,8 @@ h.on_agent_initiative_toggled()
 check("OFFに戻せる", db.get_setting("agent.initiative_enabled") == "0" and h.agent_runtime.config.initiative_enabled is False)
 
 print("■ 記憶（既定OFF・ONにするとき確かめる・見て消せる）")
-check("3つとも既定はOFF", all(v.get() is False for v in h.agent_memory_vars.values()))
+check("どれも既定はOFF（会話をファイルに残すも）", all(v.get() is False for v in h.agent_memory_vars.values())
+      and "journal_enabled" in h.agent_memory_vars)
 answers.append(False)
 h.agent_memory_vars["memory_enabled"].set(True)
 h.on_agent_memory_toggled("memory_enabled")
@@ -459,6 +474,65 @@ for name in ("memory_enabled", "impressions_enabled"):
     h.agent_memory_vars[name].set(False)
     h.on_agent_memory_toggled(name)
 check("OFFに戻せる", db.get_setting("agent.memory_enabled") == "0" and h.agent_runtime.config.memory_enabled is False)
+
+print("■ 会話をファイルに残す（長期記憶ファイル。2026-10-16）")
+answers.append(False)
+h.agent_memory_vars["journal_enabled"].set(True)
+h.on_agent_memory_toggled("journal_enabled")
+check("ONにするときは、他の人の発言がそのまま入る・このPCの中だけ・自動では消さないと書いて確かめる",
+      dialogs[-1][0] == "ask" and "他の人の名前と発言がそのまま入ります" in dialogs[-1][2]
+      and "このPCの中だけ" in dialogs[-1][2] and "自動では消しません" in dialogs[-1][2]
+      and h.agent_memory_vars["journal_enabled"].get() is False and db.get_setting("agent.journal_enabled") != "1")
+answers.append(True)
+h.agent_memory_vars["journal_enabled"].set(True)
+h.on_agent_memory_toggled("journal_enabled")
+check("「はい」ならON（動いているエージェントにもすぐ効く）", db.get_setting("agent.journal_enabled") == "1"
+      and h.agent_runtime.config.journal_enabled is True)
+check("書く場所はアプリのフォルダの「AIの記憶」", h.agent_runtime.deps.journal.root == A.AGENT_JOURNAL_DIR)
+opened = []
+real_startfile = A.os.startfile
+A.os.startfile = opened.append
+h.open_agent_journal_folder()
+A.os.startfile = real_startfile
+check("「フォルダを開く」で、無ければ作って開く", opened == [A.AGENT_JOURNAL_DIR] and os.path.isdir(A.AGENT_JOURNAL_DIR))
+h.agent_memory_vars["journal_enabled"].set(False)
+h.on_agent_memory_toggled("journal_enabled")
+check("OFFに戻せる（確かめない）", db.get_setting("agent.journal_enabled") == "0"
+      and h.agent_runtime.config.journal_enabled is False)
+store.add_memory("person", "テスト垢／伏せ字3", "犬が好き", "high", 0.8, 86400, "テスト垢")
+store.upsert_person("テスト垢／伏せ字3", "伏せ字3", "テスト垢")
+h.refresh_agent_memory_list()
+check("記憶の一覧に、どのアカウントで覚えたかを出す", "[テスト垢／伏せ字3・人] 犬が好き" in h.agent_memory_listbox.get(0, "end"),
+      h.agent_memory_listbox.get(0, "end"))
+store.delete_all_memories()
+
+print("■ チャットしている自分のアカウント")
+saved_self_names, h._agent_self_names = h._agent_self_names, []
+check("見分ける前で、名前も分からなければ「本体のGRAVITY」", h._gravity_account_name() == "本体のGRAVITY", h._gravity_account_name())
+h._agent_self_names = ["設定の名前"]
+check("設定の「自分のアカウント名」があればそれ", h._gravity_account_name() == "設定の名前")
+h._agent_self_names = saved_self_names
+db.save_setting(A.GravityTaskWorker.ACCOUNTS_SETTING, '{"10": {"name": "複製の名前", "custom_id": "x"}}')
+h._agent_task_names = h._load_task_account_names()
+h.worker.agent_account_user = "10"
+check("タスク機能が覚えた名前を使う（アプリ複製はユーザーごと）", h._gravity_account_name() == "複製の名前"
+      and "複製の名前" in h._agent_my_names())
+h.worker.agent_account_user = "0"
+h._learn_gravity_account_name("テストちゃ👼", "送っていない文")
+h._learn_gravity_account_name("テストちゃ👼", "送っていない文")
+check("送った文とまったく同じ本文でなければ、名前を覚えない", h._agent_account_names.get("0") is None)
+h.worker.sent = ["こんばんは", "またね"]
+h._learn_gravity_account_name("テストちゃ👼", "こんばんは")
+check("1回見ただけでは覚えない（他の人がたまたま同じ文を書いたときに取り違えない）", h._agent_account_names.get("0") is None)
+h._learn_gravity_account_name("テストちゃ👼", "またね")
+check("同じ名前を2回見たら覚える", h._agent_account_names.get("0") == "テストちゃ👼"
+      and db.get_setting(A.App.AGENT_ACCOUNT_NAMES_SETTING) == '{"0": "テストちゃ👼"}')
+check("覚えたことを判断のログに出す", pump(h, lambda: "🪪 チャットしているアカウントを覚えました: 本体のGRAVITY「テストちゃ👼」"
+                                                  in agent_log(h)), agent_log(h)[-200:])
+check("覚えた名前がアカウントの名前になる・自分の発言の見分けにも使う",
+      h._gravity_account_name() == "テストちゃ👼" and "テストちゃ👼" in h._agent_my_names())
+h._learn_gravity_account_name("テストちゃ..", "またね")
+check("切れて出た名前で上書きしない", h._agent_account_names["0"] == "テストちゃ👼")
 
 print("■ ルームの様子")
 h._on_gravity_room({"name": "伏せ字1", "guests": "ゲスト（1人）", "seated": 4, "empty_seats": 2, "announcement": "x"})

@@ -93,6 +93,7 @@ from agent.events import (AgentEvent, make_manual_event, new_event_id as new_age
 from agent.llm.mock import MockProvider, MODE_LABELS as MOCK_MODE_LABELS, MODE_SCRIPT as MOCK_MODE_SCRIPT
 from agent.llm.gemini import GeminiProvider, MODELS as GEMINI_MODELS, DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
 from agent.persona import Persona
+from agent.memory.journal import ConversationJournal, FOLDER_NAME as AGENT_JOURNAL_FOLDER
 from agent.generation import tidy_text as agent_tidy_text
 from agent.memory.store import AgentStore, FILE_NAME as AGENT_DB_FILE_NAME, OPEN_RESTORED, OPEN_RECREATED
 from agent.runtime import (AgentRuntime, AgentDeps, STATE_LABELS as AGENT_STATE_LABELS,
@@ -113,6 +114,8 @@ DB_FILE = os.path.join(BASE_DIR, "app_data.db")
 DB_FILE_NAME = os.path.basename(DB_FILE)
 # AIのエージェントの記録（出来事・判断・発言・利用量）。他の人の名前・発言が入るので app_data.db とは分ける（設計書/07）
 AGENT_DB_FILE = os.path.join(BASE_DIR, AGENT_DB_FILE_NAME)
+# 長期記憶ファイル（会話の全文・要約。自分のアカウントごと・相手ごと。本人がONにしたときだけ書く）
+AGENT_JOURNAL_DIR = os.path.join(BASE_DIR, AGENT_JOURNAL_FOLDER)
 
 # アプリのアイコン（窓・タスクバー・exe・ショートカットで共通）。
 # ⚠️ exe（--onedir）では同梱したファイルが exe の横ではなく _internal(sys._MEIPASS) に入る。
@@ -1532,8 +1535,11 @@ class GravityChatBridge:
     """
     MAX_TEXT = 300
 
-    def __init__(self, on_events, active=lambda: True, self_names=lambda: [], clock=time.time, on_room=None):
+    def __init__(self, on_events, active=lambda: True, self_names=lambda: [], clock=time.time, on_room=None,
+                 account=lambda: "", on_own_name=None):
         self._on_events = on_events     # (list[AgentEvent]) -> None
+        self.account = account          # () -> 今チャットしている自分のアカウントの名前（出来事の meta["account"] に付ける）
+        self._on_own_name = on_own_name  # (名前, 本文) -> None。自分が送った文の行の名前＝自分のアカウント名（覚えるため）
         self.active = active            # 渡してよいか（AIが動いていて、本人がスイッチをONにしている）
         self.self_names = self_names    # () -> このアカウントの表示名のリスト（監視スレッドから呼ばれる）
         self._clock = clock
@@ -1580,6 +1586,7 @@ class GravityChatBridge:
 
         now = self._clock()
         my_names = list(self.self_names() or [])
+        account = self.account() or ""
 
         def is_me(name):
             return bool(name) and any(friend_name_matches(name, mine) for mine in my_names)
@@ -1593,7 +1600,10 @@ class GravityChatBridge:
             text = (row["text"] or "")[:self.MAX_TEXT]
             if row["kind"] == CHAT_KIND_MESSAGE:
                 kind, speaker = AGENT_KIND_MESSAGE, row["name"]
-                is_self = is_me(speaker) or bool(is_own_text(row["text"]))
+                sent_by_me = bool(is_own_text(row["text"]))
+                if sent_by_me and speaker and not backlog and self._on_own_name is not None:
+                    self._on_own_name(speaker, row["text"] or "")   # 自分が送った文の行の名前は、自分のアカウント名（かも）
+                is_self = is_me(speaker) or sent_by_me
             else:
                 kind = AGENT_KIND_NOTICE
                 speaker = row["subject"] if row["notice"] in NOTICE_KINDS_WITH_PERSON else None
@@ -1601,7 +1611,7 @@ class GravityChatBridge:
             events.append(AgentEvent(
                 event_id=new_agent_event_id(), kind=kind, source=AGENT_SOURCE_GRAVITY,
                 key=f"gravity:{mark[0]}#{self._seq}", speaker=speaker or None, text=text, observed_at=now,
-                meta={"backlog": backlog, "notice": row.get("notice", "")}, is_self=is_self))
+                meta={"backlog": backlog, "notice": row.get("notice", ""), "account": account}, is_self=is_self))
         if events:
             self._on_events(events)
         return events
@@ -2571,6 +2581,8 @@ class UpdateManager:
         # AIの記録（agent_data.db と -wal・-shm）も上書きしない。配布物にうっかり入っても消えないように（設計書/07 の 1章）
         agent_db_name = os.path.basename(AGENT_DB_FILE)
         agent_db_q = " ".join(f"'{self._ps_quote(agent_db_name + suffix)}'" for suffix in ("", "-wal", "-shm", "-journal"))
+        # 長期記憶ファイルのフォルダも上書きしない（本人が読む・消すファイル）
+        agent_journal_q = self._ps_quote(AGENT_JOURNAL_FOLDER)
         self_path_q = self._ps_quote(ps1_path)
 
         # 再起動する場合のみ新しいexeを起動する。しない場合も、何が起きたかは画面に残しておく。
@@ -2601,7 +2613,7 @@ while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
 }}
 Start-Sleep -Seconds 1
 
-robocopy '{source_dir_q}' '{target_dir_q}' /E /XF '{db_name_q}' '{error_log_name_q}' {agent_db_q} /XD 'backup' /R:3 /W:1 | Out-Null
+robocopy '{source_dir_q}' '{target_dir_q}' /E /XF '{db_name_q}' '{error_log_name_q}' {agent_db_q} /XD 'backup' '{agent_journal_q}' /R:3 /W:1 | Out-Null
 $copyExit = $LASTEXITCODE
 
 if ($copyExit -ge 8) {{
@@ -4689,6 +4701,10 @@ class AutoReplyWorker:
         self._agent_bridge = None
         # AIタブの判断のログにも出したいこと（AIの文を実際に送れたか・チャット欄が隠れたか）。App が渡す（監視スレッドから呼ぶ）
         self.agent_note = None
+        # 今チャットしている自分のアカウント（MuMu の Android のユーザー。本体=0、複製=10〜）。AI へ渡すときに見分ける
+        self.agent_account_user = None
+        self._agent_account_display = None
+        self._agent_account_checked_at = 0.0
 
     def log(self, message):
         # 画面には実際の内容を表示し、DBに保存する分だけ第三者の名前を伏せる
@@ -4742,6 +4758,28 @@ class AutoReplyWorker:
             return bridge is not None and bool(bridge.active())
         except Exception:
             return False
+
+    AGENT_ACCOUNT_RECHECK_SECONDS = 60
+
+    def _update_agent_account(self, d):
+        """
+        今の画面がどのアカウント（本体・複製）かを見分ける。画面が変わったときと、1分ごとだけ dumpsys を読む（毎周回は読まない）
+        ⚠️ MuMu の「アプリ複製」はパッケージ名が同じなので、ActivityRecord の「u10」で見分ける（parse_app_windows）
+        """
+        now = time.time()
+        if self._target_display is None or (self._target_display == self._agent_account_display
+                                            and now - self._agent_account_checked_at < self.AGENT_ACCOUNT_RECHECK_SECONDS):
+            return
+        self._agent_account_display = self._target_display
+        self._agent_account_checked_at = now
+        try:
+            result = d.shell("dumpsys activity activities")
+            windows = parse_app_windows(getattr(result, "output", result) or "", self._monitor_target_package())
+        except Exception:
+            return
+        user = next((w["user"] for w in windows if w["display"] == str(self._target_display)), None)
+        if user is not None:
+            self.agent_account_user = user
 
     def _reset_agent_bridge(self):
         if self._agent_bridge is not None:
@@ -4835,6 +4873,16 @@ class AutoReplyWorker:
         with self._manual_lock:
             recent = list(self._recent_manual_texts) + list(self._recent_reply_texts)
         return any(text and text in chat_line for text in recent)
+
+    def was_sent_exactly(self, chat_line):
+        """
+        画面のこの行の本文が、このアプリが最近送った文（手入力・自動返信・AI）とまったく同じか。
+        自分のアカウント名を覚えるときに使う。⚠️「含む」では数えない（他の人の「こんにちは！よろしく」を自分と取り違える）
+        """
+        line = (chat_line or "").strip()
+        with self._manual_lock:
+            recent = list(self._recent_manual_texts) + list(self._recent_reply_texts)
+        return bool(line) and any(line == (text or "").strip() for text in recent)
 
     # 自動返信で送った文（{名前} を差し込んだもの）を覚えておく件数
     MAX_RECENT_REPLY_TEXTS = 20
@@ -6405,6 +6453,7 @@ class AutoReplyWorker:
                 # AI へ新しい行を渡す（段階5）。⚠️ 渡すだけ。AI の判断と声は別のスレッドで、監視は待たない
                 if agent_active:
                     own_replies = [r for r in keywords_map.values() if r and KEYWORD_NAME_PLACEHOLDER not in r]
+                    self._update_agent_account(d)
                     try:
                         # ルームの様子（ルーム名・ゲスト・席・アナウンス）も渡す。読むだけ
                         self._agent_bridge.on_room(read_room_info(xml_dump, self._target_display), chat_rows)
@@ -9708,9 +9757,18 @@ class App(ctk.CTk):
         self._agent_gravity_on = self.db.get_setting(self.AGENT_GRAVITY_SETTING, "0") == "1"
         # このアカウントの表示名（監視スレッドが読むので素の値で持つ。設定を保存したら入れ替える）
         self._agent_self_names = AgentConfig.load(self.db.get_setting).self_name_list
+        # チャットしている自分のアカウントの名前（Android のユーザーごと）。自分が送った文の行から覚える
+        try:
+            self._agent_account_names = json.loads(self.db.get_setting(self.AGENT_ACCOUNT_NAMES_SETTING, "") or "{}")
+        except ValueError:
+            self._agent_account_names = {}
+        self._agent_task_names = self._load_task_account_names()
+        self._agent_account_votes = {}       # {ユーザー: {名前: 見た回数}}（覚える前の候補）
         self.agent_bridge = GravityChatBridge(self._on_gravity_events, active=self._agent_gravity_active,
-                                              self_names=lambda: self._agent_self_names,
-                                              on_room=self._on_gravity_room)
+                                              self_names=self._agent_my_names,
+                                              on_room=self._on_gravity_room,
+                                              account=self._gravity_account_name,
+                                              on_own_name=self._learn_gravity_account_name)
         self.worker.set_agent_bridge(self.agent_bridge)
         # 監視ワーカーで起きた、AIに関わること（実際に送れたか・チャット欄が隠れたか）も判断のログに出す
         self.worker.agent_note = lambda message: self._post_to_ui(lambda: self._append_agent_log(message))
@@ -9950,6 +10008,11 @@ class App(ctk.CTk):
          "人の話し方や好みの印象を、AIに推定させて覚えます（例: 冗談が好きそう〈推定・確からしさ低〉）。\n"
          "推定は事実として扱わず、本人に向かって言いません。接し方の参考にするだけです。\n"
          "「会話を覚える」がONのときだけ動きます。\n\n推定するようにしますか？"),
+        ("journal_enabled", "📒 会話をファイルに残す（自分のアカウントごと・相手ごと。メモ帳で読める）",
+         "GRAVITYのチャットの会話の全文を、アプリのフォルダの「AIの記憶」に、自分のアカウントごと・話した相手ごとのファイルで残します。\n"
+         "「会話を覚える」もONなら、相手ごとのファイルに、AIがまとめた「覚えていること」も書きます。\n"
+         "ルームの他の人の名前と発言がそのまま入ります。このPCの中だけで、自動では消しません（フォルダを開いて、読む・消すができます）。\n\n"
+         "会話をファイルに残すようにしますか？"),
         ("relationships_enabled", "関係の値を持つ（なじみ・やりとりの温かさ）",
          "AIとその人との「なじみ」（話した量）と「温かさ」（やりとりが和やかか）を数値で持ちます。\n"
          "1回に動く量には上限があり、値は口に出しません。接し方を変えるためだけに使います。\n"
@@ -9960,7 +10023,7 @@ class App(ctk.CTk):
         section = ctk.CTkFrame(parent)
         section.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(section, text="🧠 記憶", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(10, 2))
-        ctk.CTkLabel(section, text="どれも最初はOFFです。覚えたことはこのPCの中（agent_data.db）だけにあり、ここで見て消せます。",
+        ctk.CTkLabel(section, text="どれも最初はOFFです。覚えたことはこのPCの中（agent_data.db と「AIの記憶」フォルダ）だけにあり、ここで見て消せます。",
                      justify="left", text_color="gray70").pack(anchor="w", padx=12, pady=(0, 6))
         config = AgentConfig.load(self.db.get_setting)
         self.agent_memory_vars = {}
@@ -9992,7 +10055,9 @@ class App(ctk.CTk):
         ctk.CTkButton(buttons, text="🗑 記憶を全部消す", width=130, fg_color="red", hover_color="darkred",
                       command=self.delete_all_agent_memory).pack(side="left", padx=(0, 6))
         ctk.CTkButton(buttons, text="↺ 関係の値をリセット", width=150, fg_color="#555555", hover_color="#3a3a3a",
-                      command=self.reset_agent_relationships).pack(side="left")
+                      command=self.reset_agent_relationships).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(buttons, text="📂 フォルダを開く", width=120, fg_color="#555555", hover_color="#3a3a3a",
+                      command=self.open_agent_journal_folder).pack(side="left")
         self._agent_memory_ids = []
 
     def on_agent_memory_toggled(self, name):
@@ -10025,11 +10090,12 @@ class App(ctk.CTk):
             self.agent_memory_listbox.insert("end", "（まだありません）")
             return
         scope_labels = {"person": "人", "room": "この場", "self": "自分", "impression": "印象（推定）"}
-        for mem_id, scope, person, content, conf, _imp, _upd, _pin in store.memories(limit=200):
-            who = f"{person}・" if person else ""
+        for mem_id, account, scope, person, content, conf in store.memories_with_account(limit=200):
+            where = f"{account}／" if account else ""
+            who = f"{person}・" if person and scope in ("person", "impression") else ""
             confidence = {"low": "低", "mid": "中", "high": "高"}.get(conf, "?")
             mark = f"・確からしさ{confidence}" if scope == "impression" else ""
-            self.agent_memory_listbox.insert("end", f"[{who}{scope_labels.get(scope, scope)}{mark}] {content}")
+            self.agent_memory_listbox.insert("end", f"[{where}{who}{scope_labels.get(scope, scope)}{mark}] {content}")
             self._agent_memory_ids.append(mem_id)
         if not self._agent_memory_ids:
             self.agent_memory_listbox.insert("end", "（まだありません）")
@@ -10055,6 +10121,15 @@ class App(ctk.CTk):
         store.delete_all_memories()
         self._append_agent_log("🗑 記憶を全部消しました。")
         self.refresh_agent_memory_list()
+
+    def open_agent_journal_folder(self):
+        """長期記憶ファイルのフォルダ（AIの記憶）を開く。無ければ作る"""
+        folder = AGENT_JOURNAL_DIR
+        try:
+            os.makedirs(folder, exist_ok=True)
+            os.startfile(folder)
+        except Exception as e:
+            messagebox.showerror("記憶", f"フォルダを開けませんでした。\n{folder}\n{e}")
 
     def reset_agent_relationships(self):
         store = self._agent_memory_store()
@@ -10176,6 +10251,74 @@ class App(ctk.CTk):
         if self.agent_runtime is not None:
             self.agent_runtime.config.initiative_enabled = on
         self._append_agent_log("💭 静かなときに自分から話しかけます。" if on else "💭 自分から話しかけるのをやめました。")
+
+    AGENT_ACCOUNT_NAMES_SETTING = "agent.account_names"
+
+    def _load_task_account_names(self):
+        """タスク機能がマイページから覚えた、アカウントごとの名前 {ユーザー: 名前}"""
+        self._agent_task_names_at = time.time()
+        try:
+            data = json.loads(self.db.get_setting(GravityTaskWorker.ACCOUNTS_SETTING, "") or "{}")
+        except ValueError:
+            return {}
+        return {str(user): record.get("name", "") for user, record in data.items()
+                if isinstance(record, dict) and record.get("name")}
+
+    def _current_account_user(self):
+        return str(self.worker.agent_account_user or "0")
+
+    def _gravity_account_name(self):
+        """
+        監視スレッドから。今チャットしている自分のアカウントの名前。
+        見分け方の順: 自分が送った文の行から覚えた名前 → タスク機能が覚えた名前 → 設定の「自分のアカウント名」→ 「本体のGRAVITY」など
+        """
+        user = self._current_account_user()
+        if user not in self._agent_account_names and user not in self._agent_task_names                 and time.time() - self._agent_task_names_at > 60:
+            self._agent_task_names = self._load_task_account_names()     # タスク機能があとから覚えたかもしれない（1分に1回だけ読む）
+        name = self._agent_account_names.get(user) or self._agent_task_names.get(user)
+        if not name and self._agent_self_names:
+            name = self._agent_self_names[0]
+        return clean_display_name(name) if name else gravity_account_label(user)
+
+    def _agent_my_names(self):
+        """自分の発言を見分ける名前（設定の名前＋今のアカウントの覚えた名前）"""
+        names = list(self._agent_self_names)
+        user = self._current_account_user()
+        for name in (self._agent_account_names.get(user), self._agent_task_names.get(user)):
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    # 同じ名前を、送った文の行で何回見たら覚えるか。⚠️ 1回だと、他の人がたまたま同じ「おはよう」を書いたときに取り違える
+    ACCOUNT_NAME_VOTES = 2
+
+    def _learn_gravity_account_name(self, name, text=""):
+        """
+        監視スレッドから。自分が送った文の行の名前を、今のアカウントの名前として覚える。
+        送った文とまったく同じ本文の新しい行で、同じ名前を2回見たら覚える（切れて出た名前は、切れていない方を残す）
+        """
+        name = clean_display_name(name)
+        user = self._current_account_user()
+        known = self._agent_account_names.get(user, "")
+        if not name or name == known or (known and known.startswith(name)):
+            return
+        if not self.worker.was_sent_exactly(text):
+            return
+        if not (known and name.startswith(known)):       # 切れて覚えていた名前の続きが見えたときは、すぐ直す
+            votes = self._agent_account_votes.setdefault(user, {})
+            votes[name] = votes.get(name, 0) + 1
+            if votes[name] < self.ACCOUNT_NAME_VOTES:
+                return
+        self._agent_account_votes.pop(user, None)
+        names = dict(self._agent_account_names)
+        names[user] = name
+        self._agent_account_names = names
+        try:
+            self.db.save_setting(self.AGENT_ACCOUNT_NAMES_SETTING, json.dumps(names, ensure_ascii=False))
+        except Exception:
+            pass
+        label = gravity_account_label(user, name)
+        self._post_to_ui(lambda: self._append_agent_log(f"🪪 チャットしているアカウントを覚えました: {label}"))
 
     def _on_gravity_room(self, info):
         """監視スレッドから。ルームの様子を AI に渡し、判断のログに短く出す"""
@@ -10370,6 +10513,7 @@ class App(ctk.CTk):
             provider_factory=self._agent_provider,
             speak=self._agent_speak,
             post_chat=self._agent_post_chat,
+            journal=ConversationJournal(AGENT_JOURNAL_DIR, enabled_getter=lambda: True),
             stop_speech=self.speech_service.stop_all,
             store=store,
             on_log=lambda line: self._post_to_ui(lambda: self._append_agent_log(line)),

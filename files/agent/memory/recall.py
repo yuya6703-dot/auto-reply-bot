@@ -105,11 +105,21 @@ def warmth_label(value):
     return "ふつう"
 
 
+ACCOUNT_SEPARATOR = "／"      # 人の目印は「自分のアカウント／相手の名前」（自分のアカウントが違えば別の人として覚える）
+
+
+def display_of(person_key):
+    """人の目印から、相手の名前だけを取り出す"""
+    return (person_key or "").split(ACCOUNT_SEPARATOR, 1)[-1]
+
+
 class MemoryKeeper:
-    def __init__(self, store, config_getter, clock=time.time):
+    def __init__(self, store, config_getter, clock=time.time, account_getter=lambda: ""):
         self._store = store
         self._config = config_getter
         self._clock = clock
+        # 今チャットしている自分のアカウント（2026-10-16 本人「アカウント別に」）。空ならアカウントを分けない
+        self._account = account_getter
         self._lock = threading.Lock()
         self._last_summary_at = clock()
         self._pending_lines = 0           # 前の整理から増えた、他の人の発言の数
@@ -120,18 +130,20 @@ class MemoryKeeper:
         name = clean_name(name)
         if not name:
             return None
+        account = self._account() or ""
         key = self._known_key(name)
         if key:
-            self._store.upsert_person(key, name)
+            self._store.upsert_person(key, name, account)
             return key
-        self._store.upsert_person(name, name)
-        return name
+        key = f"{account}{ACCOUNT_SEPARATOR}{name}" if account else name
+        self._store.upsert_person(key, name, account)
+        return key
 
     def _known_key(self, name):
-        """会話に出てきた名前のうち、知っている人の目印（新しく作らない）"""
+        """会話に出てきた名前のうち、今の自分のアカウントで知っている人の目印（新しく作らない）"""
         name = clean_name(name)
-        for key, display, _first, _last in self._store.persons():
-            if same_person(name, key) or same_person(name, display):
+        for key, display, _first, _last in self._store.persons(account=self._account() or ""):
+            if same_person(name, display_of(key)) or same_person(name, display):
                 return key
         return None
 
@@ -175,8 +187,8 @@ class MemoryKeeper:
             since = self._last_summary_at
         lines = [describe_event(e, now) for e in window.recent_events() if e.observed_at >= since - 60]
         known = []
-        for _id, scope, key, content, conf, _imp, _upd, _pin in self._store.memories(limit=30):
-            known.append(f"- [{key or scope}] {content}")
+        for _id, scope, key, content, conf, _imp, _upd, _pin in self._store.memories(limit=30, account=self._account() or ""):
+            known.append(f"- [{display_of(key) if key else scope}] {content}")
         asks = ["memories: 覚えておく価値のあること（最大5件）。scope は person（人について）/ room（この場について）/ "
                 "self（あなた自身が言ったこと・約束）。person はその人の名前、importance は 0〜1"]
         if config.impressions_enabled:
@@ -231,7 +243,7 @@ class MemoryKeeper:
                 importance = 0.5
             confidence = item.get("confidence") if item.get("confidence") in CONFIDENCES else "mid"
             ttl = (180 if importance >= 0.7 else 30) * DAY
-            self._store.add_memory(scope, key, content, confidence, importance, ttl)
+            self._store.add_memory(scope, key, content, confidence, importance, ttl, self._account() or "")
             kept += 1
         if config.impressions_enabled:
             for item in (data.get("impressions") or [])[:3]:
@@ -243,7 +255,7 @@ class MemoryKeeper:
                     dropped += 1
                     continue
                 confidence = item.get("confidence") if item.get("confidence") in CONFIDENCES else "low"
-                self._store.add_memory(SCOPE_IMPRESSION, key, content, confidence, 0.4, 90 * DAY)
+                self._store.add_memory(SCOPE_IMPRESSION, key, content, confidence, 0.4, 90 * DAY, self._account() or "")
                 kept += 1
         if config.relationships_enabled:
             for item in (data.get("relationships") or [])[:5]:
@@ -259,6 +271,36 @@ class MemoryKeeper:
                 delta = min(WARMTH_STEP_LIMIT, max(-WARMTH_STEP_LIMIT, delta))
                 self._store.adjust_relationship(key, 0.0, delta, str(item.get("reason") or "会話の雰囲気")[:40])
         return kept, dropped
+
+    def summary_for_files(self):
+        """
+        長期記憶ファイル用に、今の自分のアカウントの「覚えていること」を相手ごとにまとめる（journal.py が書き出す）。
+        戻り値: {"people": {相手の名前: [行, ...]}, "room": [行, ...]}
+        """
+        config = self._config()
+        account = self._account() or ""
+        people = {}
+        for key, display, _first, _last in self._store.persons(account=account):
+            lines = []
+            for _id, scope, _k, content, conf, _imp, upd, _pin in self._store.memories(person_key=key, limit=50):
+                day = time.strftime("%Y-%m-%d", time.localtime(upd or 0))
+                if scope == SCOPE_IMPRESSION:
+                    if config.impressions_enabled:
+                        lines.append(f"- 印象（推定・確からしさ{CONFIDENCE_LABELS.get(conf, '低')}）: {content}（{day}）")
+                else:
+                    lines.append(f"- {content}（{day}）")
+            if config.relationships_enabled:
+                rel = self._store.relationship(key)
+                if rel:
+                    lines.append(f"- 関係: {familiarity_label(rel['familiarity'])}・やりとりは{warmth_label(rel['warmth'])}"
+                                 f"（なじみ {rel['familiarity']:.0f}・温かさ {rel['warmth']:+.0f}）")
+            people[display or display_of(key)] = lines
+        room = []
+        for _id, scope, key, content, _conf, _imp, upd, _pin in self._store.memories(limit=200, account=account):
+            if scope in (SCOPE_ROOM, SCOPE_SELF):
+                label = "この場" if scope == SCOPE_ROOM else "AI自身"
+                room.append(f"- {label}: {content}（{time.strftime('%Y-%m-%d', time.localtime(upd or 0))}）")
+        return {"people": people, "room": room}
 
     def postpone(self):
         """整理を終えた・失敗した。次の整理は、また発言がたまってから"""
@@ -280,22 +322,23 @@ class MemoryKeeper:
                 if key and key not in speakers:
                     speakers.append(key)
         for key in speakers:
+            name = display_of(key)
             for mem_id, scope, _key, content, conf, _imp, _upd, _pin in self._store.memories(person_key=key, limit=4):
                 if scope == SCOPE_IMPRESSION and not config.impressions_enabled:
                     continue
                 if scope == SCOPE_IMPRESSION:
-                    lines.append(f"[{key}・印象（推定・確からしさ{CONFIDENCE_LABELS.get(conf, '低')}）] {content}")
+                    lines.append(f"[{name}・印象（推定・確からしさ{CONFIDENCE_LABELS.get(conf, '低')}）] {content}")
                 else:
-                    lines.append(f"[{key}] {content}")
+                    lines.append(f"[{name}] {content}")
                 used.add(mem_id)
             if config.relationships_enabled:
                 rel = self._store.relationship(key)
                 if rel:
-                    lines.append(f"[{key}] あなたとは: {familiarity_label(rel['familiarity'])}・"
+                    lines.append(f"[{name}] あなたとは: {familiarity_label(rel['familiarity'])}・"
                                  f"やりとりは{warmth_label(rel['warmth'])}")
         budget = MAX_RECALL_ITEMS - len([line for line in lines if "あなたとは:" not in line])
         for mem_id, scope, key, content, _conf, _imp, _upd, _pin in sorted(
-                self._store.memories(limit=50), key=lambda r: (-(r[5] or 0), -(r[6] or 0))):
+                self._store.memories(limit=50, account=self._account() or ""), key=lambda r: (-(r[5] or 0), -(r[6] or 0))):
             if budget <= 0:
                 break
             if mem_id in used or scope in (SCOPE_PERSON, SCOPE_IMPRESSION):

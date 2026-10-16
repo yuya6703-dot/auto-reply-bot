@@ -87,6 +87,8 @@ class AgentDeps:
     # (Utterance, CancelToken) -> POSTED / CHAT_DISCARDED / CHAT_FAILED / SPEECH_CANCELLED。
     # 確認（承認して送る）は呼ばれた側が行う。無ければチャットには書き込めない
     post_chat: Callable = None
+    # 長期記憶ファイル（memory/journal.py の ConversationJournal）。無ければ書かない
+    journal: object = None
 
 
 class AgentRuntime:
@@ -101,7 +103,10 @@ class AgentRuntime:
         self.window = ConversationWindow(clock=self._clock)
         self.usage = UsageTracker(deps.store, clock=self._clock)
         self.persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
-        self.memory = MemoryKeeper(deps.store, lambda: self.config, clock=self._clock)
+        # 今チャットしている自分のアカウント（出来事の meta["account"] から。監視が見分けて付ける）
+        self._account = ""
+        self.memory = MemoryKeeper(deps.store, lambda: self.config, clock=self._clock,
+                                   account_getter=lambda: self._account)
 
         self._lock = threading.RLock()
         self._thread = None
@@ -421,7 +426,11 @@ class AgentRuntime:
         now = self._clock()
         turn_id = self._new_turn(events, now)
         self.window.add_events(events)      # 保留から戻った出来事は、窓が同じものを2度入れない
+        account = next((e.meta.get("account") for e in events if e.meta.get("account")), None)
+        if account:
+            self._account = account
         self.memory.observe(events)
+        self._journal("record_events", events)
         # --- 規則の関所（AI を呼ばない） ---
         snap = self._snapshot(now)
         self._warn_budget(snap)
@@ -535,6 +544,9 @@ class AgentRuntime:
             delivered = self._speak(utterance, decision, turn_id)
         if delivered and decision.target:
             self.memory.note_interaction(decision.target)
+        if delivered:
+            self._journal("record_reply", self._account, decision.target, utterance.text,
+                          self.config.output_mode, self.config.display_name)
 
     def _precheck(self, utterance, decision, fresh_seq):
         if self.inbox.fresh_seq != fresh_seq or self._listening:
@@ -640,8 +652,22 @@ class AgentRuntime:
         if cancel.cancelled:
             return
         kept, dropped = self.memory.apply_summary(response.structured, speakers)
+        self._journal("write_summaries", self._account, self.memory.summary_for_files())
         note = f"（繊細な事柄など{dropped}件は覚えなかった）" if dropped else ""
         self.log.write(f"🧠 覚えておくことを整理しました（新しく{kept}件）{note}。")
+
+    def _journal(self, method, *args):
+        """長期記憶ファイルに書く（ONのときだけ）。⚠️ 書けなくても（ファイルが開かれている など）エージェントは止めない"""
+        journal = self.deps.journal
+        if journal is None or not self.config.journal_enabled:
+            return
+        try:
+            getattr(journal, method)(*args)
+        except Exception:
+            self.deps.on_error(traceback.format_exc())
+            if not getattr(self, "_journal_warned", False):
+                self._journal_warned = True
+                self.log.write("⚠️ 長期記憶ファイルに書けませんでした（詳しくは error_log.txt）。会話は続けます。")
 
     def _usage_recorder(self, turn_id, purpose):
         """AI を呼ぶたびに利用量を残す（失敗した呼び出しも1回と数える）"""
