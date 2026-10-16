@@ -9841,6 +9841,11 @@ class App(ctk.CTk):
                       variable=self.agent_initiative_var, command=self.on_agent_initiative_toggled).pack(
             anchor="w", padx=12, pady=(0, 6))
 
+        # 話しかけられたら続けて話す（2026-10-16 本人「間を空けなくても連続して会話できるように」。頼まれた機能なので既定ON）
+        self.agent_conversation_var = ctk.BooleanVar(value=AgentConfig.load(self.db.get_setting).conversation_enabled)
+        ctk.CTkSwitch(control, text="💬 話しかけられたら続けて話す（呼ばれた・話している相手には1分に4回まで。3秒はあける）",
+                      variable=self.agent_conversation_var, command=self.on_agent_conversation_toggled).pack(
+            anchor="w", padx=12, pady=(0, 6))
         # 頼まれたら調べる（2026-10-16 本人「調べるからちょっと待っててねみたいな一言」「チャットの中の話ね」）
         lookup_config = AgentConfig.load(self.db.get_setting)
         self.agent_lookup_var = ctk.BooleanVar(value=lookup_config.lookup_enabled)
@@ -10705,6 +10710,14 @@ class App(ctk.CTk):
         if self.agent_runtime is not None:
             self.agent_runtime.config.initiative_enabled = on
         self._append_agent_log("💭 静かなときに自分から話しかけます。" if on else "💭 自分から話しかけるのをやめました。")
+
+    def on_agent_conversation_toggled(self):
+        on = bool(self.agent_conversation_var.get())
+        self._set_agent_config_value("conversation_enabled", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.conversation_enabled = on
+        self._append_agent_log("💬 話しかけられたら続けて話します。" if on
+                               else "💬 話しかけられても、ふだんの上限で返します（チャットは1分に1通）。")
 
     def unmute_agent(self):
         """オーナーの合図「静かにして」を PC から解く"""

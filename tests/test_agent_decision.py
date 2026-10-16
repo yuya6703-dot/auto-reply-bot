@@ -73,7 +73,7 @@ check("アカウント名だけで呼ばれても R6 を越える", g3.check([ev
       == PASS)
 
 print("■ 呼ばれたのに回数の上限に当たったら、捨てずに空くまで待つ（2026-10-16）")
-chat = AgentConfig(ai_name="テストちゃん", output_mode="chat")
+chat = AgentConfig(ai_name="テストちゃん", output_mode="chat", conversation_enabled=False)     # ふだんの上限（続けて話すはOFF）
 g4 = Gate(chat)
 r = g4.check([ev("@テストちゃ.. 調子どう？")], GateSnapshot(now, utterance_times=[now - 55]))
 check("呼ばれていれば保留（1分の上限が空くまで。55秒前に送ったなら約5秒）", r.outcome == HOLD and r.rule_id == "R7"
@@ -186,7 +186,7 @@ b.close()
 
 print("■ T3 直前に喋ったら規則で黙る（AI を呼ばない）")
 calls = len(a.decide_calls())
-a.say("ところで今日は暑いね")
+a.say("ところで今日は暑いね", speaker="通りすがり")      # 話している相手（さっき返事をした人）ではない
 check("T3 規則 R6 の記録", a.wait_decisions(2) and a.decisions()[-1][3] == "R6" and a.decisions()[-1][2] == "rule",
       a.decisions())
 check("T3 模擬AIは呼ばれない", len(a.decide_calls()) == calls)

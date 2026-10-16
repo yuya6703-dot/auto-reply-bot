@@ -34,6 +34,7 @@
 | `test_agent_memory_upkeep.py` | 不要 | 記憶の手入れ（思い出すと30日残る・1年まで、古くなった記憶を番号で消す・見せていない番号は消さない）、予定の記憶（今日の日付を渡す・日付の分かる予定だけ・あと何日/今日/過ぎた・聞いたら終わり・2週間で忘れる）、1日のまとめ（静かなときに前の日の分・2度作らない・画面から今日の分・OFFなら作らない） |
 | `test_agent_hearing.py` | 不要 | 声を聞く（にせの音声入力・**機材に触らない・通信しない**）: 音の大きさ、話し声のかたまり（頭を切らない・物音は捨てる・しきい値・15秒で切る）、WAV、聞き続ける・止める・開けないとき、Gemini へ音を送る形（inlineData）、文字にして声の出来事にする（だれか・記録ファイル）、空・読み上げの聞き返し・1時間の上限・OFF |
 | `test_agent_voice_style.py` | 不要 | AIが話し方を決めて読み上げツールで話す（**通信しない**）: 声の様子の選び方（近い名前・感情から）、速さ・抑揚・高さ・間・大きさ・緩急（範囲に収める・ふつうは入れない）、エンジンへの渡し方（知らない項目は入れない・話し方ごとに覚える）、音声サービス、声で答えるときだけ選ばせる |
+| `test_agent_conversation.py` | 不要 | 話しかけられたら続けて話す: 呼ばれたらふだんの上限を越えて返す（1分に4回・チャットは3秒あける）、返事をした相手は名前を呼ばれなくても続けて返す（90秒）、ほかの人・OFF は今まで通り |
 | `agent_harness.py` | ― | 上のAIのテストが共通で使う器（模擬のAI・にせの声・一時フォルダの `agent_data.db`）。テストそのものではない |
 
 ## 実行
@@ -66,6 +67,7 @@ python tests/test_agent_owner.py
 python tests/test_agent_memory_upkeep.py
 python tests/test_agent_hearing.py
 python tests/test_agent_voice_style.py
+python tests/test_agent_conversation.py
 ```
 
 ## テスト用の画面（fixtures/）の作り方

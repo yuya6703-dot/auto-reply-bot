@@ -48,6 +48,7 @@ class GateSnapshot:
     cost_today: float = 0.0
     cost_month: float = 0.0
     muted: bool = False                     # オーナーの合図で静かにしている（R12）
+    partners: tuple = ()                    # 今話している相手（名前を呼ばれなくても呼ばれたのと同じに扱う）
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,12 @@ def is_ignored(event, config):
     return not event.is_self and is_ignored_name(event.speaker, config)
 
 
+def is_partner(event, partners):
+    """今話している相手の発言か（AI が返事をした相手。少しのあいだ、名前を呼ばれなくても呼ばれたのと同じ）"""
+    return bool(partners) and not event.is_self and bool(event.speaker) \
+        and any(name_matches(event.speaker, p) for p in partners)
+
+
 def is_meaningless(event, ignore_words):
     text = (event.text or "").strip()
     return not text or bool(_NO_WORD.match(text)) or text in ignore_words
@@ -119,7 +126,7 @@ class Gate:
         fresh = [e for e in fresh if not is_ignored(e, c)]
         if not fresh:
             return GateResult(OBSERVE, "R11")
-        strong = any(is_strong_signal(e, c.call_names) for e in fresh)
+        strong = any(is_strong_signal(e, c.call_names) or is_partner(e, snap.partners) for e in fresh)
         if snap.listening:
             return GateResult(HOLD, "R5", None, strong)
         if not strong:
@@ -129,10 +136,10 @@ class Gate:
                 remaining = snap.last_utterance_end + c.min_gap_after_speaking - snap.now
                 if remaining > 0:
                     return GateResult(HOLD, "R6", remaining, strong)
-        if not self._within_limits(snap):
+        if not self._within_limits(snap, strong):
             # 呼ばれたときは捨てずに、1分の上限が空くまで待ってから返事する（1時間の上限なら記録だけ）。
             # 2026-10-16 実物: 返事の55秒後にまた呼ばれ、1分1通の上限で記録だけになり、返事をしないままだった
-            wait = self._wait_for_limit(snap)
+            wait = self._wait_for_limit(snap, strong)
             if strong and wait is not None:
                 return GateResult(HOLD, "R7", wait, strong)
             return GateResult(OBSERVE, "R7", None, strong)
@@ -146,23 +153,33 @@ class Gate:
             return GateResult(HOLD, "R10", max(0.1, recent[0] + 60 - snap.now), strong)
         return GateResult(PASS, None, None, strong)
 
-    def _within_limits(self, snap):
-        """発言の回数の上限（応答のしかたで変わる。チャットは1分に1通・1時間に20通）"""
-        per_minute, per_hour = self.config.utterance_limits
+    def _within_limits(self, snap, strong=False):
+        """
+        発言の回数の上限（応答のしかたで変わる。チャットは1分に1通・1時間に20通）。
+        呼ばれた・話している相手なら会話の上限（1分に4回・1時間に60回。前の発言から3秒あける）
+        """
+        per_minute, per_hour, gap = self.config.limits_for(strong)
         last_minute = [t for t in snap.utterance_times if snap.now - t < 60]
         last_hour = [t for t in snap.utterance_times if snap.now - t < 3600]
+        recent = max(snap.utterance_times, default=None)
+        if gap and recent is not None and snap.now - recent < gap:
+            return False
         return len(last_minute) < per_minute and len(last_hour) < per_hour
 
-    def _wait_for_limit(self, snap):
-        """1分の上限が空くまでの秒数。1時間の上限に当たっていれば None（待っても空かない）"""
-        per_minute, per_hour = self.config.utterance_limits
+    def _wait_for_limit(self, snap, strong=False):
+        """上限が空くまでの秒数。1時間の上限に当たっていれば None（待っても空かない）"""
+        per_minute, per_hour, gap = self.config.limits_for(strong)
         if len([t for t in snap.utterance_times if snap.now - t < 3600]) >= per_hour:
             return None
+        waits = [0.1]
+        recent = max(snap.utterance_times, default=None)
+        if gap and recent is not None:
+            waits.append(recent + gap - snap.now + 0.1)
         minute = sorted(t for t in snap.utterance_times if snap.now - t < 60)
-        if len(minute) < per_minute:
-            return 0.1
-        return max(0.1, minute[len(minute) - per_minute] + 60 - snap.now + 0.5)
+        if len(minute) >= per_minute:
+            waits.append(minute[len(minute) - per_minute] + 60 - snap.now + 0.5)
+        return max(waits)
 
-    def utterance_allowed(self, snap):
+    def utterance_allowed(self, snap, strong=False):
         """C5: 判断の間に発言の上限を超えていないか（喋る直前にもう一度見る）"""
-        return self._within_limits(snap)
+        return self._within_limits(snap, strong)

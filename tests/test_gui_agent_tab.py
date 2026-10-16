@@ -126,6 +126,7 @@ class Harness(ctk.CTk):
     on_agent_initiative_toggled = A.App.on_agent_initiative_toggled
     on_agent_lookup_toggled = A.App.on_agent_lookup_toggled
     unmute_agent = A.App.unmute_agent
+    on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
     _agent_voice_style_map = A.App._agent_voice_style_map
     _agent_voice_styles = A.App._agent_voice_styles
 
@@ -719,6 +720,16 @@ check("ファイルがOFFなら、今日のまとめは作れないと案内", d
       or dialogs[-1][0] == "info" and "開始" in dialogs[-1][2], dialogs[-1])
 h.agent_memory_vars["digest_enabled"].set(False)
 h.on_agent_memory_toggled("digest_enabled")
+
+print("■ 話しかけられたら続けて話す（既定ON。2026-10-16）")
+check("既定はON", h.agent_conversation_var.get() is True)
+h.agent_conversation_var.set(False)
+h.on_agent_conversation_toggled()
+check("OFFにできる（動いているエージェントにもすぐ効く）", db.get_setting("agent.conversation_enabled") == "0"
+      and h.agent_runtime.config.conversation_enabled is False)
+h.agent_conversation_var.set(True)
+h.on_agent_conversation_toggled()
+check("ONに戻せる", h.agent_runtime.config.conversation_enabled is True)
 
 print("■ 反応しない人・静かにを解く（2026-10-16）")
 h.agent_ignored_entry.insert(0, "荒らし、いたずら")

@@ -65,6 +65,13 @@ class AgentConfig:
     # 呼ばれたときは、判断と文を1回で頼む（AIを呼ぶのが2回→1回。2026-10-16 本人「応答遅いの気になる」→「それもやろう」）。
     # 呼ばれていないときは今まで通り判断だけ先に頼む（黙るなら文を作らない＝費用がかからない）
     combined_when_addressed: bool = True
+    # 話しかけられたら続けて話す（2026-10-16 本人「間を空けなくても連続して会話できるように…たくさん話したい人からしたら寂しい」）。
+    # 呼ばれて返すとき・話している相手に返すときだけ、ふだんの上限（チャットは1分1通）より多く返す。連投に見えないよう最低3秒あける
+    conversation_enabled: bool = True
+    conversation_max_per_minute: int = 4
+    conversation_max_per_hour: int = 60
+    conversation_min_gap_seconds: float = 3.0
+    conversation_partner_seconds: float = 90.0    # 返事をした相手は、このあいだ「話している相手」（名前を呼ばれなくても返す）
     # 静かなときに自分から話すか考える（既定OFF。外に見える動きなので本人がONにしたときだけ）
     initiative_enabled: bool = False
     initiative_quiet_seconds: float = 300.0       # これだけ誰も書かなかったら
@@ -112,6 +119,7 @@ class AgentConfig:
     # 画面で変える項目
     EDITABLE = ("ai_name", "self_names", "owner_names", "ignored_people", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
+                "conversation_enabled",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
                 "lookup_enabled", "lookup_wait_text", "digest_enabled", "hearing_enabled", "hearing_device",
                 "hearing_threshold", "hearing_hints")
@@ -156,6 +164,15 @@ class AgentConfig:
             if name not in names:
                 names.append(name)
         return names
+
+    def limits_for(self, strong):
+        """(1分の上限, 1時間の上限, 前の発言から空ける秒数)。呼ばれた・話している相手なら会話の上限（ふだんより多い）"""
+        per_minute, per_hour = self.utterance_limits
+        if strong and self.conversation_enabled:
+            # 間を空けるのはチャットだけ（連投に見えないように）。声は喋っている時間がそのまま間になる
+            gap = self.conversation_min_gap_seconds if self.output_mode == OUTPUT_CHAT else 0.0
+            return (max(per_minute, self.conversation_max_per_minute), max(per_hour, self.conversation_max_per_hour), gap)
+        return per_minute, per_hour, 0.0
 
     @property
     def utterance_limits(self):

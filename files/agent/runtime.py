@@ -28,7 +28,7 @@ from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HO
                        Decision, DecisionFailed, call_llm, request_decision)
 from .gate import HOLD as GATE_HOLD
 from .gate import OBSERVE as GATE_OBSERVE
-from .gate import Gate, GateSnapshot, is_ignored, is_ignored_name, is_strong_signal
+from .gate import Gate, GateSnapshot, is_ignored, is_ignored_name, is_partner, is_strong_signal
 from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, Utterance, precheck, request_decision_with_text,
                          request_utterance)
 from .events import (KIND_CHAT_MESSAGE, KIND_SYSTEM, KIND_VOICE_UTTERANCE, RECENT_BLOCK_BEGIN, RECENT_BLOCK_END,
@@ -112,7 +112,8 @@ class AgentRuntime:
         self.log = AuditLog(deps.on_log, deps.on_notice)
         self.gate = Gate(config)
         self.inbox = Inbox(config.inbox_max, config.settle_seconds,
-                           strong_signal=lambda e: (is_strong_signal(e, self.config.call_names)
+                           strong_signal=lambda e: ((is_strong_signal(e, self.config.call_names)
+                                                     or is_partner(e, self._partner_names()))
                                                     and not is_ignored(e, self.config)))
         self.window = ConversationWindow(clock=self._clock)
         self.usage = UsageTracker(deps.store, clock=self._clock)
@@ -154,6 +155,7 @@ class AgentRuntime:
         self._last_fresh_at = None         # 他の人の新しい出来事が最後に届いた時刻
         self._last_initiative_at = 0.0     # 自分から話すか考えた時刻
         self._muted_until = None           # オーナーの合図で静かにしている間（この時刻まで）
+        self._partners = {}                # 話している相手 {名前: この時刻まで}（返事をした相手。続けて話せるように）
         self._digest_request = None        # 「今のまとめを作る」と頼まれた日（画面から）
         self._heard = []                   # 文字にした声 [(時刻, 秒)]（1時間の上限）
         self._hearing_capped = False       # 上限のことを言ったか（何度も言わない）
@@ -520,7 +522,17 @@ class AgentRuntime:
                                 utterance_times=list(self._utterance_times),
                                 decision_times=list(self._decision_times), calls_today=calls,
                                 cost_today=cost_today, cost_month=cost_month,
-                                muted=self._muted_until is not None and self._muted_until > now)
+                                muted=self._muted_until is not None and self._muted_until > now,
+                                partners=self._partner_names(now))
+
+    def _partner_names(self, now=None):
+        """今話している相手（話しかけられたら続けて話すがONのときだけ）"""
+        if not self.config.conversation_enabled:
+            return ()
+        now = self._clock() if now is None else now
+        with self._lock:
+            self._partners = {name: until for name, until in self._partners.items() if until > now}
+            return tuple(self._partners)
 
     def _hold(self, events, wait_seconds):
         with self._lock:
@@ -549,6 +561,9 @@ class AgentRuntime:
         # --- 規則の関所（AI を呼ばない） ---
         snap = self._snapshot(now)
         self._warn_budget(snap)
+        for e in events:                    # 話している相手の発言に目印（AI が会話の続きだと分かるように）
+            if is_partner(e, snap.partners):
+                e.meta["partner"] = True
         result = self.gate.check(events, snap)
         if result.outcome == GATE_HOLD:
             self._hold(events, result.wait_seconds)
@@ -660,7 +675,7 @@ class AgentRuntime:
 
         # --- 出す前の確認 ---
         # ⚠️ 調べた答えは、調べている間に会話が進んでも出す（頼まれたことの答えなので古くならない）
-        check = self._precheck(utterance, decision, fresh_seq, allow_stale=lookup is not None)
+        check = self._precheck(utterance, decision, fresh_seq, allow_stale=lookup is not None, strong=result.strong)
         if check:
             self.deps.store.add_utterance(turn_id, utterance.text, utterance.emotion, self.persona.voice,
                                           f"dropped:{check}", None, None)
@@ -674,11 +689,14 @@ class AgentRuntime:
             delivered = self._speak(utterance, decision, turn_id)
         if delivered and decision.target and self._turn_in_gravity:
             self.memory.note_interaction(decision.target)
+        if delivered and decision.target:
+            with self._lock:                # 返事をした相手とは、しばらく続けて話せる
+                self._partners[decision.target] = self._clock() + self.config.conversation_partner_seconds
         if delivered:
             self._journal("record_reply", self._account, decision.target, utterance.text,
                           self.config.output_mode, self.config.display_name)
 
-    def _precheck(self, utterance, decision, fresh_seq, allow_stale=False):
+    def _precheck(self, utterance, decision, fresh_seq, allow_stale=False, strong=False):
         if (self.inbox.fresh_seq != fresh_seq and not allow_stale) or self._heard_talking():
             return CHECK_STALE
         own = [u.text for u in self.window.own_utterances()]
@@ -686,7 +704,7 @@ class AgentRuntime:
                          self.config.banned_words, own)
         if check:
             return check
-        if not self.gate.utterance_allowed(self._snapshot(self._clock())):
+        if not self.gate.utterance_allowed(self._snapshot(self._clock()), strong):
             return CHECK_LIMIT
         return None
 

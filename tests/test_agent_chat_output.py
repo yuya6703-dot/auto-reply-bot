@@ -49,7 +49,8 @@ check("2通目は規則で記録だけ（R7）", a.wait_decisions(2) and a.decis
 a.close()
 
 print("■ 呼ばれたのに1分の上限に当たったら、空くのを待って返事する（2026-10-16 実物で返事をしなかった）")
-a = Agent(mode=MODE_ENGAGE, output_mode=OUTPUT_CHAT, ai_name="テストちゃん", self_names="テストちゃ👼")
+a = Agent(mode=MODE_ENGAGE, output_mode=OUTPUT_CHAT, ai_name="テストちゃん", self_names="テストちゃ👼",
+          conversation_enabled=False)      # ふだんの上限（チャットは1分1通）で確かめる
 a.runtime._utterance_times = [time.time() - 58.5]      # 58.5秒前に送った（あと約2秒で空く）
 a.runtime._last_utterance_end = time.time() - 58.5
 a.say("@テストちゃ.. 起動テストしてるけど調子どう？", speaker="テスト2")
