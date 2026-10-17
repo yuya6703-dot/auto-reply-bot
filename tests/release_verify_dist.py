@@ -38,10 +38,10 @@ ap.add_argument("--strict-paths", action="store_true", help="手元のパス（�
 ap.add_argument("--allow-error-log", help="error_log.txt に出てよい行（正規表現）。無ければ1行でも失敗")
 # ⚠️ リリースのたびに、その版で足した機能の名前（関数名・ボタンの文言など）に差し替える
 ap.add_argument("--symbols", default=",".join([
-    "GravityTaskWorker", "parse_task_rows", "parse_chat_rows", "_migrate_keyword_target_column",
-    "find_app_icon", "KEYWORD_NAME_PLACEHOLDER", "GeminiProvider", "AgentRuntime", "ApiKeyStore",
-    "APP_DISPLAY_NAME", "グラ補助ツール", "📋 タスクをこなす", "🎡 ルーレットを回す（無料の1回）", "{名前}",
-]), help="exe の本体に入っているはずの名前（カンマ区切り）。既定は v1.9.0 で足したもの")
+    "GravityChatBridge", "AgentChatText", "enqueue_agent_text", "find_chat_portrait", "_mention_by_icon",
+    "read_room_info", "on_agent_mute_chat_toggled", "_warn_if_own_cable", "VoiceListener", "list_input_devices",
+    "AIの記憶", "📢", "🎙 AIのマイクがミュートのときは",
+]), help="exe の本体に入っているはずの名前（カンマ区切り）。既定は v1.10.0 で足したもの")
 a = ap.parse_args()
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -65,7 +65,7 @@ print("\n[1] zipの形と同梱物（アプリの自動更新と同じ zipfile �
 BAD_NAME = re.compile(
     r"(^|/)(app_data\.db.*|agent_data\.db.*|error_log\.txt|tailscale\.(key|crt)|self\.(key|crt)|\.env"
     r"|開発ログ\.md|GRAVITY画面部品\.md|RELEASE_README\.md|[^/]+\.spec|auto_reply_app\.py)$"
-    r"|(^|/)(recordings|tests|設計書|tools|backup)/|^_internal/agent/")
+    r"|(^|/)(recordings|tests|設計書|tools|backup|AIの記憶)/|^_internal/agent/|(^|/)AIが気づいたこと\.md$")
 KEY = re.compile(rb"AIza[0-9A-Za-z_\-]{35}")
 PRIVATE_KEY = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 # 手元のパス: このPCのユーザー名と、リポジトリの1つ上のフォルダ名。⚠️ 名前はここに書かない（リポジトリは公開）。
@@ -141,9 +141,14 @@ AGENT.sort()
 check("files/agent/ のモジュールの一覧を作れた", bool(AGENT), _agent_root)
 miss_mods = [m for m in AGENT if m not in mods]
 check(f"AIまわりのモジュール {len(AGENT)} 個が全部入っている", not miss_mods, str(miss_mods))
-for m in ("sqlite3", "ssl", "urllib.request", "sounddevice", "customtkinter", "uiautomator2", "cryptography"):
+for m in ("sqlite3", "ssl", "urllib.request", "sounddevice", "customtkinter", "uiautomator2", "cryptography",
+          "pyaudiowpatch"):
     if not check(f"ライブラリ {m} が入っている", m in mods):
         pass
+# PCのスピーカーの音をループバックで取る PyAudioWPatch は、中の PortAudio（拡張モジュール）が無いと import で落ちる（v1.10.0）
+check("PyAudioWPatch の中身（_portaudiowpatch）が入っている",
+      any(re.search(r"(^|/)pyaudiowpatch/_portaudiowpatch[^/]*\.pyd$", n) for n in names),
+      str([n for n in names if "pyaudiowpatch" in n.lower()][:5]))
 
 # ---------------------------------------------------------------- [3] 起動
 print("\n[3] 分離した環境で起動する")
