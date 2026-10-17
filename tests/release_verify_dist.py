@@ -145,10 +145,23 @@ for m in ("sqlite3", "ssl", "urllib.request", "sounddevice", "customtkinter", "u
           "pyaudiowpatch"):
     if not check(f"ライブラリ {m} が入っている", m in mods):
         pass
-# PCのスピーカーの音をループバックで取る PyAudioWPatch は、中の PortAudio（拡張モジュール）が無いと import で落ちる（v1.10.0）
-check("PyAudioWPatch の中身（_portaudiowpatch）が入っている",
-      any(re.search(r"(^|/)pyaudiowpatch/_portaudiowpatch[^/]*\.pyd$", n) for n in names),
-      str([n for n in names if "pyaudiowpatch" in n.lower()][:5]))
+# PCのスピーカーの音をループバックで取る PyAudioWPatch は、中の PortAudio（拡張モジュール _portaudiowpatch）が無いと
+# import で落ちる（v1.10.0）。⚠️ この拡張はパッケージの外（いちばん上）に置かれ、`import _portaudiowpatch` で読まれる
+pa_pyd = [n for n in names if re.search(r"^_internal/_portaudiowpatch[^/]*\.pyd$", n)]
+check("PyAudioWPatch の中身（_internal/_portaudiowpatch*.pyd）が入っている", bool(pa_pyd),
+      str([n for n in names if "portaudiowpatch" in n.lower()][:5]))
+if pa_pyd:
+    # 配布物の .pyd そのものを読み込み、今の既定の出力のループバックの機材を見つけられるか（音は取らない・鳴らさない）
+    probe = (
+        "import os, sys; sys.path.insert(0, sys.argv[1]); import _portaudiowpatch, pyaudiowpatch as p; "
+        "assert os.path.samefile(os.path.dirname(_portaudiowpatch.__file__), sys.argv[1]), _portaudiowpatch.__file__; "
+        "a = p.PyAudio(); w = a.get_host_api_info_by_type(p.paWASAPI); "
+        "s = a.get_device_info_by_index(w['defaultOutputDevice']); "
+        "print(any(s['name'] in d['name'] for d in a.get_loopback_device_info_generator())); a.terminate()")
+    r = subprocess.run([sys.executable, "-c", probe, os.path.join(app_dir, "_internal")],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    check("配布物の _portaudiowpatch を読み込んで、今の既定の出力のループバックが見つかる",
+          r.returncode == 0 and r.stdout.strip().endswith("True"), (r.stdout + r.stderr)[-300:])
 
 # ---------------------------------------------------------------- [3] 起動
 print("\n[3] 分離した環境で起動する")
