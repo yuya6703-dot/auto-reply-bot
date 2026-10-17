@@ -39,7 +39,8 @@ for i in range(3):
     a.wait_decisions(i + 1)
 check("T31 上限まで呼ぶ（2回）", len(a.decide_calls()) == 2, len(a.decide_calls()))
 check("T31 超えたら AI を呼ばず記録だけ（R8）", a.decisions()[-1][3] == "R8")
-check("T31 画面に知らせる", any("今日AIを呼べる回数（2回）に達しました" in n for n in a.notices), a.notices)
+# 知らせは判断を記録したあとに出る（同じスレッドで続けて）。記録がそろった瞬間に見ると、まだ出ていないことがある（2026-10-17 に1回落ちた）
+check("T31 画面に知らせる", wait_until(lambda: any("今日AIを呼べる回数（2回）に達しました" in n for n in a.notices)), a.notices)
 a.say("もう1回")
 a.wait_decisions(4)
 check("T31 知らせは1日1回だけ", sum("達しました" in n for n in a.notices) == 1)
@@ -128,7 +129,7 @@ check("T11 4件目は AI を呼ばずに記録だけ（R2）", a.wait_decisions(
 a.mock.behavior = KIND_OK
 a.mock.mode = MODE_SILENT
 check("T12 確認が通れば戻る", wait_until(lambda: a.runtime.state == STATE_IDLE, 3.0), a.runtime.state)
-check("T12 戻ったことを知らせる", any("使えるようになりました" in n for n in a.notices))
+check("T12 戻ったことを知らせる", wait_until(lambda: any("使えるようになりました" in n for n in a.notices)), a.notices)
 a.close()
 
 a = Agent(mode=MODE_SILENT)

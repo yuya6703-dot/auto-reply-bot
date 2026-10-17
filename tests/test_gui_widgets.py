@@ -185,7 +185,10 @@ check("文字数表示も戻る", app.manual_boxes[0]["count"].cget("text") == "
 print("\n[7] Ctrl+Enterはその欄だけ送る")
 worker._manual_queue.clear()
 fill(app.manual_boxes[1], "この欄だけ")
-app.manual_boxes[1]["box"].focus_set()
+# ⚠️ キーの出来事は、OSのフォーカスがこの窓にあるときだけ欄に届く。ほかの窓が前面だと focus_set では届かないことがある
+#    （2026-10-17、全部のテストを流しているときに2回落ちた。別の窓に前面を取らせると 1/3 しか届かず、focus_force なら 3/3）
+app.manual_boxes[1]["box"].focus_force()
+app.update()
 app.manual_boxes[1]["box"].event_generate("<Control-Return>")
 app.update()
 check("その欄だけ積まれる", worker._manual_queue == ["この欄だけ"], worker._manual_queue)
