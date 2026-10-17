@@ -144,9 +144,9 @@ with open(os.path.join(_HERE, "fixtures", "voiceroom_guest.xml"), encoding="utf-
 class FakeMentionRoom:
     """音声ルーム。アイコンをダブルタップ（2回のタップを1回の shell で）すると、入力欄に「@名前 」が入る"""
 
-    def __init__(self, inserts=True, opens_profile=False):
+    def __init__(self, inserts=True, opens_profile=False, opens_page=False):
         self.commands = []
-        self.inserts, self.opens_profile = inserts, opens_profile
+        self.inserts, self.opens_profile, self.opens_page = inserts, opens_profile, opens_page
         self.field = ""
 
     def shell(self, command):
@@ -157,6 +157,10 @@ class FakeMentionRoom:
         return type("R", (), {"output": ""})()
 
     def dump_hierarchy(self, compressed=True):
+        if self.opens_page and self.commands and not any("keyevent 4" in c for c in self.commands):
+            # 画面いっぱいのページ（他の人のプロフィールなど）。シートではないので design_bottom_sheet も、ルームの入力欄も無い
+            return ('<?xml version="1.0" ?><hierarchy rotation="0"><node resource-id="anonymous.sns.community.gravity:id/tvUserName" '
+                    'text="伏せ字3" display-id="2" bounds="[0,100][540,160]" /></hierarchy>')
         if self.opens_profile and self.commands:
             return ROOM.replace('resource-id="anonymous.sns.community.gravity:id/etText"', 'resource-id="x:id/none"')                 .replace("</hierarchy>", '<node resource-id="anonymous.sns.community.gravity:id/design_bottom_sheet" '
                                          'display-id="2" bounds="[0,500][540,960]" /></hierarchy>')
@@ -178,6 +182,12 @@ check("その人の発言がチャット欄に見えなければ、タップし�
 d = FakeMentionRoom(inserts=False, opens_profile=True)
 check("ダブルタップでメンションが入らず、プロフィールなどが開いたら閉じる（メンションなしで送る）",
       w._mention_by_icon(d, "伏せ字3") is None and any("input -d 2 keyevent 4" in c for c in d.commands), d.commands)
+d = FakeMentionRoom(inserts=False, opens_page=True)
+check("シートではなく画面いっぱいのページ（プロフィールなど）が開いても、戻ってルームに帰る（そのページに居続けない）",
+      w._mention_by_icon(d, "伏せ字3") is None and any("input -d 2 keyevent 4" in c for c in d.commands), d.commands)
+d = FakeMentionRoom(inserts=False)
+check("何も開かず、ルームの入力欄が見えたままなら、戻るは押さない（ルームから出てしまう）",
+      w._mention_by_icon(d, "伏せ字3") is None and not any("keyevent 4" in c for c in d.commands), d.commands)
 d = FakeRoomInput(field="@伏せ字3 ")
 w = worker()
 check("メンションが入っていたら、入力欄を空にせず、メンションの後ろに文を入れて送る",

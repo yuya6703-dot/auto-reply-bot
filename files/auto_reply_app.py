@@ -4830,9 +4830,11 @@ class AutoReplyWorker:
         if text.startswith("@"):
             self._agent_note(f"@ アイコンのダブルタップで「{name}」にメンションを入れました。")
             return text + " "
-        try:                                # プロフィールなどが開いたかもしれない。入力欄のないシートなら閉じる
+        try:
+            # プロフィールなどが開いたかもしれない（ダブルタップが1回ずつのタップとして届いたとき）。ルームの入力欄が
+            # 見えなければ、開いたもの（シートでも、画面いっぱいのページでも）を戻るで閉じる。⚠️ 見えていれば押さない（ルームから出る）
             xml = d.dump_hierarchy(compressed=True)
-            if find_by_id(xml, ROOM_SHEET_ID, self._target_display) and not find_by_id(xml, ROOM_INPUT_ID, self._target_display):
+            if not find_by_id(xml, ROOM_INPUT_ID, self._target_display):
                 self._keyevent(d, ANDROID_KEYCODE_BACK)
         except Exception:
             pass
