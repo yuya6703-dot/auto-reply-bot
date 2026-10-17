@@ -27,6 +27,9 @@ def check(label, cond, detail=""):
 
 
 def load(modname, d):
+    # v1.9.0 からは前の版にも agent パッケージがある。読み込み済みのものを使い回すと、今のコードが前の版の agent を読んでしまう
+    for name in [n for n in sys.modules if n == "agent" or n.startswith("agent.")]:
+        del sys.modules[name]
     sys.path.insert(0, d)
     try:
         spec = importlib.util.spec_from_file_location(modname, os.path.join(d, "auto_reply_app.py"))
