@@ -134,7 +134,8 @@ class Harness(ctk.CTk):
     on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
     on_agent_filler_toggled = A.App.on_agent_filler_toggled
     on_agent_mute_chat_toggled = A.App.on_agent_mute_chat_toggled
-    _warn_if_own_cable = A.App._warn_if_own_cable
+    _hearing_route = A.App._hearing_route
+    _check_hearing_route = A.App._check_hearing_route
     on_agent_mention_toggled = A.App.on_agent_mention_toggled
     on_agent_emoji_toggled = A.App.on_agent_emoji_toggled
     _agent_voice_style_map = A.App._agent_voice_style_map
@@ -854,6 +855,21 @@ class FakeListener:
 
 
 h._voice_listener_factory = FakeListener
+# 作り物の MuMu（スピーカーの設定だけ）。⚠️ 置かないと、このPCの本物の MuMu の設定を読んでしまう
+import json as _json
+_mumu = os.path.join(tempfile.mkdtemp(), "MuMuPlayer")
+os.makedirs(os.path.join(_mumu, "nx_main"))
+open(os.path.join(_mumu, "nx_main", "MuMuManager.exe"), "wb").close()
+os.makedirs(os.path.join(_mumu, "vms", "MuMuPlayer-0", "configs"))
+
+
+def mumu_speaker(name):
+    with open(os.path.join(_mumu, "vms", "MuMuPlayer-0", "configs", "customer_config.json"), "w", encoding="utf-8") as f:
+        _json.dump({"setting": {"volume_setting": {"loudspeaker": name, "microphone": "CABLE Output (VB-Audio Virtual Cable)"}}}, f)
+
+
+mumu_speaker("")
+db.save_setting("mumu_manager_path", os.path.join(_mumu, "nx_main", "MuMuManager.exe"))
 check("既定はOFF・音声入力を選べる", h.agent_hearing_var.get() is False
       and h.agent_hearing_device_menu.cget("values") == ["テストの入力（ライン）", "テストのマイク"]
       and h.agent_hearing_device_var.get() == "テストの入力（ライン）")
@@ -878,9 +894,32 @@ check("今の音量を出す", abs(h.agent_hearing_level.get() - 0.25) < 0.01, h
 check("話し始め・終わりを AI に知らせる（話している間は喋り始めない）", listener.on_activity == h.agent_runtime.on_voice_activity)
 check("聞いている間は、AI に「ルームの声も届く」と伝える", h.agent_runtime.config.hearing_active is True)
 db.save_setting("audio_output_device", "CABLE Input (VB-Audio Virtual C")
-check("読み上げと同じ仮想ケーブルの出口を選んだら知らせる（自分の読み上げしか聞こえない）",
-      h._warn_if_own_cable("CABLE Output (VB-Audio Virtual ") is True and "PCのスピーカーの音" in dialogs[-1][2]
-      and h._warn_if_own_cable("🔊 PCのスピーカーの音（今の既定の出力）") is False)
+print("■ 聞く入力でルームの音が取れるか（MuMu のスピーカーの設定を読む。2026-10-19 本人「音声認識できなくねーか」）")
+CABLE_OUT = "CABLE Output (VB-Audio Virtual "
+mumu_speaker("CABLE Input (VB-Audio Virtual Cable)")
+n = len(dialogs)
+h.agent_hearing_device_var.set(CABLE_OUT)
+h.on_agent_hearing_device_selected()
+check("MuMu のスピーカーが CABLE Input なら、CABLE Output を選んでも止めない（ここにルームの声が来る。本人の今の流し方）",
+      len(dialogs) == n and "ここでルームの声が聞けます" in agent_log(h), dialogs[n:])
+mumu_speaker("")
+h.agent_hearing_device_var.set("テストの入力（ライン）")
+h.on_agent_hearing_device_selected()
+h.agent_hearing_device_var.set(CABLE_OUT)
+h.on_agent_hearing_device_selected()
+check("MuMu のスピーカーが既定の出力なら、読み上げと同じケーブルの出口を選んだときに知らせる（読み上げしか来ない）",
+      len(dialogs) == n + 1 and "このアプリの読み上げしか来ません" in dialogs[-1][2] and "PCのスピーカーの音" in dialogs[-1][2],
+      dialogs[n:])
+h._stop_voice_listener()
+n = len(dialogs)
+h._start_voice_listener()
+check("前から保存してある入力でも、聞き始めたときに確かめて知らせる（窓は出さず、判断のログと状態に）",
+      len(dialogs) == n and "⚠️ 👂 MuMu はルームの音を「既定の出力」に出しているので" in agent_log(h)
+      and "⚠️" in h.agent_hearing_status.cget("text"), h.agent_hearing_status.cget("text"))
+h._stop_voice_listener()
+h.agent_hearing_device_var.set("テストの入力（ライン）")
+h._start_voice_listener()
+listener = FakeListener.made[-1]
 db.save_setting("audio_output_device", "")
 h.agent_hearing_hints_entry.insert(0, "ポテチ、深夜ラジオ")
 h.save_agent_hearing_hints()

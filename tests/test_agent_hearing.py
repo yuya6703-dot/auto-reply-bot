@@ -85,6 +85,51 @@ check("1チャンネルはそのまま", to_mono(stereo, 1) == stereo)
 check("部品（PyAudioWPatch）があれば、入力のいちばん上に「PCのスピーカーの音」", not loopback_available()
       or list_input_devices()[0] == LOOPBACK_DEFAULT)
 
+print("■ 聞く入力でルームの音が取れるか（MuMu のスピーカーの設定を読む。2026-10-19 本人「音声認識できなくねーか」）")
+import json
+import os
+import tempfile
+from agent.hearing import assess_hearing_input, mumu_speakers
+root = os.path.join(tempfile.mkdtemp(), "MuMuPlayer")
+manager = os.path.join(root, "nx_main", "MuMuManager.exe")
+
+
+def put_config(vm, data):
+    os.makedirs(os.path.join(root, "vms", vm, "configs"), exist_ok=True)
+    with open(os.path.join(root, "vms", vm, "configs", "customer_config.json"), "w", encoding="utf-8") as f:
+        f.write(data if isinstance(data, str) else json.dumps(data))
+
+
+check("MuMu が無い・場所が空なら、分からない（空）", mumu_speakers("") == [] and mumu_speakers(manager) == [])
+put_config("A-0", {"setting": {"volume_setting": {"loudspeaker": "CABLE Input (VB-Audio Virtual Cable)"}}})
+put_config("B-1", {"setting": {"volume_setting": {"loudspeaker": ""}}})
+put_config("C-2", "{壊れた設定")
+put_config("D-3", {"setting": {}})
+check("インスタンスごとのスピーカーを読む（既定の出力は空。壊れた・形の違う設定は飛ばす）",
+      mumu_speakers(manager) == ["CABLE Input (VB-Audio Virtual Cable)", ""], mumu_speakers(manager))
+CABLE_OUT, CABLE_IN = "CABLE Output (VB-Audio Virtual ", "CABLE Input (VB-Audio Virtual C"     # MME の名前は31文字で切れる
+SPEAKER_CABLE = ["CABLE Input (VB-Audio Virtual Cable)"]
+ok, why = assess_hearing_input(CABLE_OUT, SPEAKER_CABLE, tts_output=CABLE_IN)
+check("MuMu のスピーカーが CABLE Input なら、CABLE Output にルームの声が来る（本人の今の流し方）", ok is True and "読み上げ" in why, why)
+ok, why = assess_hearing_input(CABLE_OUT, [""], tts_output=CABLE_IN)
+check("MuMu のスピーカーが既定の出力なら、CABLE Output には読み上げしか来ない（ループバックを案内）",
+      ok is False and "このアプリの読み上げしか来ません" in why and LOOPBACK_DEFAULT[:12] in why, why)
+ok, why = assess_hearing_input(LOOPBACK_DEFAULT, SPEAKER_CABLE, default_output="1 - LCD-MF225X (AMD High Definition Audio Device)")
+check("MuMu のスピーカーが CABLE Input なら、既定の出力のループバックには来ない（CABLE Output を案内）",
+      ok is False and "「CABLE Output」を選んでください" in why, why)
+check("MuMu のスピーカーが既定の出力なら、ループバックで聞ける", assess_hearing_input(LOOPBACK_DEFAULT, [""])[0] is True)
+check("MuMu のスピーカーが既定の出力と同じ機器なら、ループバックで聞ける",
+      assess_hearing_input(LOOPBACK_DEFAULT, ["Speakers (Anker SoundCore)"], default_output="Speakers (Anker SoundCore)")[0] is True)
+check("iPad などのライン入力・マイクは、分からない（何も言わない）",
+      assess_hearing_input("Microphone (Senary Audio)", SPEAKER_CABLE, tts_output=CABLE_IN) == (None, "")
+      and assess_hearing_input("Line Input (USB Audio)", [""]) == (None, ""))
+ok, why = assess_hearing_input(CABLE_OUT, [], tts_output=CABLE_IN)
+check("MuMu の設定が読めないときは決めつけない（読み上げと同じケーブルなら、気を付けることだけ伝える）",
+      ok is None and "MuMu のスピーカーを「CABLE Input」にしていなければ" in why, why)
+check("別の仮想ケーブル（CABLE-A）は、その入口と組にする",
+      assess_hearing_input("CABLE-A Output (VB-Audio Cable A)", ["CABLE-A Input (VB-Audio Cable A)"])[0] is True
+      and assess_hearing_input("CABLE-A Output (VB-Audio Cable A)", SPEAKER_CABLE)[0] is False)
+
 print("■ 聞き続ける（にせの音声入力）")
 got = []
 holder = {}

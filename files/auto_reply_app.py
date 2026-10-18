@@ -99,7 +99,8 @@ from agent.llm.gemini import GeminiProvider, MODELS as GEMINI_MODELS, DEFAULT_MO
 from agent.persona import Persona
 from agent.memory.journal import ConversationJournal, FOLDER_NAME as AGENT_JOURNAL_FOLDER
 from agent.tools.lookup import Lookup as AgentLookup, user_agent as lookup_user_agent
-from agent.hearing import VoiceListener, list_input_devices as list_voice_input_devices
+from agent.hearing import (VoiceListener, list_input_devices as list_voice_input_devices, LOOPBACK_DEFAULT,
+                           assess_hearing_input, default_output_name, mumu_speakers)
 from agent.voice_style import choose_style as choose_voice_style, speech_adjust
 from agent.owner_profile import OwnerProfile, NOTES_FILE as OWNER_NOTES_FILE
 from agent.generation import tidy_text as agent_tidy_text
@@ -10332,7 +10333,8 @@ class App(ctk.CTk):
             self._append_agent_log(f"👂 声を聞きます（{self._selected_hearing_device()}）。"
                                    + ("" if self.agent_runtime is not None and self.agent_runtime.running
                                       else "「▶ 開始」すると聞き始めます。"))
-            self._start_voice_listener()
+            self._check_hearing_route(self._selected_hearing_device(), popup=True)
+            self._start_voice_listener(route_checked=True)
         else:
             self._stop_voice_listener()
             self._append_agent_log("👂 声を聞くのをやめました。")
@@ -10348,23 +10350,31 @@ class App(ctk.CTk):
             self.agent_runtime.config.hearing_hints = hints
         self._append_agent_log(f"👂 聞き取りのヒントを保存しました（{hints or 'なし'}）。")
 
-    def _warn_if_own_cable(self, device):
+    def _hearing_route(self, device):
         """
-        聞く入力が、読み上げを流している仮想ケーブルの出口なら知らせる（自分の読み上げしか聞こえない）。
-        2026-10-16 実物: 読み上げの出力先が「CABLE Input」、聞く入力が「CABLE Output」で、ルームの声が聞こえていなかった
+        選んだ聞く入力で、ルームの音が取れるか (ok, 説明)。MuMu のスピーカーの設定を読んで確かめる（agent.hearing.assess_hearing_input）。
+        2026-10-16 は MuMu のスピーカーが既定の出力で CABLE Output には読み上げしか来ず、2026-10-19 は MuMu のスピーカーが
+        CABLE Input で CABLE Output が正しかった（流し方で正しい入力が逆になる）
         """
-        output = (self.db.get_setting("audio_output_device", "") or "")
-        if device.startswith("CABLE Output") and output.startswith("CABLE Input"):
-            messagebox.showwarning(
-                "声を聞く", "この入力は、読み上げをルームへ流している仮想ケーブル（VB-CABLE）の出口です。\n"
-                          "ここを聞くと、ルームの人の声ではなく、このアプリの読み上げを聞いてしまいます。\n\n"
-                          "ルームの声は「🔊 PCのスピーカーの音」を選ぶと聞けます（MuMu がスピーカーに出している音）。")
-            return True
-        return False
+        manager = MuMuController(manager_path=self.db.get_setting("mumu_manager_path", "") or "").resolve_manager_path()
+        return assess_hearing_input(
+            device, mumu_speakers(manager), tts_output=self.db.get_setting("audio_output_device", "") or "",
+            default_output=default_output_name() if device == LOOPBACK_DEFAULT else "")
+
+    def _check_hearing_route(self, device, popup):
+        """聞く入力でルームの音が取れないなら知らせる（popup なら窓でも）。取れるときは判断のログに1行。戻り値は ok"""
+        ok, why = self._hearing_route(device)
+        if ok is False:
+            self._append_agent_log(f"⚠️ 👂 {why}")
+            if popup:
+                messagebox.showwarning("声を聞く", why)
+        elif why:
+            self._append_agent_log(f"👂 {why}")
+        return ok
 
     def on_agent_hearing_device_selected(self, _value=None):
         device = self._selected_hearing_device()
-        self._warn_if_own_cable(device)
+        self._check_hearing_route(device, popup=True)
         self.db.save_setting("agent.hearing_device", device)
         if self.agent_runtime is not None:
             self.agent_runtime.config.hearing_device = device
@@ -10391,8 +10401,8 @@ class App(ctk.CTk):
         if self._voice_listener is not None:
             self._voice_listener.set_threshold(value)
 
-    def _start_voice_listener(self):
-        """AIが動いていて、声を聞くがONで、入力が選んであれば聞き始める"""
+    def _start_voice_listener(self, route_checked=False):
+        """AIが動いていて、声を聞くがONで、入力が選んであれば聞き始める。route_checked なら入力の確かめは済んでいる"""
         runtime = self.agent_runtime
         device = self._selected_hearing_device()
         if (self._voice_listener is not None or runtime is None or not runtime.running
@@ -10410,6 +10420,10 @@ class App(ctk.CTk):
         self._voice_listener = listener
         runtime.config.hearing_active = True       # AI に「ルームの声も届く」と伝える
         self.agent_hearing_status.configure(text=f"聞いています（{device}）")
+        # 前から保存してある入力でも確かめる（2026-10-19: 選び直したときしか知らせず、合わない入力を黙って聞き続けていた）
+        ok = self._hearing_route(device)[0] if route_checked else self._check_hearing_route(device, popup=False)
+        if ok is False:
+            self.agent_hearing_status.configure(text=f"聞いています（{device}）— ⚠️ この入力ではルームの声が聞こえません")
         self._start_owner_mic(runtime)
         self._poll_voice_level()
 

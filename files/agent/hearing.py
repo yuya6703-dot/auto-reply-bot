@@ -151,7 +151,9 @@ class VoiceSegmenter:
 
 
 # PCのスピーカーの音（今の既定の出力）をループバックで取る（2026-10-16 本人が選んだ「PCのスピーカーの音をそのまま取る」）。
-# MuMu はルームの声を既定の出力（スピーカー）に出している。読み上げ・AI の声は VB-CABLE へ出すので、ここには入らない
+# MuMu がルームの声を既定の出力（スピーカー）に出しているときに使う。読み上げ・AI の声は VB-CABLE へ出すので、ここには入らない。
+# ⚠️ MuMu のスピーカーを仮想ケーブルにしているときは、ここには何も来ない（下の assess_hearing_input）。
+# ⚠️ Windows のループバックは、その出力で何も鳴っていないと音のかたまりを1つも送ってこない（無音のデータも来ない）
 LOOPBACK_DEFAULT = "🔊 PCのスピーカーの音（今の既定の出力）"
 
 
@@ -180,6 +182,104 @@ def _mme_input_devices():
         if d.get("max_input_channels", 0) > 0 and apis[d["hostapi"]]["name"] == "MME" and d["name"] not in names:
             names.append(d["name"])
     return names
+
+
+# --- 聞く入力で、ルームの音（MuMu のスピーカーの音）が取れるか（2026-10-19 本人「音声認識できなくねーか」） ---
+# ⚠️ 流し方で、正しい入力が逆になる。名前で決め打ちせず、MuMu の設定を読んで確かめる:
+#   - MuMu のスピーカー → CABLE Input（本人の今の形）: CABLE Output にルームの音が来る（読み上げも同じケーブルに乗る）
+#   - MuMu のスピーカー → 既定の出力（2026-10-16 の形）: CABLE Output には読み上げしか来ない。ループバックで聞く
+# 2026-10-19 実物: MuMu のスピーカーは CABLE Input、既定の出力はモニターのスピーカー。ループバックには何も来ず、
+#   保存されていた CABLE Output が正しかった（前に足した「CABLE Output は読み上げしか聞こえない」の注意は、この形では間違い）
+_DEFAULT_WORDS = ("default", "既定", "默认", "默認")
+_CABLE = re.compile(r"^(?P<name>\S.*?) (?P<side>Input|Output)\b")
+
+
+def mumu_speakers(manager_path):
+    """
+    MuMu の各インスタンスの「スピーカー」（ルームの音を出す先）。MuMuManager.exe の場所から
+    <MuMu>/vms/*/configs/customer_config.json の setting.volume_setting.loudspeaker を読む（読むだけ）。
+    既定の出力なら ""。読めなければ空のリスト（MuMu でない・設定の形が違う）
+    """
+    import glob
+    import json
+    import os
+    if not manager_path:
+        return []
+    root = os.path.dirname(os.path.dirname(os.path.abspath(manager_path)))
+    speakers = []
+    for path in sorted(glob.glob(os.path.join(root, "vms", "*", "configs", "customer_config.json"))):
+        try:
+            with open(path, encoding="utf-8") as f:
+                volume = json.load(f).get("setting", {}).get("volume_setting", {})
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not isinstance(volume, dict) or "loudspeaker" not in volume:
+            continue
+        name = str(volume.get("loudspeaker") or "").strip()
+        speakers.append("" if any(w in name.lower() for w in _DEFAULT_WORDS) else name)
+    return speakers
+
+
+def default_output_name():
+    """今の既定の出力（スピーカー）の名前（ループバックで聞くのはここ）。分からなければ空"""
+    try:
+        import pyaudiowpatch as pyaudio
+    except Exception:
+        return ""
+    audio = pyaudio.PyAudio()
+    try:
+        wasapi = audio.get_host_api_info_by_type(pyaudio.paWASAPI)
+        return str(audio.get_device_info_by_index(wasapi["defaultOutputDevice"])["name"])
+    except Exception:
+        return ""
+    finally:
+        audio.terminate()
+
+
+def _cable(device):
+    """仮想ケーブルの名前と向き。「CABLE Output (VB-Audio Virtual 」→ ("CABLE", "Output")。仮想ケーブルでなければ (None, None)。
+    ⚠️ MME の名前は31文字で切れるので、頭の「名前 Input/Output」だけで比べる"""
+    m = _CABLE.match(device or "")
+    if not m or ("VB-Audio" not in device and not m.group("name").upper().startswith("CABLE")):
+        return None, None
+    return m.group("name"), m.group("side")
+
+
+def assess_hearing_input(device, speakers, tts_output="", default_output=""):
+    """
+    選んだ聞く入力で、ルームの音（MuMu のスピーカーの音）が取れるか。戻り値 (ok, 説明)。
+    ok: True＝取れる / False＝取れない / None＝分からない（MuMu の設定が読めない・iPad などの入力）。
+    speakers は mumu_speakers の戻り値、tts_output は読み上げの出力先、default_output は今の既定の出力（ループバックのとき）
+    """
+    if not device:
+        return None, ""
+    if device == LOOPBACK_DEFAULT:
+        if not speakers:
+            return None, ""
+        if any(not s or (default_output and (s.startswith(default_output) or default_output.startswith(s)))
+               for s in speakers):
+            return True, "MuMu は既定の出力に音を出しているので、ここでルームの声が聞けます。"
+        pair, side = _cable(speakers[0])
+        hint = (f"「{pair} Output」を選んでください。" if side == "Input"
+                else "MuMu のスピーカーを既定の出力にしてください。")
+        return False, (f"MuMu はルームの音を「{speakers[0]}」に出しているので、今の既定の出力"
+                       f"（{default_output or '不明'}）を聞いても聞こえません。{hint}")
+    name, side = _cable(device)
+    if not name or side != "Output":
+        return None, ""
+    own = _cable(tts_output) == (name, "Input")
+    if any(_cable(s) == (name, "Input") for s in speakers):
+        return True, (f"MuMu はルームの音を「{name} Input」に出しているので、ここでルームの声が聞けます"
+                      + ("（読み上げも同じケーブルに乗りますが、自分の読み上げは聞き分けて使いません）。" if own else "。"))
+    if speakers:
+        where = speakers[0] or "既定の出力"
+        return False, (f"MuMu はルームの音を「{where}」に出しているので、この入力（{name} Output）には"
+                       + ("このアプリの読み上げしか来ません。" if own else "ルームの声が来ません。")
+                       + ("ルームの声は「🔊 PCのスピーカーの音」で聞けます。" if not speakers[0] else ""))
+    if own:
+        return None, (f"この入力（{name} Output）には、{name} Input に流れた音（このアプリの読み上げなど）が来ます。"
+                      f"MuMu のスピーカーを「{name} Input」にしていなければ、ルームの声は聞こえません。")
+    return None, ""
 
 
 class _LoopbackStream:
