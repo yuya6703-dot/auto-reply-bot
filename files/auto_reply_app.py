@@ -1108,7 +1108,8 @@ def read_room_info(xml_dump, display=None):
      "muted_seats": ミュートの席の数, "my_mic": このアカウントのマイク（"on" / "muted" / ""＝分からない）}
     ⚠️ マイクは下の帯の roomerBtnMicrophone の selected で見る。2026-10-16 実機で、席に座ってマイクONのとき selected=false。
        ただしゲスト（席にいない）の画面も selected=false で、ボタンの中身もまったく同じ（見分けられない）。
-       selected=true をミュートとみるのは、記録した画面からの推測（実機ではまだ確かめていない）。席のミュートは ivMuted（話せる席は ivVolume）
+       selected=true はミュート（2026-10-22 実機で確かめた。席に座ってミュートのとき selected=true、その席に ivMuted が出る。
+       画面の「OFF」の文字は絵の一部で、文字としては読めない）。席のミュートは ivMuted（話せる席は ivVolume）
     ⚠️ 席に座っている人の名前は画面に出ていない（アイコンだけ）。tvTitle は「ミッションへ」にも使われているので、
        上の帯（llTitle）の中のものだけをルーム名にする（GRAVITY画面部品.md）
     """

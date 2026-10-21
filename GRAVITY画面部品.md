@@ -211,9 +211,9 @@ cvRoot → include → llFeedItem
 | 上の帯 `toolbar` | `llTitle`（`ivLevel`, `tvTitle`=ルーム名, `tvPermission`「友達のみ」など）, `clMore`（…）, `ivZoomout`（小さくする）, `ivExit`（⚠️ 退出） |
 | 左上 `llHead` | `vRank`（ランキング）, `vNotice`（アナウンス）, `vTaskView`→`tvTitle`「ミッションへ」`tvDesc2`「未受取の報酬あり」 |
 | チャット欄 `rvMessages`（⚠️ 上端は画面で変わる。実測 159 / 248） | 発言 `userMessageView`（`clRoot`, `ivPortrait`（ダブルタップで入力欄にその人へのメンションが入る。本人談・実機未確認）, `llName`→`tvName`→`shimmerTextView`, `ivCharmLevel`, `flContainer`→`tvContent`）。お知らせ `tvText`（「〜がマイクをもらいました」など）。ミッションの札 `clContent`（`tvContent`「ルーム個人ミッションを達成しました !」, `ivReward`, `tvCount`「x1000」, `btnNext`「景品GETへ」）。⚠️ 景品GETへ は押さない |
-| 右の席 `rvSeats` | 座っている席 `ivAvatar` + `vSideView`（`tvPos`=席番号, `ivMuted`, `ivVolume`, オーナーは `ivAnchorLevelIcon`）。空いた席 `ivAdd` + `tvPosition`。⚠️ ivAdd は押さない（席の申請になる） |
+| 右の席 `rvSeats` | 座っている席 `ivAvatar` + `vSideView`（`tvPos`=席番号, `ivMuted`（その席がミュート。斜線のマイクの印）, `ivVolume`（話せる席）, オーナーは `ivAnchorLevelIcon`）。空いた席 `ivAdd` + `tvPosition`。⚠️ ivAdd は押さない（席の申請になる） |
 | 右下 | `clCount`→`tvUserCount`「ゲスト（N人）」, `rvViewers`。初回課金の案内 `clFirstRecharge`（`ivFirstRechargeClose`, 「あと5日」） |
-| 下の帯 `layoutActions` | `etText`「メッセージを送信」（入力欄。空のときは案内文が文字として入っている。ボットはこれで入力欄を探す）, `roomerBtnLottery`, `roomerBtnGift`→`ivIcon`（⚠️ ギフト）, `roomerBtnMenu`（機能一覧）, `roomerBtnMicrophone`（⚠️ マイクの申請） |
+| 下の帯 `layoutActions` | `etText`「メッセージを送信」（入力欄。空のときは案内文が文字として入っている。ボットはこれで入力欄を探す）, `roomerBtnLottery`, `roomerBtnGift`→`ivIcon`（⚠️ ギフト）, `roomerBtnMenu`（機能一覧）, `roomerBtnMicrophone`（⚠️ マイクの申請。席に座っていればマイクの ON/OFF。**ミュートのとき `selected="true"`**、ONのとき・席にいないときは `false`。画面の「🎤 ON / OFF」の文字は絵の一部で、文字としては読めない。2026-10-22 実機。親の `roomerClBtnApplySeat` は変わらない） |
 
 | 押した先 | 主な部品 |
 |---|---|

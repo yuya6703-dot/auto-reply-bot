@@ -23,7 +23,12 @@ MAX_MUTE_MINUTES = 360
 
 _UNMUTE = re.compile(r"(もういいよ|もう大丈夫|話していいよ|喋っていいよ|しゃべっていいよ|戻っていいよ|もどっていいよ|戻ってきて|"
                      r"もどってきて|ミュート解除)")
-_MUTE = re.compile(r"(静かにして|しずかにして|黙って|だまって|ミュート|喋らないで|しゃべらないで|お口チャック)")
+# 頼む形のときだけ合図にする（2026-10-22 本人「静かにしてって言ってないのにそう言ったと認識してる」）。言葉を含むだけで合図にしていて、
+# 「そもそもミュートしてるのに」「なんで静かにしてるん」「マイクのミュートするんだけど、…伝えといて」で静かになった（実際に3回）。
+# ⚠️ 後ろに る・た・な(い)・ま(す)・ん・っ(て)・いる/いた/いま が続く形は、様子・否定・言われたことの話なので合図にしない。
+#    「ミュート」だけ（名詞。マイクのミュートの話が多い）も合図にしない（「ミュートして」「ミュートにして」は合図）
+_MUTE = re.compile(r"(静かにして|しずかにして|黙って|だまって|ミュートして|ミュートにして|喋らないで|しゃべらないで|お口チャック)"
+                   r"(?!る|た|な|ま|ん|っ|いる|いた|いま)")
 _REMEMBER = re.compile(r"[、,\s]*(?:って|と)?(?:覚えておいて|覚えといて|覚えてて|覚えて|おぼえておいて|おぼえといて|おぼえてて|おぼえて)"
                        r"(?:ね|ください|くれる|おいて|お願い)?[。！!？?〜~\s]*$")
 _MINUTES = re.compile(r"(\d{1,3})\s*分")
@@ -64,13 +69,17 @@ def strip_names(text, names):
     return text.strip()
 
 
-def parse_command(text, call_names):
-    """オーナーの発言から合図を読む。(種類, 値) か None（AI に呼びかけていなければ None）"""
+def parse_command(text, call_names, muted=False):
+    """
+    オーナーの発言から合図を読む。(種類, 値) か None（AI に呼びかけていなければ None）。
+    muted は今静かにしているか。⚠️ 静かにしていないときの「もういいよ」「もう大丈夫？」は合図にしない（ふつうの会話として AI が判断する。
+    合図にすると、静かにしていないのに「戻ったよ！」と返していた）
+    """
     text = _norm(text)
     if not text or not mentions_name(text, call_names):
         return None
     if _UNMUTE.search(text) and not _MUTE.search(text.replace("ミュート解除", "")):
-        return CMD_UNMUTE, None
+        return (CMD_UNMUTE, None) if muted else None
     if _MUTE.search(text):
         return CMD_MUTE, mute_minutes(text)
     m = _REMEMBER.search(text)

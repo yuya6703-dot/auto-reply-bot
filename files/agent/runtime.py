@@ -825,7 +825,7 @@ class AgentRuntime:
             if (e.event_id in self._owner_done or e.is_self or e.backlog or e.kind == KIND_SYSTEM
                     or not is_owner(e, self.config)):
                 continue
-            command = parse_command(e.text, self.config.call_names)
+            command = parse_command(e.text, self.config.call_names, muted=self.muted_until is not None)
             if command is None:
                 continue
             self._owner_done.add(e.event_id)

@@ -26,8 +26,24 @@ print("■ 合図の読み方")
 check("呼びかけて「静かにして」→ 30分", parse_command("アイ、ちょっと静かにしてて", NAMES) == (CMD_MUTE, 30))
 check("「10分」「1時間」「ずっと」", mute_minutes("10分黙って") == 10 and mute_minutes("1時間静かに") == 60
       and mute_minutes("ずっと静かにして") == 360 and mute_minutes("999分") == 360)
-check("「もういいよ」「ミュート解除」で戻る", parse_command("アイ、もういいよ", NAMES) == (CMD_UNMUTE, None)
-      and parse_command("@アイ.. ミュート解除", NAMES) == (CMD_UNMUTE, None))
+check("「もういいよ」「ミュート解除」で戻る（静かにしている間）", parse_command("アイ、もういいよ", NAMES, muted=True) == (CMD_UNMUTE, None)
+      and parse_command("@アイ.. ミュート解除", NAMES, muted=True) == (CMD_UNMUTE, None))
+check("静かにしていなければ「もういいよ」は合図にしない（ふつうの会話として AI が判断する）",
+      parse_command("アイ、もういいよ", NAMES) is None and parse_command("アイ、もう大丈夫？", NAMES) is None)
+# 2026-10-22 本人「静かにしてって言ってないのにそう言ったと認識してる」。言葉を含むだけで合図にしていた（実際に3回）。
+# 頼む形（静かにして・黙って・ミュートして…）のときだけ合図にする。下の文は実際の言い回しをまねた作り物
+for text in ("@アイ.. 聞こえてる理由教えて、そもそもミュートしてるのに",       # マイクのミュートの話（してる＝様子）
+             "@アイ.. なんで静かにしてるん",                                   # 静かにしている様子を聞いている
+             "@アイ.. ちょっと席外すからマイクのミュートするんだけど、みんなに伝えといて",   # 「ミュート」は名詞。頼みは伝言
+             "アイ、黙ってないでなんか話して",                                   # 黙らないで（反対の意味）
+             "アイ、静かにしてって言われたの？",                                 # 言われたことの話
+             "アイ、ミュートになってるよ",
+             "アイ、静かにしてた？"):
+    check(f"合図にしない:「{text}」", parse_command(text, NAMES) is None, parse_command(text, NAMES))
+for text, minutes in (("アイ、ミュートして", 30), ("アイ、静かにしてね", 30), ("アイ黙って", 30), ("アイ、静かにしてください", 30),
+                      ("アイ、10分黙っててくれる？", 10), ("アイ、しゃべらないで", 30), ("アイ、お口チャック", 30),
+                      ("@アイ.. ちょっとミュートにしてて", 30), ("アイ、1時間静かにしてくれ", 60)):
+    check(f"合図にする:「{text}」→ {minutes}分", parse_command(text, NAMES) == (CMD_MUTE, minutes), parse_command(text, NAMES))
 check("「〇〇って覚えておいて」", parse_command("アイ、たろうさんは猫が好きって覚えておいて！", NAMES)
       == (CMD_REMEMBER, "たろうさんは猫が好き"))
 check("呼びかけていなければ合図にしない（「静かにしてって言われた」など）",
@@ -63,6 +79,15 @@ check("戻ったら、また判断する（合図への返事は回数の上限�
 a.runtime.submit(chat("アイ、静かにして", speaker="たろう"))
 check("オーナーでない人の「静かにして」は合図にしない（ふつうに判断）", wait_until(lambda: len(a.decide_calls()) >= 2, 5.0)
       and a.runtime.muted_until is None)
+spoken = len(a.speaker.spoken)
+a.runtime.submit(chat("@アイ.. 席外すからマイクのミュートするんだけど、みんなに伝えといて", speaker="オーナー"))
+check("オーナーが「ミュート」と書いても、頼む形でなければ静かにしない（伝言の頼みとして AI が判断する。2026-10-22）",
+      wait_until(lambda: len(a.decide_calls()) >= 3, 5.0) and a.runtime.muted_until is None
+      and "わかった、静かにしてるね" not in a.speaker.spoken[spoken:], (a.speaker.spoken[spoken:], a.logs[-3:]))
+a.runtime.submit(chat("アイ、もういいよ", speaker="オーナー"))
+check("静かにしていないときの「もういいよ」には「戻ったよ」と返さない（ふつうに判断）",
+      wait_until(lambda: len(a.decide_calls()) >= 4, 5.0) and "はーい、戻ったよ！" not in a.speaker.spoken[spoken:],
+      a.speaker.spoken[spoken:])
 a.runtime.set_muted(5)
 a.runtime._muted_until = time.time() - 1
 check("時間が過ぎたら、ひとりでに戻る", a.runtime.muted_until is None)
