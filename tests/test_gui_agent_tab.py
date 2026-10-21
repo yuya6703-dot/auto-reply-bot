@@ -135,6 +135,7 @@ class Harness(ctk.CTk):
     on_agent_filler_toggled = A.App.on_agent_filler_toggled
     on_agent_mute_chat_toggled = A.App.on_agent_mute_chat_toggled
     _hearing_route = A.App._hearing_route
+    _owner_mic_problem = A.App._owner_mic_problem
     _check_hearing_route = A.App._check_hearing_route
     on_agent_mention_toggled = A.App.on_agent_mention_toggled
     on_agent_emoji_toggled = A.App.on_agent_emoji_toggled
@@ -943,6 +944,22 @@ h.agent_runtime.hear = lambda wav, seconds, speaker=None: got.append(speaker) or
 mics[-1].on_segment(b"RIFF", 1.0)
 del h.agent_runtime.hear
 check("オーナーのマイクの声は、オーナーの名前で渡す", got == ["伏せ字9"], got)
+# 2026-10-22 実物: オーナーのマイクがルームの音と同じ CABLE Output で、ルームの音も AI 自身の声もオーナーの声として渡っていた
+room_device = h.agent_hearing_device_var.get()
+n = len(dialogs)
+h.agent_owner_mic_var.set(room_device)
+h.on_agent_owner_mic_selected()
+check("ルームの音と同じ入力は、オーナーのマイクにさせない（窓で知らせて「使わない」に戻す）",
+      len(dialogs) == n + 1 and "ルームの音と同じ入力" in dialogs[-1][2] and h.agent_owner_mic_var.get() == "（使わない）"
+      and db.get_setting("agent.hearing_owner_device") == "" and h._owner_mic_listener is None, dialogs[n:])
+db.save_setting("agent.hearing_owner_device", room_device)        # 前から保存してあった場合
+h.agent_owner_mic_var.set(room_device)
+h._stop_voice_listener()
+h._start_voice_listener()
+check("前から保存してあっても、聞き始めるときに確かめて使わない（判断のログに）",
+      h._voice_listener is not None and h._owner_mic_listener is None and "⚠️ オーナーのマイク: ルームの音と同じ入力" in agent_log(h))
+h.agent_owner_mic_var.set("テストの入力（ライン）")
+h.on_agent_owner_mic_selected()
 h.stop_agent()
 check("AIを止めたら聞くのもやめる（オーナーのマイクも）", FakeListener.made[-1].stopped and h._voice_listener is None
       and h._owner_mic_listener is None and h.agent_runtime.config.hearing_active is False)

@@ -100,7 +100,7 @@ from agent.persona import Persona
 from agent.memory.journal import ConversationJournal, FOLDER_NAME as AGENT_JOURNAL_FOLDER
 from agent.tools.lookup import Lookup as AgentLookup, user_agent as lookup_user_agent
 from agent.hearing import (VoiceListener, list_input_devices as list_voice_input_devices, LOOPBACK_DEFAULT,
-                           assess_hearing_input, default_output_name, mumu_speakers)
+                           assess_hearing_input, default_output_name, mumu_speakers, owner_mic_problem)
 from agent.voice_style import choose_style as choose_voice_style, speech_adjust
 from agent.owner_profile import OwnerProfile, NOTES_FILE as OWNER_NOTES_FILE
 from agent.generation import tidy_text as agent_tidy_text
@@ -10383,9 +10383,18 @@ class App(ctk.CTk):
             self._stop_voice_listener()
             self._start_voice_listener()
 
+    def _owner_mic_problem(self, device):
+        return owner_mic_problem(device, self._selected_hearing_device(),
+                                 self.db.get_setting("audio_output_device", "") or "")
+
     def on_agent_owner_mic_selected(self, _value=None):
         device = self.agent_owner_mic_var.get()
         device = "" if device == self.NO_OWNER_MIC else device
+        problem = self._owner_mic_problem(device)
+        if problem:                                    # ルームの音・AI の声が流れる入力は、オーナーの声にしない（2026-10-22）
+            messagebox.showwarning("オーナーのマイク", problem)
+            self.agent_owner_mic_var.set(self.NO_OWNER_MIC)
+            device = ""
         self.db.save_setting("agent.hearing_owner_device", device)
         if self.agent_runtime is not None:
             self.agent_runtime.config.hearing_owner_device = device
@@ -10432,6 +10441,10 @@ class App(ctk.CTk):
         """オーナーのマイク（任意）も聞く。ここで聞いた声はオーナーの声（オーナーの名前が要る）"""
         device = self.agent_owner_mic_var.get()
         if device == self.NO_OWNER_MIC or not device:
+            return
+        problem = self._owner_mic_problem(device)
+        if problem:                                    # 前から保存してあった場合も、ここで止める
+            self._append_agent_log(f"⚠️ オーナーのマイク: {problem}")
             return
         owners = runtime.config.owner_name_list
         if not owners:

@@ -15,7 +15,8 @@ import re
 
 from .config import OUTPUT_CHAT
 from .decision import ACTION_LABELS, DECISION_SCHEMA, REACT
-from .events import (EVENT_BLOCK_BEGIN, EVENT_BLOCK_END, KIND_CHAT_NOTICE, LOOKUP_BLOCK_BEGIN, LOOKUP_BLOCK_END,
+from .events import (EVENT_BLOCK_BEGIN, EVENT_BLOCK_END, KIND_CHAT_NOTICE, KIND_VOICE_UTTERANCE, LOOKUP_BLOCK_BEGIN,
+                     LOOKUP_BLOCK_END,
                      PAST_BLOCK_BEGIN, PAST_BLOCK_END,
                      RECENT_BLOCK_BEGIN, RECENT_BLOCK_END, ROOM_BLOCK_BEGIN, ROOM_BLOCK_END, clean_name, describe_event,
                      name_matches)
@@ -195,8 +196,30 @@ def _line(event, now, config):
     return f"{line} ［{'・'.join(tags)}］" if tags else line
 
 
-def scene_lines(config, room, now):
-    """今の日時（このPCの時刻）と、ルームの様子（ルーム名・ゲスト・席・アナウンス。人が書いたものは区切りの中）"""
+HEARD_VOICE_MINUTES = 10
+
+
+def heard_voice_line(events, now):
+    """直近10分に声として届いたもの（自分の声は除く）。誰の声か・何件か。届いていなければ「なし」とはっきり書く"""
+    counts, seen = {}, set()
+    for e in events:
+        if (e.event_id in seen or e.kind != KIND_VOICE_UTTERANCE or e.is_self
+                or now - e.observed_at > HEARD_VOICE_MINUTES * 60):
+            continue
+        seen.add(e.event_id)
+        who = clean_name(e.speaker) if e.speaker else "だれか"
+        counts[who] = counts.get(who, 0) + 1
+    head = f"直近{HEARD_VOICE_MINUTES}分に声として届いたもの: "
+    if not counts:
+        return head + "なし（だれの声も文字になっていない）"
+    return head + "・".join(f"{who} {n}件" for who, n in counts.items())
+
+
+def scene_lines(config, room, now, events=()):
+    """
+    今の日時（このPCの時刻）と、ルームの様子（ルーム名・ゲスト・席・アナウンス。人が書いたものは区切りの中）。
+    events は直近の出来事（声として実際に届いたものを数える）
+    """
     t = time.localtime(now)
     lines = ["## 場の様子",
              f"今: {t.tm_year}年{t.tm_mon}月{t.tm_mday}日（{_WEEKDAYS[t.tm_wday]}） {t.tm_hour:02d}:{t.tm_min:02d}（このPCの時刻）"]
@@ -220,6 +243,10 @@ def scene_lines(config, room, now):
     if config.hearing_active:
         lines.append("あなたが受け取れるもの: チャットの文字と、ルームの声を文字にしたもの（「声（だれか）」。誰の声かは分からない。"
                      "ミュートの人の声は届かない）")
+        # 実際に届いた声（2026-10-22 本人「声聞こえてないのに声聞こえてるとか嘘ついてる」。「聞いている」とだけ伝えていたので、
+        # 誰の声も届いていないのに「ちゃんと聞こえてるよ」と答えた）
+        lines.append(heard_voice_line(events, now)
+                     + "（声が聞こえるか聞かれたら、これだけを根拠に正直に答える。ここに無い人の声は「聞こえていない」と言う）")
     else:
         lines.append("あなたが受け取れるもの: チャットの文字だけ。ルームの声は聞こえていない"
                      "（「声が聞こえた」「いい声」などと、聞こえたように言わない）")
@@ -274,7 +301,7 @@ def build_decide_request(events, window, persona, config, rules_note, now, timeo
     user = "\n".join([
         "## 人格の要約", persona.summary_text(config.display_name),
         *self_lines(config),
-        *scene_lines(config, room, now),
+        *scene_lines(config, room, now, window.recent_events() + list(events)),
         *memory_section(memory_lines),
         "## 直近の会話", RECENT_BLOCK_BEGIN, *(recent or ["（なし）"]), RECENT_BLOCK_END,
         "## 自分の直近の発言", *own_lines,
@@ -411,7 +438,7 @@ def build_generate_request(decision, events, window, persona, config, now, timeo
     user = "\n".join([
         "## 人格", persona.full_text(config.display_name),
         *self_lines(config),
-        *scene_lines(config, room, now),
+        *scene_lines(config, room, now, window.recent_events() + list(events)),
         *memory_section(memory_lines),
         "## 直近の会話", RECENT_BLOCK_BEGIN, *(lines or ["（なし）"]), RECENT_BLOCK_END,
         *lookup_section(lookup),

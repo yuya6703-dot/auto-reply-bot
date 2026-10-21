@@ -1200,7 +1200,15 @@ class AgentRuntime:
             mine += [w for t, w in self._recent_fillers if self._clock() - t < 30]
         mine += [u.text for u in self.window.own_utterances()[-3:]]
         for said in (norm(m) for m in mine if m):
-            if heard in said or difflib.SequenceMatcher(None, heard, said).ratio() >= 0.7:
+            if heard in said:
+                return True
+            match = difflib.SequenceMatcher(None, heard, said)
+            if match.ratio() >= 0.7:
+                return True
+            # 聞こえたのが、喋った文の一部（漢字とかなが違っても）。2026-10-22 実物: 「たしかにまだ朝だもんね、眠気も残るよね」が
+            # 「確かにまだ朝だもんね」と文字になり、似方 0.64 で自分の声と分からず、オーナーの声として渡っていた。
+            # ⚠️ 短い声（4文字より短い）は、たまたま同じ言葉を言った人の声かもしれないので、ここでは自分の声にしない
+            if len(heard) >= 4 and sum(b.size for b in match.get_matching_blocks()) >= 0.8 * len(heard):
                 return True
         return False
 

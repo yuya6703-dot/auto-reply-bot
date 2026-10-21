@@ -245,6 +245,24 @@ def _cable(device):
     return m.group("name"), m.group("side")
 
 
+def owner_mic_problem(owner_device, room_device, tts_output=""):
+    """
+    オーナーのマイクに選んだ入力が、オーナーの声だけを拾えないなら、その理由（よければ ""）。
+    ここで聞いた声は全部オーナーの声として渡すので、ルームの音や AI 自身の声が流れる入力はだめ
+    （2026-10-22 実物: ルームの音と同じ CABLE Output を選んでいて、ルームの人の声も AI 自身の声もオーナーの声になり、
+    同じ音を2回ずつ文字にしていた。AI は「オーナーの声が聞こえている」と思い込んだ）
+    """
+    if not owner_device:
+        return ""
+    if owner_device == room_device:
+        return "ルームの音と同じ入力は、オーナーのマイクにできません（ルームの人の声やAI自身の声まで、オーナーの声として扱ってしまいます）。"
+    name, side = _cable(owner_device)
+    if name and side == "Output" and _cable(tts_output) == (name, "Input"):
+        return (f"この入力（{name} Output）には、読み上げ（AI自身の声）が流れています。オーナーのマイクにすると、"
+                "AIの声をオーナーの声として扱ってしまいます。オーナー自身のマイクを選んでください。")
+    return ""
+
+
 def assess_hearing_input(device, speakers, tts_output="", default_output=""):
     """
     選んだ聞く入力で、ルームの音（MuMu のスピーカーの音）が取れるか。戻り値 (ok, 説明)。

@@ -34,7 +34,6 @@ check("自分が喋っている間の「話している」は、自分の声な�
 a.mock.script_transcribe = [{"heard": "星がきれいに見えるらしい", "text": "星がきれいに見えるらしい", "confidence": "high"}]
 check("聞こえた声が自分の言っている文なら、自分の声として使わない", a.runtime.hear(WAV, 2.0) is None
       and any("自分の声なので使いません" in line for line in a.logs) and a.speaker.cancelled == [])
-
 print("■ 喋っている途中で、ほかの人が話し始めたら譲る")
 a.mock.script_transcribe = [{"heard": "ちょっと待って、それ私も見たい", "text": "ちょっと待って、それ私も見たい", "confidence": "high"}]
 a.mock.script_decide = [{"action": "engage", "reason": "続き", "target": "はなこ"}]
@@ -50,6 +49,24 @@ check("相手が話し終えたら判断する。言いかけたことを渡す�
 check("「さっきの続きだけど」などと続けてよい、合わなければ忘れてよい", "さっきの続きだけど" in a.decide_calls()[-1].messages[0].content)
 check("話せたら、言いかけたことは終わり", wait_until(lambda: len(a.speaker.spoken) >= 1, 8.0)
       and wait_until(lambda: a.runtime._pending_thought is None, 3.0))
+a.close()
+
+print("■ 喋り終えた自分の声が、漢字とかなの違う文になって聞こえても、自分の声（2026-10-22 本人「声聞こえてないのに声聞こえてるとか嘘ついてる」）")
+# 実物: AI が「たしかにまだ朝だもんね、眠気も残るよね。」と喋り、5秒後に「確かにまだ朝だもんね。」と文字になった。
+# 文字の似方が 0.64 で、自分の声と見分けられず、オーナーの声（オーナーのマイク経由）として渡っていた
+a = Agent(mode=MODE_ENGAGE, output_mode="voice_room", hearing_enabled=True, ai_name="アイ", owner_names="オーナー",
+          max_utterances_per_minute=10, min_gap_after_speaking=0.0)
+a.mock.script_decide = [{"action": "engage", "reason": "呼ばれた", "target": "たろう",
+                         "text": "たしかにまだ朝だもんね、眠気も残るよね。", "emotion": "calm"}]
+a.say("アイ、ねむたい", speaker="たろう")
+check("喋り終える", wait_until(lambda: a.speaker.spoken == ["たしかにまだ朝だもんね、眠気も残るよね。"]
+                               and a.runtime._current_text is None, 5.0), a.speaker.spoken)
+a.mock.script_transcribe = [{"heard": "確かにまだ朝だもんね。", "text": "確かにまだ朝だもんね。", "confidence": "high"}]
+check("漢字とかなが違っても、喋った文の一部なら自分の声として使わない", a.runtime.hear(WAV, 1.9) is None, a.logs[-2:])
+a.mock.script_transcribe = [{"heard": "確かにまだ朝だもんね。", "text": "確かにまだ朝だもんね。", "confidence": "high"}]
+check("オーナーのマイク経由で聞こえても、自分の声はオーナーの声にしない", a.runtime.hear(WAV, 1.9, speaker="オーナー") is None)
+a.mock.script_transcribe = [{"heard": "朝だね", "text": "朝だね", "confidence": "high"}]
+check("短い・一部だけ同じ人の声は使う（自分の声と取り違えない）", a.runtime.hear(WAV, 1.0) == "朝だね")
 a.close()
 
 print("■ チャット: 作っている間に会話が進んで出さなかった返事も、言いかけたこととして渡す")

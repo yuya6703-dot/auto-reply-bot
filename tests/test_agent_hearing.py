@@ -126,6 +126,14 @@ check("iPad などのライン入力・マイクは、分からない（何も�
 ok, why = assess_hearing_input(CABLE_OUT, [], tts_output=CABLE_IN)
 check("MuMu の設定が読めないときは決めつけない（読み上げと同じケーブルなら、気を付けることだけ伝える）",
       ok is None and "MuMu のスピーカーを「CABLE Input」にしていなければ" in why, why)
+print("■ オーナーのマイクに、ルームの音やAIの声が流れる入力を選ばせない（2026-10-22 本人「声聞こえてないのに声聞こえてるとか嘘ついてる」）")
+# 実物: オーナーのマイクとルームの音が同じ CABLE Output。ルームの音も AI 自身の声もオーナーの声として渡り、同じ音を2回ずつ文字にしていた
+from agent.hearing import owner_mic_problem
+check("ルームの音と同じ入力はだめ", "ルームの音と同じ入力" in owner_mic_problem(CABLE_OUT, CABLE_OUT, CABLE_IN))
+check("読み上げ（AI の声）が流れる仮想ケーブルの出口はだめ",
+      "AI自身の声" in owner_mic_problem(CABLE_OUT, LOOPBACK_DEFAULT, CABLE_IN))
+check("ふつうのマイクはよい", owner_mic_problem("Microphone (Senary Audio)", CABLE_OUT, CABLE_IN) == ""
+      and owner_mic_problem("", CABLE_OUT, CABLE_IN) == "")
 check("別の仮想ケーブル（CABLE-A）は、その入口と組にする",
       assess_hearing_input("CABLE-A Output (VB-Audio Cable A)", ["CABLE-A Input (VB-Audio Cable A)"])[0] is True
       and assess_hearing_input("CABLE-A Output (VB-Audio Cable A)", SPEAKER_CABLE)[0] is False)
@@ -263,6 +271,18 @@ check("聞いているときは「ルームの声を文字にしたもの（誰�
     lambda: len(a.decide_calls()) >= 2, 5.0) and "ルームの声を文字にしたもの" in a.decide_calls()[-1].messages[0].content)
 check("席のミュートの人数・自分のマイクを伝える", "そのうちミュート1人" in a.decide_calls()[-1].messages[0].content
       and "あなたのマイク: ミュートではない" in a.decide_calls()[-1].messages[0].content)
+# 2026-10-22 本人「声聞こえてないのに声聞こえてるとか嘘ついてる」。「聞いている」とだけ伝えていたので、誰の声も届いていないのに
+# 「ちゃんと聞こえてるよ」と答えた。実際に声として届いたもの（誰の声か・何件か）を伝え、聞かれたらそれだけを根拠に答えさせる
+check("聞いていても、まだ声が届いていなければ「なし」と伝える（聞かれたら正直に答える）",
+      "直近10分に声として届いたもの: なし" in a.decide_calls()[-1].messages[0].content
+      and "聞こえていない" in a.decide_calls()[-1].messages[0].content, a.decide_calls()[-1].messages[0].content[-600:])
+a.mock.script_transcribe = [{"heard": "こんばんは", "text": "こんばんは", "confidence": "high"}]
+a.runtime.config.min_gap_after_speaking = 0.0      # 直前に喋った後の保留（R6）で判断が遅れないように
+a.runtime.config.hearing_enabled = True
+check("（声を受け付ける）", a.runtime.hear(wav, 1.0) == "こんばんは")
+check("声が届いたら、誰の声か・何件かを伝える", wait_until(
+    lambda: any("直近10分に声として届いたもの: だれか 1件" in r.messages[0].content for r in a.decide_calls()), 5.0),
+    a.decide_calls()[-1].messages[0].content[-600:])
 a.runtime.set_room_info({"name": "x", "seated": 4, "empty_seats": 2, "muted_seats": 2, "my_mic": "muted"})
 spoken = len(a.speaker.spoken)
 a.say("アイ、もう一回", speaker="はなこ")
