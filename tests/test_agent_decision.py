@@ -175,8 +175,12 @@ check("1回で作った文も、出す前の確認を通す（長すぎれば喋
 b.close()
 b = Agent(mode=MODE_SILENT)
 b.say("アイ、ちょっと静かにしてて")
-check("呼ばれても黙ると決めたら、文は使わない（text は無い）", b.wait_decisions(1) and b.decisions()[-1][0] == "silent"
-      and b.speaker.spoken == [] and b.generate_calls() == [])
+# 2026-10-22 から、呼ばれたら黙らない（本人「反応が難しい場合なにも無視するんじゃなくてちゃんと発言するようにしてほしい」）。
+# 黙ると決めた回の文（text）は使わず、規則で短い返事にして、文を作り直す
+check("呼ばれても黙ると決めたら、その回の文は使わず、規則で短い返事にして文を作り直す",
+      b.wait_decisions(2) and [d[0] for d in b.decisions()[-2:]] == ["silent", "react"]
+      and b.decisions()[-1][3] == "ADDRESSED" and wait_until(lambda: len(b.speaker.spoken) == 1)
+      and len(b.generate_calls()) == 1, (b.decisions()[-2:], b.speaker.spoken))
 request = b.decide_calls()[0]
 check("1回で頼むときは、人格の全文と文字数の上限・文の作り方も渡す", "## 人格（話し方）" in request.messages[0].content
       and "40字以内" in request.messages[0].content and "発言するときの文の作り方" in request.system

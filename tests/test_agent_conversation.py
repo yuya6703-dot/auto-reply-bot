@@ -102,4 +102,42 @@ a.say("アイ、もう一回", speaker="はなこ")
 check("OFFならメンションしない", wait_until(lambda: len(a.chat.posted) == 7, 5.0) and last() == ("メンションなし", None))
 a.close()
 
+print("■ 呼ばれたら、答えにくくても黙らない（2026-10-22 本人「反応が難しい場合なにも無視するんじゃなくてちゃんと発言するようにしてほしい」）")
+# 実物: 「ここで1番仲がいい人はだれ?」→「特定の誰かを選ぶような質問には答えず見守る」、「〇〇って知ってる？」→ 黙る、
+# 「あなた受け身すぎるから…」→「会話が落ち着いたため」で黙っていた。AI の呼び出しに失敗したときも、何も言わずに終わっていた
+from agent.context import DECIDE_SYSTEM
+from agent.llm.mock import MODE_TIMEOUT
+check("判断の指示: あなた宛ての発言には、答えにくくても黙らずに返す（黙ってよいのは、あなた宛てでない話だけ）",
+      "答えにくい" in DECIDE_SYSTEM and "あなた宛てでない話" in DECIDE_SYSTEM)
+a = Agent(mode=MODE_ENGAGE, ai_name="アイ", ignored_people="あらし", min_gap_after_speaking=0.0)
+a.mock.script_decide = [{"action": "silent", "reason": "特定の誰かを選ぶ質問には答えない", "target": None}]
+a.say("アイ、ここで1番仲がいい人はだれ？", speaker="たろう")
+check("名前で呼ばれたのに AI が「黙る」を選んでも、短く返す", wait_until(lambda: len(a.speaker.spoken) == 1, 5.0)
+      and any("呼ばれたので黙らずに" in line for line in a.logs), a.logs[-3:])
+gen = [r for r in a.mock.requests if r.purpose == "generate"]
+check("文を作るときに「答えにくくても、無視せず正直にやわらかく」と伝える・相手は呼んだ人",
+      gen and "答えにくい" in gen[-1].messages[0].content and "相手: たろう" in gen[-1].messages[0].content,
+      gen[-1].messages[0].content[-400:] if gen else None)
+a.mock.script_decide = [{"action": "silent", "reason": "割り込む話ではない", "target": None}]
+a.say("今日は雨だね", speaker="はなこ")
+check("呼ばれていない話では、今まで通り黙ってよい", wait_until(lambda: any("割り込む話ではない" in line for line in a.logs), 5.0)
+      and len(a.speaker.spoken) == 1)
+calls = len(a.decide_calls())
+a.say("アイ、こっち見て", speaker="あらし")
+time.sleep(0.8)
+check("反応しない人に呼ばれても、返さない", len(a.speaker.spoken) == 1, a.speaker.spoken)
+a.close()
+
+a = Agent(mode=MODE_TIMEOUT, ai_name="アイ", min_gap_after_speaking=0.0, degraded_after_failures=10)
+a.say("アイ、やほ", speaker="たろう")
+check("AI の呼び出しに失敗しても、呼んだ人には「もう一回言って」と返す", wait_until(lambda: len(a.speaker.spoken) == 1, 5.0)
+      and "もう一回" in a.speaker.spoken[0], (a.speaker.spoken, a.logs[-3:]))
+a.say("アイ、聞いてる？", speaker="たろう")
+check("続けて失敗しても、言うのは2分に1回まで（同じことを繰り返さない）",
+      wait_until(lambda: sum("失敗しました" in line for line in a.logs) >= 2, 5.0) and len(a.speaker.spoken) == 1, a.speaker.spoken)
+a.say("今日は雨だね", speaker="はなこ")
+check("呼ばれていない話で失敗したときは、何も言わない",
+      wait_until(lambda: sum("失敗しました" in line for line in a.logs) >= 3, 5.0) and len(a.speaker.spoken) == 1)
+a.close()
+
 finish()

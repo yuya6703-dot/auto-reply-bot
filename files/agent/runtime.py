@@ -24,9 +24,9 @@ from typing import Callable
 from .audit import AuditLog
 from .cancel import CancelToken
 from .config import OUTPUT_CHAT, OUTPUT_VOICE_ROOM, split_names
-from .context import (ConversationWindow, build_combined_request, build_decide_request, build_generate_request,
-                      max_chars_for, rules_note)
-from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HOLD, OBSERVE, SILENT,
+from .context import (RULE_ADDRESSED, ConversationWindow, build_combined_request, build_decide_request,
+                      build_generate_request, max_chars_for, rules_note)
+from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HOLD, OBSERVE, REACT, SILENT,
                        SPEAKING_ACTIONS, USE_TOOL,
                        Decision, DecisionFailed, call_llm, request_decision)
 from .gate import HOLD as GATE_HOLD
@@ -42,7 +42,8 @@ from .inbox import Inbox
 from .memory.recall import MemoryKeeper, is_sensitive
 from .owner import CMD_MUTE, CMD_REMEMBER, CMD_UNMUTE, is_owner, parse_command
 from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_DIGEST, PURPOSE_GENERATE,
-                       PURPOSE_PROFILE, PURPOSE_SUMMARIZE, PURPOSE_TRANSCRIBE, LLMError, LLMMessage, LLMRequest)
+                       PURPOSE_PROFILE, PURPOSE_SUMMARIZE, PURPOSE_TRANSCRIBE, RETRYABLE_KINDS, LLMError, LLMMessage,
+                       LLMRequest)
 from .persona import DEFAULT_PERSONA_ID, Persona, account_persona_id
 from .tools.lookup import TOOL_LABELS, TOOLS, LookupResult
 from .usage import UsageTracker
@@ -171,6 +172,7 @@ class AgentRuntime:
         self._digest_request = None        # 「今のまとめを作る」と頼まれた日（画面から）
         self._heard = []                   # 文字にした声 [(時刻, 秒)]（1時間の上限）
         self._owner_heard = []             # オーナーのマイクで聞いた文 [(時刻, 文)]（ルームの音で同じ声を2度聞かない）
+        self._last_fallback = -1e9           # 決まった返事（呼ばれていたのに返事が作れなかった）を最後に言った時刻
         self._own_voice = []               # ルームへ喋った時間 [(始め, 終わり)]（聞こえた声が自分の声かを見分ける）
         self._current_text = None          # 今喋っている文（割り込まれたら「言いかけたこと」にする）
         self._pending_thought = None       # 言いかけて止めたこと {"text", "at", "why"}（相手に譲った・会話が進んで出さなかった）
@@ -669,10 +671,14 @@ class AgentRuntime:
             reason = "AIが答えなかった" if e.kind == FAIL_REFUSED else "AIの返事の形が合わなかった"
             self._record(Decision(SILENT, reason, DECIDED_BY_LLM, turn_id))
             self.log.write(f"🤫 沈黙（{reason}）")
+            if not cancel.cancelled:
+                self._fallback_reply("refused" if e.kind == FAIL_REFUSED else "failed", turn_id, events)
             return
         except LLMError as e:
             self._stop_filler(filler)
             self._on_llm_failure(e, turn_id)
+            if e.kind in RETRYABLE_KINDS and not cancel.cancelled:
+                self._fallback_reply("failed", turn_id, events)
             return
         self._failures = 0
         if cancel.cancelled:
@@ -694,13 +700,23 @@ class AgentRuntime:
         if decision.target and is_ignored_name(decision.target, self.config):
             self.log.write(f"🤫 沈黙: 「{decision.target}」は反応しない人です。")
             return
+        addressed = self._addressed_event(events)
+        held_before = bool({e.event_id for e in events} & self._llm_held_ids)
+        if addressed is not None and (decision.action in (SILENT, OBSERVE) or (decision.action == HOLD and held_before)):
+            # 呼ばれたのに黙らない（2026-10-22 本人「反応が難しい場合なにも無視するんじゃなくてちゃんと発言するようにしてほしい」）。
+            # 実物: 「ここで1番仲がいい人はだれ?」を「特定の誰かを選ぶ質問には答えない」で黙っていた。短い返事にする
+            self.log.write(f"💬 呼ばれたので黙らずに短く返します（AI は「{decision.reason}」で黙ろうとした）。")
+            decision = replace(decision, action=REACT, decided_by=DECIDED_BY_RULE, rule_id=RULE_ADDRESSED,
+                               target=decision.target or addressed.speaker)
+            prepared = None
+            self._record(decision)           # 記録にも残す（AI の判断のあとに、規則で返事にしたこと）
         if decision.action in (SILENT, OBSERVE):
             mark = "📝 記録だけ" if decision.action == OBSERVE else "🤫 沈黙"
             self.log.write(f"{mark}: {decision.reason}")
             return
         if decision.action == HOLD:
             ids = {e.event_id for e in events}
-            if ids & self._llm_held_ids:
+            if held_before:
                 self.log.write(f"🤫 沈黙: {decision.reason}（保留は1回まで）")
                 return
             self._llm_held_ids |= ids
@@ -726,6 +742,8 @@ class AgentRuntime:
             except (DecisionFailed, LLMError) as e:
                 if isinstance(e, LLMError):
                     self._on_llm_failure(e, turn_id, during="文を作る")
+                    if e.kind in RETRYABLE_KINDS and not cancel.cancelled:
+                        self._fallback_reply("failed", turn_id, events)
                 else:
                     self.log.write("🤫 沈黙（AIが文を作れなかった）")
                 return
@@ -851,6 +869,31 @@ class AgentRuntime:
         if len(self._owner_done) > 500:
             self._owner_done = set(list(self._owner_done)[-200:])
         return handled
+
+    # 呼ばれていたのに AI の返事が作れなかったときの決まった返事（2026-10-22 本人「反応が難しい場合なにも無視するんじゃなくて
+    # ちゃんと発言するようにしてほしい」。実物: AI の呼び出しの失敗（混雑・時間切れ）で、呼びかけ11件に何も言わずに終わっていた）
+    FALLBACK_REPLIES = {"failed": "ごめん、今うまく考えがまとまらなかった…もう一回言ってくれる？",
+                        "refused": "うーん、それはちょっと答えにくいな…ごめんね"}
+    FALLBACK_GAP_SECONDS = 120.0        # 同じことを繰り返さない（混雑が続くと何度も失敗する）
+
+    def _addressed_event(self, events):
+        """名前・メンションで AI を呼んだ出来事（反応しない人・自分・起動前からあった行は除く）。無ければ None"""
+        for e in events:
+            if e.kind != KIND_SYSTEM and not is_ignored(e, self.config) and is_strong_signal(e, self.config.call_names):
+                return e
+        return None
+
+    def _fallback_reply(self, kind, turn_id, events):
+        addressed = self._addressed_event(events)
+        if addressed is None or self._emergency:
+            return
+        now = self._clock()
+        with self._lock:
+            if now - self._last_fallback < self.FALLBACK_GAP_SECONDS:
+                return
+            self._last_fallback = now
+        self.log.write("💬 呼ばれていたので、決まった返事をします。")
+        self._say_fixed(self.FALLBACK_REPLIES[kind], turn_id, addressed.speaker)
 
     def _say_fixed(self, text, turn_id, target):
         """
