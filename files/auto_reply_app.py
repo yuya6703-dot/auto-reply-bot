@@ -6,6 +6,7 @@ import threading
 import time
 import datetime
 import hashlib
+from collections import deque
 import re
 import os
 import sys
@@ -619,6 +620,32 @@ def mask_screen_text(message, keep_words=()):
         return SCREEN_TEXT_MASK
 
     return _QUOTED_TEXT_RE.sub(lambda m: "「" + mask_one(m.group(1)) + "」", message)
+
+
+# --- ログを1つにまとめる（2026-10-23 本人「ログの統合して欲しい」→「1つにまとめる」） ---
+LOG_KIND_MAIN = "main"      # 監視・送信など（メインのログ）
+LOG_KIND_AI = "ai"          # AI の判断のログ
+LOG_FILTER_KINDS = {"すべて": None, "監視・送信": LOG_KIND_MAIN, "AI": LOG_KIND_AI}
+LOG_VIEW_MAX_LINES = 1000
+
+
+class UnifiedLog:
+    """
+    メインタブのログ欄に出す、すべてのログ（監視・送信と、AI の判断のログ）。来た順（＝時刻順）に持ち、種類で絞って見せる。
+    画面に出す分だけを持つ（保存は DB の logs。AI の分も保存する）
+    """
+
+    def __init__(self, max_entries=3000):
+        self._entries = deque(maxlen=max_entries)
+
+    def add(self, kind, text):
+        self._entries.append((kind, text))
+
+    def lines(self, kind=None):
+        return [text for k, text in self._entries if kind is None or k == kind]
+
+    def clear(self):
+        self._entries.clear()
 
 
 def normalize_number_text(text):
@@ -7924,6 +7951,16 @@ class App(ctk.CTk):
             command=self.copy_all_log
         ).pack(side="right", padx=(0, 5))
 
+        # ログは1つにまとめて、種類で絞って見せる（2026-10-23 本人「ログの統合して欲しい」→「1つにまとめる」）
+        self.unified_log = UnifiedLog()
+        log_filter_row = ctk.CTkFrame(self.tab_main, fg_color="transparent")
+        log_filter_row.pack(fill="x", padx=15, pady=(0, 0))
+        ctk.CTkLabel(log_filter_row, text="ログの表示:").pack(side="left", padx=(0, 6))
+        self.log_filter_var = ctk.StringVar(value="すべて")
+        ctk.CTkSegmentedButton(log_filter_row, values=list(LOG_FILTER_KINDS), variable=self.log_filter_var,
+                               command=self.on_log_filter_changed).pack(side="left")
+        ctk.CTkLabel(log_filter_row, text="（🤖 で始まる行は AI の判断のログ。AIタブにも出ます）", text_color="gray").pack(
+            side="left", padx=(8, 0))
         self.log_textbox = ctk.CTkTextbox(self.tab_main, state="disabled")
         self.log_textbox.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -11561,10 +11598,19 @@ class App(ctk.CTk):
         return list(self._agent_voice_style_map(getattr(persona, "voice", None) or self.get_speech_speaker_id()))
 
     def _append_agent_log(self, line):
+        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        # メインタブのログにもまとめて出し（🤖 で始める）、保存もする（2026-10-23 本人「ログの統合して欲しい」）。
+        # ⚠️ 保存するときは、画面の文字（「」の中＝ほかの人の名前・発言）を伏せる。受け取った発言をそのまま書いた行（📥）は保存しない
+        #    （中身は AI の記録 agent_data.db にある）。前は画面に出るだけで、あとから理由を調べられなかった
+        self._add_to_unified(LOG_KIND_AI, f"🤖 {stamp} {line}")
+        if not line.lstrip().startswith("📥"):
+            try:
+                self.db.save_log(mask_screen_text(f"🤖 {line}"))
+            except Exception:
+                pass
         box = getattr(self, "agent_log_textbox", None)
         if box is None or not box.winfo_exists():
             return
-        stamp = datetime.datetime.now().strftime("%H:%M:%S")
         box.configure(state="normal")
         box.insert("end", f"{stamp} {line}\n")
         lines = int(box.index("end-1c").split(".")[0])
@@ -14100,16 +14146,7 @@ class App(ctk.CTk):
 
         def update_gui():
             if self.winfo_exists():
-                self.log_textbox.configure(state="normal")
-                self.log_textbox.insert("end", message + "\n")
-
-                lines = int(self.log_textbox.index('end-1c').split('.')[0])
-                if lines > 1000:
-                    self.log_textbox.delete("1.0", f"{lines - 1000}.0")
-
-                self.log_textbox.configure(state="disabled")
-                if self.auto_scroll_var.get():
-                    self.log_textbox.yview("end")
+                self._add_to_unified(LOG_KIND_MAIN, message)
         # ⚠️ ワーカースレッドから after() を直接呼ばない。
         # mainloopが回っている間は通るが、起動直後や終了処理中は
         # RuntimeError("main thread is not in main loop") になり、
@@ -14130,6 +14167,43 @@ class App(ctk.CTk):
             self._post_to_ui(update_gui)
         except Exception:
             pass
+
+    def _log_filter_kind(self):
+        var = getattr(self, "log_filter_var", None)
+        return LOG_FILTER_KINDS.get(var.get() if var is not None else "すべて")
+
+    def _add_to_unified(self, kind, text):
+        """ログを1つのため置き場に足し、今の絞り込みに合えばメインタブのログ欄にも出す（メインスレッドから）"""
+        log = getattr(self, "unified_log", None)
+        if log is None:
+            self.unified_log = log = UnifiedLog()
+        log.add(kind, text)
+        shown = self._log_filter_kind()
+        if getattr(self, "log_textbox", None) is not None and (shown is None or shown == kind):
+            self._insert_log_line(text)
+
+    def _insert_log_line(self, text):
+        box = self.log_textbox
+        box.configure(state="normal")
+        box.insert("end", text + "\n")
+        lines = int(box.index("end-1c").split(".")[0])
+        if lines > LOG_VIEW_MAX_LINES:
+            box.delete("1.0", f"{lines - LOG_VIEW_MAX_LINES}.0")
+        box.configure(state="disabled")
+        auto = getattr(self, "auto_scroll_var", None)
+        if auto is None or auto.get():
+            box.yview("end")
+
+    def on_log_filter_changed(self, _value=None):
+        """ログの表示（すべて・監視・送信・AI）を切り替えたら、ため置き場から出し直す"""
+        lines = self.unified_log.lines(self._log_filter_kind())[-LOG_VIEW_MAX_LINES:]
+        box = self.log_textbox
+        box.configure(state="normal")
+        box.delete("1.0", "end")
+        if lines:
+            box.insert("end", "\n".join(lines) + "\n")
+        box.configure(state="disabled")
+        box.yview("end")
 
     # --- ログのコピー ---
     def _log_inner_widget(self):
@@ -14192,6 +14266,9 @@ class App(ctk.CTk):
 
     def clear_log_display(self):
         """画面のログ表示だけを消す（DBに保存された監視ログはそのまま）"""
+        log = getattr(self, "unified_log", None)
+        if log is not None:
+            log.clear()
         widget = self._log_inner_widget()
         try:
             widget.configure(state="normal")

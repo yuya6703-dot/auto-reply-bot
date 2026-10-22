@@ -67,6 +67,9 @@ class Harness(ctk.CTk):
     on_agent_mock_mode_selected = A.App.on_agent_mock_mode_selected
     _agent_speak = A.App._agent_speak
     _append_agent_log = A.App._append_agent_log
+    _add_to_unified = A.App._add_to_unified
+    _log_filter_kind = A.App._log_filter_kind
+    _insert_log_line = A.App._insert_log_line
     clear_agent_log = A.App.clear_agent_log
     _refresh_agent_provider_label = A.App._refresh_agent_provider_label
     _refresh_agent_state = A.App._refresh_agent_state

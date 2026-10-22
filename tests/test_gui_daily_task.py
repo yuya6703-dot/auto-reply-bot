@@ -92,6 +92,7 @@ class Harness(ctk.CTk):
     def copy_log_selection(self): pass
     def select_all_log(self): pass
     def clear_log_display(self): pass
+    def on_log_filter_changed(self, value=None): pass
     def _show_log_context_menu(self, event): pass
     def _show_entry_context_menu(self, event): pass
     def on_emulator_auto_scroll_toggle(self): pass
