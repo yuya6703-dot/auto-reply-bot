@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 import datetime
+import hashlib
 import re
 import os
 import sys
@@ -14740,7 +14741,48 @@ class App(ctk.CTk):
         self.destroy()
 
 
+_ERROR_ALREADY_EXISTS = 183
+_single_instance_handle = None
+
+
+def acquire_single_instance(base_dir, wait_seconds=3.0):
+    """
+    同じフォルダのアプリを2つ同時に動かさない（2026-10-23 本人「ツールによる音声ルームの挙動がおかしい」。実物: 同じ auto_reply_app.py が
+    前の日から動いたまま、もう1つ起動されていて、2つが同じ MuMu を見て判断・入力・送信し、シートや入力欄を取り合っていた）。
+    フォルダごとの名前付きミューテックスを持てたら True。自動アップデートの入れ替え直後に前のアプリが閉じきっていないことに備えて、少し待つ。
+    ⚠️ フォルダごとにする: リリースの確かめで、別のフォルダの配布版を本人のアプリの横で起動するため（MuMu は操作しない）
+    """
+    global _single_instance_handle
+    if os.name != "nt":
+        return True
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    name = "Local\\GraHojoTool_" + hashlib.sha1(os.path.normcase(os.path.abspath(base_dir)).encode("utf-8")).hexdigest()[:16]
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        handle = kernel32.CreateMutexW(None, False, name)
+        already = kernel32.GetLastError() == _ERROR_ALREADY_EXISTS
+        if handle and not already:
+            _single_instance_handle = handle      # 終わるまで持ち続ける（閉じると、別のアプリが起動できてしまう）
+            return True
+        if handle:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
 def main():
+    if not acquire_single_instance(BASE_DIR):
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo(
+            f"{APP_DISPLAY_NAME}",
+            f"{APP_DISPLAY_NAME}は、もう起動しています。\n\n"
+            "同じアプリを2つ同時に動かすと、同じMuMuを取り合って、ルームでの動きがおかしくなるため、2つ目は起動しません。\n"
+            "タスクバーにある、起動中の画面を使ってください。")
+        root.destroy()
+        return
     app = App()
     app.mainloop()
 
