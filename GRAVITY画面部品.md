@@ -216,7 +216,11 @@ cvRoot → include → llFeedItem
 ⚠️ 画面の部品の上では、本物のメンションもただの文字「@名前 」にしか見えない。メンションのあとに入力欄を書き直すと、ただの文字になる。2026-10-22 実機）, `llName`→`tvName`→`shimmerTextView`, `ivCharmLevel`, `flContainer`→`tvContent`）。お知らせ `tvText`（「〜がマイクをもらいました」など）。ミッションの札 `clContent`（`tvContent`「ルーム個人ミッションを達成しました !」, `ivReward`, `tvCount`「x1000」, `btnNext`「景品GETへ」）。⚠️ 景品GETへ は押さない |
 | 右の席 `rvSeats` | 座っている席 `ivAvatar` + `vSideView`（`tvPos`=席番号, `ivMuted`（その席がミュート。斜線のマイクの印）, `ivVolume`（話せる席）, オーナーは `ivAnchorLevelIcon`）。空いた席 `ivAdd` + `tvPosition`。⚠️ ivAdd は押さない（席の申請になる） |
 | 右下 | `clCount`→`tvUserCount`「ゲスト（N人）」, `rvViewers`。初回課金の案内 `clFirstRecharge`（`ivFirstRechargeClose`, 「あと5日」） |
-| 下の帯 `layoutActions` | `etText`「メッセージを送信」（入力欄。空のときは案内文が文字として入っている。ボットはこれで入力欄を探す）, `roomerBtnLottery`, `roomerBtnGift`→`ivIcon`（⚠️ ギフト）, `roomerBtnMenu`（機能一覧）, `roomerBtnMicrophone`（⚠️ マイクの申請。席に座っていればマイクの ON/OFF。**ミュートのとき `selected="true"`**、ONのとき・席にいないときは `false`。画面の「🎤 ON / OFF」の文字は絵の一部で、文字としては読めない。2026-10-22 実機。親の `roomerClBtnApplySeat` は変わらない） |
+| 下の帯 `layoutActions` | `etText`「メッセージを送信」（入力欄。空のときは案内文が文字として入っている。ボットはこれで入力欄を探す）, `roomerBtnLottery`, `roomerBtnGift`→`ivIcon`（⚠️ ギフト）, `roomerBtnMenu`（機能一覧）, 入力のシート（`design_bottom_sheet`: `ivImage`, `ivFaceKeyboard`＝顔の一覧を開く, `etText`, `btnSend`「送る」。
+シートが開いている間は、画面の読み取りにシートの部品しか出ない。⚠️ しばらく何もしていないと、入力欄の1回目のタップでシートが開かないことがある）。
+顔の一覧の顔は `fl_root`（文字・説明の印は無い）。押すと入力欄に「[にこやか]」のような符号が入り、GRAVITY が顔の絵にして表示する
+（符号の一覧は files/agent/gravity_faces.py。71個。⚠️ 入力欄は約145字で止まる）。2026-10-22 実機,
+`roomerBtnMicrophone`（⚠️ マイクの申請。席に座っていればマイクの ON/OFF。**ミュートのとき `selected="true"`**、ONのとき・席にいないときは `false`。画面の「🎤 ON / OFF」の文字は絵の一部で、文字としては読めない。2026-10-22 実機。親の `roomerClBtnApplySeat` は変わらない） |
 
 | 押した先 | 主な部品 |
 |---|---|

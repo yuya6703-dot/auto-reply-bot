@@ -37,6 +37,7 @@ from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, Utterance, prech
 from .events import (KIND_CHAT_MESSAGE, KIND_SYSTEM, KIND_VOICE_UTTERANCE, RECENT_BLOCK_BEGIN, RECENT_BLOCK_END,
                      SOURCE_GRAVITY, SOURCE_SYSTEM, SOURCE_VOICE, AgentEvent, clean_name, describe_event,
                      name_matches, new_event_id)
+from .gravity_faces import clean_faces
 from .hearing import is_backchannel, is_laughter
 from .inbox import Inbox
 from .memory.recall import MemoryKeeper, is_sensitive
@@ -172,7 +173,9 @@ class AgentRuntime:
         self._digest_request = None        # 「今のまとめを作る」と頼まれた日（画面から）
         self._heard = []                   # 文字にした声 [(時刻, 秒)]（1時間の上限）
         self._owner_heard = []             # オーナーのマイクで聞いた文 [(時刻, 文)]（ルームの音で同じ声を2度聞かない）
-        self._last_fallback = -1e9           # 決まった返事（呼ばれていたのに返事が作れなかった）を最後に言った時刻
+        self._last_fallback = -1e9
+        self._reconsider = {}                # 返さなかった発言 {event_id: 理由・心の中・相手・時刻・渡したか}（もう一度考える）
+        self._last_reconsider = -1e9           # 決まった返事（呼ばれていたのに返事が作れなかった）を最後に言った時刻
         self._own_voice = []               # ルームへ喋った時間 [(始め, 終わり)]（聞こえた声が自分の声かを見分ける）
         self._current_text = None          # 今喋っている文（割り込まれたら「言いかけたこと」にする）
         self._pending_thought = None       # 言いかけて止めたこと {"text", "at", "why"}（相手に譲った・会話が進んで出さなかった）
@@ -577,7 +580,9 @@ class AgentRuntime:
         now = self._clock()
         turn_id = self._new_turn(events, now)
         self.window.add_events(events)      # 保留から戻った出来事は、窓が同じものを2度入れない
-        named = next((e for e in events if e.meta.get("account")), None)
+        # 今のアカウントは、いちばん新しい出来事から決める（保留から戻った古い出来事は前に並ぶ。2026-10-22: 古い出来事のアカウントで
+        # 判断して、新しい発言のアカウントの人格を使っていなかった）
+        named = next((e for e in reversed(events) if e.meta.get("account")), None)
         if named is not None:
             self._account = named.meta["account"]
             self.config.active_account = self._account
@@ -649,6 +654,9 @@ class AgentRuntime:
         owner = self._owner_lines(events)
         if owner:
             memory_lines["owner"] = owner
+        reconsider = self._reconsider_lines(events, now)
+        if reconsider:
+            memory_lines["reconsider"] = reconsider
         if self.config.output_mode != OUTPUT_CHAT and self.deps.voice_profile is not None:
             try:
                 self.config.self_voice = str(self.deps.voice_profile() or "")[:40]
@@ -710,6 +718,8 @@ class AgentRuntime:
                                target=decision.target or addressed.speaker)
             prepared = None
             self._record(decision)           # 記録にも残す（AI の判断のあとに、規則で返事にしたこと）
+        if decision.action in (SILENT, OBSERVE) and self._start_reconsider(events, decision):
+            return
         if decision.action in (SILENT, OBSERVE):
             mark = "📝 記録だけ" if decision.action == OBSERVE else "🤫 沈黙"
             self.log.write(f"{mark}: {decision.reason}")
@@ -876,6 +886,51 @@ class AgentRuntime:
                         "refused": "うーん、それはちょっと答えにくいな…ごめんね"}
     FALLBACK_GAP_SECONDS = 120.0        # 同じことを繰り返さない（混雑が続くと何度も失敗する）
 
+    def _start_reconsider(self, events, decision):
+        """
+        人の発言に返さないと決めたとき、すぐに終わりにせず、少しあとでもう一度考える（2026-10-22 本人「無視した場合のこと考えて
+        相手はこう考えるかもしれないと、心の中で考え、再度返すべきか考える機能欲しい」）。保留したら True。
+        同じ発言は1回だけ・1分に1回まで（AI を呼ぶ回数を増やしすぎない）。⚠️ 保留できる長さ（発言から hold_max_seconds）に収まるときだけ
+        """
+        c = self.config
+        if not c.reconsider_enabled:
+            return False
+        targets = [e for e in events if e.kind in (KIND_CHAT_MESSAGE, KIND_VOICE_UTTERANCE) and not e.is_self
+                   and not e.backlog and e.speaker and not is_ignored(e, c) and not e.meta.get("backchannel")]
+        if not targets or any(e.event_id in self._reconsider for e in events):
+            return False
+        now = self._clock()
+        wait = min(c.reconsider_seconds, c.hold_max_seconds - (now - min(e.observed_at for e in events)) - 2.0)
+        if wait < min(3.0, c.reconsider_seconds):
+            return False
+        with self._lock:
+            if now - self._last_reconsider < c.reconsider_gap_seconds:
+                return False
+            self._last_reconsider = now
+            self._reconsider = {k: v for k, v in self._reconsider.items() if now - v["at"] < 600}
+            for e in targets:
+                self._reconsider[e.event_id] = {"reason": decision.reason, "inner": decision.inner,
+                                                "speaker": clean_name(e.speaker), "at": now, "used": False}
+        self._hold(events, wait)
+        self.log.write(f"💭 返さないことにしたけど、相手がどう思うか考えて、{wait:.0f}秒後にもう一度考えます（{decision.reason}）。")
+        return True
+
+    def _reconsider_lines(self, events, now):
+        """もう一度考えるときに渡す「さっき返さなかった発言」。⚠️ 人が書いた文はここに写さない（今回の出来事の中にある）"""
+        lines = []
+        with self._lock:
+            for e in events:
+                info = self._reconsider.get(e.event_id)
+                if info is None or info["used"]:
+                    continue
+                info["used"] = True
+                line = (f"{max(0, int(now - info['at']))}秒前、「{info['reason']}」と考えて、{info['speaker']}さんの発言"
+                        "（今回の出来事にある）に返さなかった。")
+                if info["inner"]:
+                    line += f"そのときの心の中: {info['inner']}"
+                lines.append(line)
+        return lines
+
     def _addressed_event(self, events):
         """名前・メンションで AI を呼んだ出来事（反応しない人・自分・起動前からあった行は除く）。無ければ None"""
         for e in events:
@@ -1039,6 +1094,11 @@ class AgentRuntime:
             self._speech_cancel = token
         self._set_state(STATE_POSTING)
         utterance = self._with_mention(utterance, decision.target)
+        if self.config.chat_emoji:
+            # GRAVITY の顔だけにする（一覧に無い符号・ふつうの絵文字を外し、顔は2個まで。2026-10-22）
+            cleaned = clean_faces(utterance.text)
+            if cleaned and cleaned != utterance.text:
+                utterance = replace(utterance, text=cleaned)
         label = "参加" if decision.action == ENGAGE else "短く反応"
         self.log.write(f"✍️ チャットに書く（{label}）:「{utterance.text}」")
         started = self._clock()

@@ -9981,6 +9981,12 @@ class App(ctk.CTk):
         self.agent_filler_var = ctk.BooleanVar(value=AgentConfig.load(self.db.get_setting).thinking_fillers)
         ctk.CTkSwitch(control, text="🤔 考え中に「えーと」「うーん」などを言う（声で答えるとき。返事に2秒以上かかったら）",
                       variable=self.agent_filler_var, command=self.on_agent_filler_toggled).pack(anchor="w", padx=12, pady=(0, 6))
+        # 返さなかったら考え直す（2026-10-22 本人「無視した場合のこと考えて相手はこう考えるかもしれないと、心の中で考え、
+        # 再度返すべきか考える機能欲しい」。既定ON）
+        self.agent_reconsider_var = ctk.BooleanVar(value=AgentConfig.load(self.db.get_setting).reconsider_enabled)
+        ctk.CTkSwitch(control, text="💭 返さなかったら、相手がどう思うか心の中で考えて、少しあとでもう一度考える（1分に1回まで）",
+                      variable=self.agent_reconsider_var, command=self.on_agent_reconsider_toggled).pack(
+            anchor="w", padx=12, pady=(0, 6))
         # 頼まれたら調べる（2026-10-16 本人「調べるからちょっと待っててねみたいな一言」「チャットの中の話ね」）
         lookup_config = AgentConfig.load(self.db.get_setting)
         self.agent_lookup_var = ctk.BooleanVar(value=lookup_config.lookup_enabled)
@@ -10093,7 +10099,7 @@ class App(ctk.CTk):
         ctk.CTkSwitch(settings, text="特定の人にチャットで返すときは、文の頭にメンション（@名前）を付ける",
                       variable=self.agent_mention_var, command=self.on_agent_mention_toggled).pack(anchor="w", padx=12, pady=(0, 4))
         self.agent_emoji_var = ctk.BooleanVar(value=config.chat_emoji)
-        ctk.CTkSwitch(settings, text="チャットで気持ちを絵文字で表す（AIが1〜2個まで選ぶ。真面目な話では控えめに）",
+        ctk.CTkSwitch(settings, text="チャットで気持ちをGRAVITYの顔で表す（[にこやか] など。AIが1〜2個まで選ぶ。真面目な話では控えめに）",
                       variable=self.agent_emoji_var, command=self.on_agent_emoji_toggled).pack(anchor="w", padx=12, pady=(0, 4))
         ctk.CTkLabel(settings, text="チャットは1分に1通・1時間に20通まで（話しかけられたときは、続けて話すがONなら1分に4回まで）。"
                                     "送るのはメインタブの監視です（監視していないと送れません）。",
@@ -11041,7 +11047,7 @@ class App(ctk.CTk):
         self.db.save_setting("agent.chat_emoji", "1" if on else "0")
         if self.agent_runtime is not None:
             self.agent_runtime.config.chat_emoji = on
-        self._append_agent_log("😊 チャットで気持ちを絵文字で表します。" if on else "😊 チャットで絵文字は使いません。")
+        self._append_agent_log("😊 チャットで気持ちをGRAVITYの顔で表します。" if on else "😊 チャットでGRAVITYの顔・絵文字は使いません。")
 
     def on_agent_mute_chat_toggled(self):
         on = bool(self.agent_mute_chat_var.get())
@@ -11050,6 +11056,14 @@ class App(ctk.CTk):
             self.agent_runtime.config.mute_fallback_chat = on
         self._append_agent_log("🎙 AIのマイクがミュートのときは、チャットで返します。" if on
                                else "🎙 AIのマイクがミュートでも、声で返します（ルームには届きません）。")
+
+    def on_agent_reconsider_toggled(self):
+        on = bool(self.agent_reconsider_var.get())
+        self.db.save_setting("agent.reconsider_enabled", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.reconsider_enabled = on
+        self._append_agent_log("💭 返さなかったら、相手の気持ちを考えてもう一度考えます。" if on
+                               else "💭 返さないと決めたら、考え直しません。")
 
     def on_agent_filler_toggled(self):
         on = bool(self.agent_filler_var.get())

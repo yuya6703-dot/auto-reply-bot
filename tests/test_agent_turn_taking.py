@@ -7,7 +7,7 @@
 """
 import time
 
-from agent_harness import Agent, check, finish, wait_until
+from agent_harness import Agent, check, finish, make_event, wait_until
 from agent.hearing import to_wav
 from agent.llm.mock import MODE_ENGAGE
 
@@ -107,17 +107,30 @@ check("喋っていないときの笑い声だけには返事をしない（記�
       and len(a.decide_calls()) == calls, a.logs[-3:])
 a.close()
 
-print("■ チャットで気持ちを絵文字で表す（2026-10-16 本人「チャットで感情を出す時、絵文字で表現する仕組み」）")
+print("■ チャットで気持ちを GRAVITY の顔で表す（2026-10-16「絵文字で表現」→ 2026-10-22 本人「グラビティアプリ内で使える顔文字」を「使う」）")
+# GRAVITY の顔は文字の符号（「[無表情]」など）でチャット欄に入り、GRAVITY が顔の絵にする（実機の一覧で71個の符号を読んだ）
+from agent.gravity_faces import ALL_CODES, clean_faces
+check("顔の符号は71個（実機の一覧で読んだもの）", len(ALL_CODES) == 71 and "[無表情]" in ALL_CODES and "[パチパチ]" in ALL_CODES)
 a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto")
+a.mock.script_decide = [{"action": "engage", "reason": "お祝い", "target": "たろう",
+                         "text": "おめでとう！🎉 すごいね[おめでとう][パチパチ][拍手][にこやか]", "emotion": "joy"}]
 a.say("アイ、合格したよ", speaker="たろう")
-check("チャットのときは、気持ちに合う絵文字を1〜2個使ってよいと伝える", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
-      and "気持ちに合う絵文字を1〜2個" in a.decide_calls()[0].messages[0].content
+check("チャットのときは、GRAVITY の顔の一覧と使い方を伝える（ふつうの絵文字・顔文字は使わない）",
+      wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+      and "## 絵文字（GRAVITY の顔）" in a.decide_calls()[0].messages[0].content
+      and "[にこやか]" in a.decide_calls()[0].messages[0].content
+      and "ふつうの絵文字" in a.decide_calls()[0].messages[0].content
       and "絵文字の使い方は「## 絵文字」に従う" in a.decide_calls()[0].system)
+check("送る前に、ふつうの絵文字と一覧に無い符号を外し、顔は2個まで",
+      wait_until(lambda: len(a.chat.posted) == 1, 5.0) and a.chat.posted[0] == "おめでとう！ すごいね[おめでとう][パチパチ]",
+      a.chat.posted)
 a.close()
+check("人が書いた長い括弧・空白入りの括弧は外さない", clean_faces("[今日のテーマ: 好きな食べ物] いいね[にこやか]")
+      == "[今日のテーマ: 好きな食べ物] いいね[にこやか]")
 a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto", chat_emoji=False)
 a.say("アイ、合格したよ", speaker="たろう")
-check("OFFなら「絵文字は使わない」", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
-      and "絵文字は使わない" in a.decide_calls()[0].messages[0].content)
+check("OFFなら「絵文字・GRAVITY の顔は使わない」", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+      and "絵文字・GRAVITY の顔は使わない" in a.decide_calls()[0].messages[0].content)
 a.close()
 
 print("■ 心の中（2026-10-16 本人「考えながら話をする仕組み…いわゆる心の中」）")
@@ -183,6 +196,50 @@ a = Agent(mode=MODE_ENGAGE)
 a.runtime._keep_pending("古い話", "テスト")
 a.runtime._pending_thought["at"] -= 181
 check("3分たったら渡さない", a.runtime._pending_lines(time.time()) == [] and a.runtime._pending_thought is None)
+a.close()
+
+print("■ 返さなかったら、相手がどう思うかを心の中で考えて、もう一度考える（2026-10-22 本人「無視した場合のこと考えて相手はこう考えるかも"
+      "しれないと、心の中で考え、再度返すべきか考える機能欲しい」）")
+from agent.config import AgentConfig
+check("既定はON", AgentConfig().reconsider_enabled is True)
+a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto", reconsider_seconds=0.3,
+          min_gap_after_speaking=0.0, chat_max_per_minute=10, max_decisions_per_minute=20)   # 回数の上限に当たらないように
+a.mock.script_decide = [{"action": "silent", "reason": "割り込むほどではない", "target": None, "inner": "疲れてるのかな"},
+                        {"action": "react", "reason": "寂しくさせたくない", "target": "たろう", "inner": "無視されたと思うかも"}]
+a.say("今日はほんと疲れたなあ", speaker="たろう")
+check("返さないと決めても、すぐに終わりにせず、少しあとでもう一度考える", wait_until(lambda: len(a.decide_calls()) >= 2, 5.0)
+      and any("もう一度考えます" in line for line in a.logs), a.logs[-4:])
+second = a.decide_calls()[1].messages[0].content if len(a.decide_calls()) >= 2 else ""
+check("もう一度考えるときに、さっき返さなかったこと・そのときの心の中・「相手はどう思うかもしれないか」を渡す",
+      "## さっき返さなかった発言（もう一度考える）" in second and "割り込むほどではない" in second
+      and "疲れてるのかな" in second and "相手はどう思うかもしれないか" in second, second[-700:])
+check("考え直して返すなら、返す", wait_until(lambda: len(a.chat.posted) == 1, 5.0), a.chat.posted)
+a.mock.script_decide = [{"action": "silent", "reason": "独り言っぽい", "target": None},
+                        {"action": "silent", "reason": "まだ独り言っぽい", "target": None}]
+a.runtime.config.reconsider_gap_seconds = 0.0
+a.say("ふあ〜あ", speaker="はなこ")
+check("もう一度考えても返さないなら、そこで終わり（同じ発言は1回だけ考え直す）", wait_until(lambda: len(a.decide_calls()) >= 4, 5.0)
+      and (time.sleep(1.0) or len(a.decide_calls()) == 4) and len(a.chat.posted) == 1, len(a.decide_calls()))
+a.runtime.config.reconsider_gap_seconds = 60.0
+a.mock.script_decide = [{"action": "silent", "reason": "割り込まない", "target": None}]
+a.say("お茶飲もう", speaker="じろう")
+check("考え直すのは1分に1回まで（AI を呼ぶ回数を増やしすぎない）", wait_until(lambda: len(a.decide_calls()) >= 5, 5.0)
+      and (time.sleep(1.0) or len(a.decide_calls()) == 5), len(a.decide_calls()))
+a.close()
+a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto", reconsider_seconds=0.3,
+          reconsider_enabled=False)
+a.mock.script_decide = [{"action": "silent", "reason": "割り込まない", "target": None}]
+a.say("今日はほんと疲れたなあ", speaker="たろう")
+check("OFFなら考え直さない", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0) and (time.sleep(1.0) or len(a.decide_calls()) == 1))
+a.close()
+a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto", reconsider_seconds=0.3,
+          ignored_people="あらし")
+a.mock.script_decide = [{"action": "silent", "reason": "お知らせ", "target": None}]
+from dataclasses import replace as _replace
+from agent.events import KIND_CHAT_NOTICE
+a.runtime.submit(_replace(make_event("はなこが音声ルームに参加しました", speaker="はなこ"), kind=KIND_CHAT_NOTICE))
+check("お知らせ（人の発言でないもの）は考え直さない", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+      and (time.sleep(1.0) or len(a.decide_calls()) == 1), len(a.decide_calls()))
 a.close()
 
 finish()

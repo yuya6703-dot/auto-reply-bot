@@ -21,6 +21,7 @@ from .events import (EVENT_BLOCK_BEGIN, EVENT_BLOCK_END, KIND_CHAT_NOTICE, KIND_
                      RECENT_BLOCK_BEGIN, RECENT_BLOCK_END, ROOM_BLOCK_BEGIN, ROOM_BLOCK_END, clean_name, describe_event,
                      name_matches)
 from .gate import is_ignored, mentions_name
+from .gravity_faces import face_lines
 from .llm.base import PURPOSE_DECIDE, PURPOSE_GENERATE, LLMMessage, LLMRequest
 
 WINDOW_MAX_ITEMS = 200
@@ -290,6 +291,11 @@ def memory_section(memory):
         lines += ["## 覚えていること（このPCの記録。印象は推定で、事実ではない。口に出さない）", *memory["facts"]]
     if memory.get("thoughts"):
         lines += ["## さっきの心の中（あなただけが知っている。口に出さない）", *memory["thoughts"]]
+    if memory.get("reconsider"):
+        lines += ["## さっき返さなかった発言（もう一度考える）", *memory["reconsider"],
+                  "このまま返さなかったら、相手はどう思うかもしれないか（無視された・寂しい・気にしていない など）を、"
+                  "まず inner に書いてから、もう一度決めてください。返すなら、遅れたことに軽く触れてもよい（「さっき返しそびれちゃった」など）。"
+                  "相手がもう別の話をしている・ほかの人が返したなど、返さないほうが自然なら返さなくてよい"]
     if memory.get("pending"):
         lines += ["## 言いかけて止めたこと（相手に話を譲った・会話が進んで出さなかった、あなた自身の言葉）", *memory["pending"],
                   "相手の話が終わっていて、まだ話の流れに合うなら「さっきの続きだけど」などと続けてよい。合わなければ忘れてよい"]
@@ -346,8 +352,8 @@ def emoji_lines(config):
     if config.output_mode != OUTPUT_CHAT:
         return []
     if config.chat_emoji:
-        return ["## 絵文字", "気持ちに合う絵文字を1〜2個使って気持ちを表してよい（文の終わりなど。使いすぎない。真面目な話・相手がつらい話では控えめに）"]
-    return ["## 絵文字", "絵文字は使わない"]
+        return face_lines()        # GRAVITY の顔（2026-10-22 本人「使う」。ふつうの絵文字の代わり）
+    return ["## 絵文字", "絵文字・GRAVITY の顔は使わない"]
 
 
 def voice_style_lines(config, voice_styles):

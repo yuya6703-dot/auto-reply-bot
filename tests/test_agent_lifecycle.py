@@ -63,7 +63,8 @@ a.close()
 
 print("■ 静かなときに自分から話すか考える（既定OFF。2026-10-16）")
 a = Agent(mode=MODE_SILENT, initiative_enabled=True, initiative_quiet_seconds=0.3,
-          initiative_min_gap_seconds=60.0, initiative_activity_seconds=30.0)
+          initiative_min_gap_seconds=60.0, initiative_activity_seconds=30.0,
+          reconsider_enabled=False)    # 返さなかった発言を考え直すための保留（15秒）の間は、自分から話さないので切っておく
 a.say("こんばんは")
 check("しばらく静かになったら、考える（AIを呼ぶ）", wait_until(lambda: len(a.decide_calls()) == 2, 4.0)
       and "話題を出すか" in a.decide_calls()[-1].messages[0].content, len(a.decide_calls()))
@@ -71,7 +72,7 @@ check("考えたことを判断のログに出す", any("自分から話すか�
 time.sleep(1.5)
 check("15分（ここでは60秒）に1回まで", len(a.decide_calls()) == 2, len(a.decide_calls()))
 a.close()
-a = Agent(mode=MODE_SILENT, initiative_quiet_seconds=0.3)
+a = Agent(mode=MODE_SILENT, initiative_quiet_seconds=0.3, reconsider_enabled=False)
 a.say("こんばんは")
 time.sleep(1.5)
 check("OFFなら考えない", len(a.decide_calls()) == 1)

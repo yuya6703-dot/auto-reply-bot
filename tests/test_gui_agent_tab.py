@@ -133,6 +133,7 @@ class Harness(ctk.CTk):
     unmute_agent = A.App.unmute_agent
     on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
     on_agent_filler_toggled = A.App.on_agent_filler_toggled
+    on_agent_reconsider_toggled = A.App.on_agent_reconsider_toggled
     on_agent_mute_chat_toggled = A.App.on_agent_mute_chat_toggled
     _hearing_route = A.App._hearing_route
     _owner_mic_problem = A.App._owner_mic_problem
@@ -777,6 +778,13 @@ h.on_agent_filler_toggled()
 check("つなぎ言葉をOFFにできる", db.get_setting("agent.thinking_fillers") == "0" and h.agent_runtime.config.thinking_fillers is False)
 h.agent_filler_var.set(True)
 h.on_agent_filler_toggled()
+check("返さなかったら考え直すのは既定ON", h.agent_reconsider_var.get() is True)
+h.agent_reconsider_var.set(False)
+h.on_agent_reconsider_toggled()
+check("考え直すのをOFFにできる（動いているエージェントにもすぐ効く）", db.get_setting("agent.reconsider_enabled") == "0"
+      and h.agent_runtime.config.reconsider_enabled is False)
+h.agent_reconsider_var.set(True)
+h.on_agent_reconsider_toggled()
 check("チャットのメンションは既定ON", h.agent_mention_var.get() is True)
 h.agent_mention_var.set(False)
 h.on_agent_mention_toggled()
