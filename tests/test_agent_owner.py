@@ -34,12 +34,13 @@ check("静かにしていなければ「もういいよ」は合図にしない�
 # 頼む形（静かにして・黙って・ミュートして…）のときだけ合図にする。下の文は実際の言い回しをまねた作り物
 for text in ("@アイ.. 聞こえてる理由教えて、そもそもミュートしてるのに",       # マイクのミュートの話（してる＝様子）
              "@アイ.. なんで静かにしてるん",                                   # 静かにしている様子を聞いている
-             "@アイ.. ちょっと席外すからマイクのミュートするんだけど、みんなに伝えといて",   # 「ミュート」は名詞。頼みは伝言
              "アイ、黙ってないでなんか話して",                                   # 黙らないで（反対の意味）
              "アイ、静かにしてって言われたの？",                                 # 言われたことの話
              "アイ、ミュートになってるよ",
              "アイ、静かにしてた？"):
     check(f"合図にしない:「{text}」", parse_command(text, NAMES) is None, parse_command(text, NAMES))
+check("「マイクのミュートするんだけど、…伝えといて」は、静かにする合図ではなく、代わりに伝える頼み（2026-10-23 から）",
+      parse_command("@アイ.. ちょっと席外すからマイクのミュートするんだけど、みんなに伝えといて", NAMES)[0] == "delegate")
 for text, minutes in (("アイ、ミュートして", 30), ("アイ、静かにしてね", 30), ("アイ黙って", 30), ("アイ、静かにしてください", 30),
                       ("アイ、10分黙っててくれる？", 10), ("アイ、しゃべらないで", 30), ("アイ、お口チャック", 30),
                       ("@アイ.. ちょっとミュートにしてて", 30), ("アイ、1時間静かにしてくれ", 60)):
@@ -84,13 +85,67 @@ a.runtime.submit(chat("@アイ.. 席外すからマイクのミュートする�
 check("オーナーが「ミュート」と書いても、頼む形でなければ静かにしない（伝言の頼みとして AI が判断する。2026-10-22）",
       wait_until(lambda: len(a.decide_calls()) >= 3, 5.0) and a.runtime.muted_until is None
       and "わかった、静かにしてるね" not in a.speaker.spoken[spoken:], (a.speaker.spoken[spoken:], a.logs[-3:]))
+check("（2026-10-23 から）代わりに伝える頼みとして覚える", a.runtime._delegation is not None)
+a.runtime._delegation = None          # 頼まれごとが無いときの「もういいよ」を確かめる
 a.runtime.submit(chat("アイ、もういいよ", speaker="オーナー"))
-check("静かにしていないときの「もういいよ」には「戻ったよ」と返さない（ふつうに判断）",
+check("静かにしていないとき（頼まれごとも無いとき）の「もういいよ」には「戻ったよ」と返さない（ふつうに判断）",
       wait_until(lambda: len(a.decide_calls()) >= 4, 5.0) and "はーい、戻ったよ！" not in a.speaker.spoken[spoken:],
       a.speaker.spoken[spoken:])
 a.runtime.set_muted(5)
 a.runtime._muted_until = time.time() - 1
 check("時間が過ぎたら、ひとりでに戻る", a.runtime.muted_until is None)
+a.close()
+
+print("■ オーナーの代わりに伝える（2026-10-23 本人「チャットで（AIの名前）に代わりとして頼んだ時にそれを実行してくれたりしたら助かる」）")
+from dataclasses import replace as _replace
+from agent.events import KIND_CHAT_NOTICE
+from agent.owner import CMD_DELEGATE, CMD_DELEGATE_END
+check("頼み方を読む（実物 10/22 の言い回しをまねた文）: 代わりに伝える・既定60分",
+      parse_command("@アイ.. トイレ行くから、マイクのミュートするんだけど、主が話せない理由も伝えといて", NAMES) == (CMD_DELEGATE, 60))
+check("「30分」と書けば30分", parse_command("アイ、30分くらい代わりに入ってきた人に説明しといて", NAMES) == (CMD_DELEGATE, 30))
+check("頼まれごとの間だけ「ただいま」「もういいよ」で終わる", parse_command("アイ、ただいま", NAMES, delegating=True)
+      == (CMD_DELEGATE_END, None) and parse_command("アイ、もういいよ", NAMES, delegating=True) == (CMD_DELEGATE_END, None)
+      and parse_command("アイ、ただいま", NAMES) is None)
+
+
+def notice(name):
+    return _replace(chat(f"{name}が音声ルームに参加しました", speaker=name), kind=KIND_CHAT_NOTICE)
+
+
+a = agent(output_mode="chat", chat_send_mode="auto", chat_max_per_minute=10, max_decisions_per_minute=20,
+          reconsider_enabled=False)
+a.runtime.submit(chat("@アイ.. トイレ行ってくるから、入ってきた人に主は今トイレで話せないって伝えといて", speaker="オーナー"))
+check("頼まれたら、覚えて、ふつうに返事をする（返事は AI が作る）", wait_until(lambda: len(a.chat.posted) == 1, 5.0)
+      and any("代わりに伝える（60分" in line for line in a.logs) and a.runtime._delegation is not None, a.logs[-3:])
+check("返事を作るときに、頼まれていること（オーナーの文は区切りの中）を渡す",
+      "## オーナーから頼まれていること" in a.decide_calls()[-1].messages[0].content
+      and "主は今トイレで話せない" in a.decide_calls()[-1].messages[0].content)
+a.mock.script_decide = [{"action": "silent", "reason": "入室のお知らせだけ", "target": None}]
+a.runtime.submit(notice("はなこ"))
+check("新しく入ってきた人には、AI が黙ろうとしても代わりに伝える（目印を付けて渡す）", wait_until(lambda: len(a.chat.posted) == 2, 5.0)
+      and "［オーナーの代わりに伝える相手］" in a.decide_calls()[-1].messages[0].content
+      and any("オーナーの代わりに伝える相手なので黙らずに" in line for line in a.logs), a.logs[-3:])
+gen = [r for r in a.mock.requests if r.purpose == "generate"]
+check("文を作るときに「オーナーの代わりに、今の状況を短く伝える」と伝える・相手は入ってきた人",
+      gen and "オーナーの代わりに" in gen[-1].messages[0].content and "相手: はなこ" in gen[-1].messages[0].content)
+calls = len(a.decide_calls())
+a.mock.script_decide = [{"action": "silent", "reason": "入室のお知らせだけ", "target": None}]
+a.runtime.submit(notice("はなこ"))
+check("同じ人には2度言わない", wait_until(lambda: len(a.decide_calls()) > calls, 5.0) and (time.sleep(0.5) or len(a.chat.posted) == 2),
+      a.chat.posted)
+a.mock.script_decide = [{"action": "silent", "reason": "割り込まない", "target": None}]
+a.runtime.submit(chat("オーナーさん、いる？", speaker="じろう"))
+check("オーナーに話しかけた人にも、代わりに伝える", wait_until(lambda: len(a.chat.posted) == 3, 5.0), a.chat.posted)
+a.runtime.submit(chat("アイ、ただいま", speaker="オーナー"))
+check("「ただいま」で終わり（決まった返事）", wait_until(lambda: a.chat.posted[-1:] == ["おかえり！伝えるのはやめておくね"], 5.0)
+      and a.runtime._delegation is None, a.chat.posted[-2:])
+calls = len(a.decide_calls())
+a.mock.script_decide = [{"action": "silent", "reason": "入室のお知らせだけ", "target": None}]
+a.runtime.submit(notice("さぶろう"))
+check("終わったら、入ってきた人にも、ふつうに（黙ってよい）", wait_until(lambda: len(a.decide_calls()) > calls, 5.0)
+      and (time.sleep(0.5) or a.chat.posted[-1] == "おかえり！伝えるのはやめておくね"), a.chat.posted[-2:])
+a.runtime._delegation = {"text": "x", "owner": "オーナー", "until": time.time() - 1, "told": set()}
+check("時間が過ぎたら終わり", a.runtime._delegation_active() is None and any("時間が過ぎた" in line for line in a.logs))
 a.close()
 
 print("■ オーナーの「覚えておいて」")

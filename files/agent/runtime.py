@@ -24,24 +24,25 @@ from typing import Callable
 from .audit import AuditLog
 from .cancel import CancelToken
 from .config import OUTPUT_CHAT, OUTPUT_VOICE_ROOM, split_names
-from .context import (RULE_ADDRESSED, ConversationWindow, build_combined_request, build_decide_request,
+from .context import (RULE_ADDRESSED, RULE_DELEGATE, ConversationWindow, build_combined_request, build_decide_request,
                       build_generate_request, max_chars_for, rules_note)
 from .decision import (DECIDED_BY_LLM, DECIDED_BY_RULE, ENGAGE, FAIL_REFUSED, HOLD, OBSERVE, REACT, SILENT,
                        SPEAKING_ACTIONS, USE_TOOL,
                        Decision, DecisionFailed, call_llm, request_decision)
 from .gate import HOLD as GATE_HOLD
 from .gate import OBSERVE as GATE_OBSERVE
-from .gate import Gate, GateSnapshot, is_ignored, is_ignored_name, is_partner, is_strong_signal
+from .gate import Gate, GateSnapshot, is_ignored, is_ignored_name, is_partner, is_strong_signal, mentions_name
 from .generation import (CHECK_LIMIT, CHECK_STALE, CHECK_TEXTS, Utterance, precheck, request_decision_with_text,
                          request_utterance)
-from .events import (KIND_CHAT_MESSAGE, KIND_SYSTEM, KIND_VOICE_UTTERANCE, RECENT_BLOCK_BEGIN, RECENT_BLOCK_END,
+from .events import (KIND_CHAT_MESSAGE, KIND_CHAT_NOTICE, KIND_SYSTEM, KIND_VOICE_UTTERANCE, PAST_BLOCK_BEGIN,
+                     PAST_BLOCK_END, RECENT_BLOCK_BEGIN, RECENT_BLOCK_END,
                      SOURCE_GRAVITY, SOURCE_SYSTEM, SOURCE_VOICE, AgentEvent, clean_name, describe_event,
                      name_matches, new_event_id)
 from .gravity_faces import clean_faces
 from .hearing import is_backchannel, is_laughter
 from .inbox import Inbox
 from .memory.recall import MemoryKeeper, is_sensitive
-from .owner import CMD_MUTE, CMD_REMEMBER, CMD_UNMUTE, is_owner, parse_command
+from .owner import (CMD_DELEGATE, CMD_DELEGATE_END, CMD_MUTE, CMD_REMEMBER, CMD_UNMUTE, is_owner, parse_command)
 from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_DIGEST, PURPOSE_GENERATE,
                        PURPOSE_PROFILE, PURPOSE_SUMMARIZE, PURPOSE_TRANSCRIBE, RETRYABLE_KINDS, LLMError, LLMMessage,
                        LLMRequest)
@@ -174,6 +175,7 @@ class AgentRuntime:
         self._heard = []                   # 文字にした声 [(時刻, 秒)]（1時間の上限）
         self._owner_heard = []             # オーナーのマイクで聞いた文 [(時刻, 文)]（ルームの音で同じ声を2度聞かない）
         self._last_fallback = -1e9
+        self._delegation = None              # オーナーから頼まれた「代わりに伝えること」{text, owner, until, told}
         self._reconsider = {}                # 返さなかった発言 {event_id: 理由・心の中・相手・時刻・渡したか}（もう一度考える）
         self._last_reconsider = -1e9           # 決まった返事（呼ばれていたのに返事が作れなかった）を最後に言った時刻
         self._own_voice = []               # ルームへ喋った時間 [(始め, 終わり)]（聞こえた声が自分の声かを見分ける）
@@ -603,6 +605,11 @@ class AgentRuntime:
         for e in events:                    # 話している相手の発言に目印（AI が会話の続きだと分かるように）
             if is_partner(e, snap.partners):
                 e.meta["partner"] = True
+        delegated = self._delegate_targets(events)
+        if delegated:                       # オーナーの代わりに伝える相手（呼ばれたのと同じに扱う）
+            for e in delegated:
+                e.meta["delegate"] = True
+            snap = replace(snap, delegated_ids=frozenset(e.event_id for e in delegated))
         result = self.gate.check(events, snap)
         if result.outcome == GATE_HOLD:
             self._hold(events, result.wait_seconds)
@@ -657,6 +664,9 @@ class AgentRuntime:
         reconsider = self._reconsider_lines(events, now)
         if reconsider:
             memory_lines["reconsider"] = reconsider
+        delegation = self._delegation_lines(now)
+        if delegation:
+            memory_lines["delegation"] = delegation
         if self.config.output_mode != OUTPUT_CHAT and self.deps.voice_profile is not None:
             try:
                 self.config.self_voice = str(self.deps.voice_profile() or "")[:40]
@@ -709,13 +719,18 @@ class AgentRuntime:
             self.log.write(f"🤫 沈黙: 「{decision.target}」は反応しない人です。")
             return
         addressed = self._addressed_event(events)
+        delegate = next((e for e in events if e.meta.get("delegate")), None)
+        forced = addressed if addressed is not None else delegate
         held_before = bool({e.event_id for e in events} & self._llm_held_ids)
-        if addressed is not None and (decision.action in (SILENT, OBSERVE) or (decision.action == HOLD and held_before)):
+        if forced is not None and (decision.action in (SILENT, OBSERVE) or (decision.action == HOLD and held_before)):
             # 呼ばれたのに黙らない（2026-10-22 本人「反応が難しい場合なにも無視するんじゃなくてちゃんと発言するようにしてほしい」）。
-            # 実物: 「ここで1番仲がいい人はだれ?」を「特定の誰かを選ぶ質問には答えない」で黙っていた。短い返事にする
-            self.log.write(f"💬 呼ばれたので黙らずに短く返します（AI は「{decision.reason}」で黙ろうとした）。")
-            decision = replace(decision, action=REACT, decided_by=DECIDED_BY_RULE, rule_id=RULE_ADDRESSED,
-                               target=decision.target or addressed.speaker)
+            # 実物: 「ここで1番仲がいい人はだれ?」を「特定の誰かを選ぶ質問には答えない」で黙っていた。短い返事にする。
+            # オーナーの代わりに伝える相手（新しく入ってきた人・オーナーに話しかけた人）にも、黙らずに伝える（2026-10-23）
+            why = "呼ばれた" if addressed is not None else "オーナーの代わりに伝える相手な"
+            self.log.write(f"💬 {why}ので黙らずに短く返します（AI は「{decision.reason}」で黙ろうとした）。")
+            decision = replace(decision, action=REACT, decided_by=DECIDED_BY_RULE,
+                               rule_id=RULE_ADDRESSED if addressed is not None else RULE_DELEGATE,
+                               target=decision.target or forced.speaker)
             prepared = None
             self._record(decision)           # 記録にも残す（AI の判断のあとに、規則で返事にしたこと）
         if decision.action in (SILENT, OBSERVE) and self._start_reconsider(events, decision):
@@ -734,6 +749,8 @@ class AgentRuntime:
             self._hold(events, wait)
             self.log.write(f"⏸ 保留: {decision.reason} — {wait:.0f}秒後に見直す")
             return
+
+        self._mark_told(events)             # オーナーの代わりに伝えた相手（同じ人に2度言わない）
 
         # --- 文章生成（判断と一緒に文ができていれば、もう頼まない） ---
         if prepared is not None:
@@ -844,6 +861,7 @@ class AgentRuntime:
         return outcome == SPOKEN
 
     OWNER_REPLIES = {"mute": "わかった、静かにしてるね", "unmute": "はーい、戻ったよ！", "remembered": "覚えたよ！",
+                     "delegate_end": "おかえり！伝えるのはやめておくね",
                      "memory_off": "ごめん、今は覚える設定がOFFなんだ", "sensitive": "それは覚えないでおくね"}
 
     def _owner_commands(self, events, turn_id):
@@ -853,12 +871,26 @@ class AgentRuntime:
             if (e.event_id in self._owner_done or e.is_self or e.backlog or e.kind == KIND_SYSTEM
                     or not is_owner(e, self.config)):
                 continue
-            command = parse_command(e.text, self.config.call_names, muted=self.muted_until is not None)
+            command = parse_command(e.text, self.config.call_names, muted=self.muted_until is not None,
+                                    delegating=self._delegation_active() is not None)
             if command is None:
                 continue
             self._owner_done.add(e.event_id)
-            handled.add(e.event_id)
             kind, value = command
+            if kind == CMD_DELEGATE:
+                # 頼まれごとを覚えるだけ。返事（「わかった、伝えておくね」など）は、ふつうの判断で AI が作る（頼みの中身が分かるように）
+                with self._lock:
+                    self._delegation = {"text": e.text, "owner": clean_name(e.speaker), "until": self._clock() + value * 60,
+                                        "told": set()}
+                self.log.write(f"👑 オーナーの頼まれごと: 代わりに伝える（{value}分。新しく入ってきた人・オーナーに話しかけた人に）")
+                continue
+            handled.add(e.event_id)
+            if kind == CMD_DELEGATE_END:
+                with self._lock:
+                    self._delegation = None
+                self.log.write("👑 オーナーの合図: 代わりに伝えるのは終わり")
+                self._say_fixed(self.OWNER_REPLIES["delegate_end"], turn_id, e.speaker)
+                continue
             if kind == CMD_MUTE:
                 self.log.write(f"👑 オーナーの合図: 静かにして（{value}分）")
                 self._say_fixed(self.OWNER_REPLIES["mute"], turn_id, e.speaker)
@@ -885,6 +917,60 @@ class AgentRuntime:
     FALLBACK_REPLIES = {"failed": "ごめん、今うまく考えがまとまらなかった…もう一回言ってくれる？",
                         "refused": "うーん、それはちょっと答えにくいな…ごめんね"}
     FALLBACK_GAP_SECONDS = 120.0        # 同じことを繰り返さない（混雑が続くと何度も失敗する）
+
+    # --- オーナーの代わりに伝える（2026-10-23 本人「チャットで（AIの名前）に代わりとして頼んだ時にそれを実行してくれたりしたら
+    #     助かる…新規でルーム入ってきた人に対してルームオーナーはこのような状況なので反応できないです。みたいなことを伝えてくれる」） ---
+    def _delegation_active(self):
+        """頼まれごと（時間が過ぎていれば終わりにして None）"""
+        with self._lock:
+            d = self._delegation
+            expired = d is not None and self._clock() >= d["until"]
+            if expired:
+                self._delegation = d = None
+        if expired:
+            self.log.write("👑 オーナーの頼まれごと（代わりに伝える）の時間が過ぎたので、終わりにします。")
+        return d
+
+    def _delegate_targets(self, events):
+        """
+        代わりに伝える相手の出来事: 新しく入ってきた人（入室のお知らせ）と、オーナーに話しかけた人（オーナーの名前を含む発言）。
+        自分・オーナー・反応しない人・起動前の行・もう伝えた人は除く
+        """
+        d = self._delegation_active()
+        if d is None:
+            return []
+        owners = self.config.owner_name_list
+        targets = []
+        for e in events:
+            if e.is_self or e.backlog or not e.speaker or is_ignored(e, self.config):
+                continue
+            who = clean_name(e.speaker)
+            if any(name_matches(e.speaker, o) for o in owners) or who in d["told"]:
+                continue
+            joined = e.kind == KIND_CHAT_NOTICE and "参加" in (e.text or "")
+            asks_owner = e.kind in (KIND_CHAT_MESSAGE, KIND_VOICE_UTTERANCE) and mentions_name(e.text or "", owners)
+            if joined or asks_owner:
+                targets.append(e)
+        return targets
+
+    def _delegation_lines(self, now):
+        """判断・文作りに渡す「オーナーから頼まれていること」。⚠️ オーナーが書いた文は区切りの中に（データとして）"""
+        d = self._delegation_active()
+        if d is None:
+            return []
+        told = "、".join(sorted(d["told"])) or "まだいない"
+        return [f"オーナー（{d['owner']}）から、あと{max(1, int((d['until'] - now) / 60))}分、代わりに伝えるよう頼まれている。",
+                PAST_BLOCK_BEGIN, d["text"], PAST_BLOCK_END,
+                f"もう伝えた人: {told}"]
+
+    def _mark_told(self, events):
+        with self._lock:
+            d = self._delegation
+            if d is None:
+                return
+            for e in events:
+                if e.meta.get("delegate") and e.speaker:
+                    d["told"].add(clean_name(e.speaker))
 
     def _start_reconsider(self, events, decision):
         """

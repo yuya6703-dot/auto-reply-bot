@@ -49,6 +49,7 @@ class GateSnapshot:
     cost_month: float = 0.0
     muted: bool = False                     # オーナーの合図で静かにしている（R12）
     partners: tuple = ()                    # 今話している相手（名前を呼ばれなくても呼ばれたのと同じに扱う）
+    delegated_ids: frozenset = frozenset()  # オーナーの代わりに伝える相手の出来事（呼ばれたのと同じに扱う。2026-10-23）
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,8 @@ class Gate:
         fresh = [e for e in fresh if not is_ignored(e, c)]
         if not fresh:
             return GateResult(OBSERVE, "R11")
-        strong = any(is_strong_signal(e, c.call_names) or is_partner(e, snap.partners) for e in fresh)
+        strong = any(is_strong_signal(e, c.call_names) or is_partner(e, snap.partners) or e.event_id in snap.delegated_ids
+                     for e in fresh)
         if snap.listening:
             return GateResult(HOLD, "R5", None, strong)
         if not strong:

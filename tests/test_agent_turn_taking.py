@@ -109,11 +109,14 @@ a.close()
 
 print("■ チャットで気持ちを GRAVITY の顔で表す（2026-10-16「絵文字で表現」→ 2026-10-22 本人「グラビティアプリ内で使える顔文字」を「使う」）")
 # GRAVITY の顔は文字の符号（「[無表情]」など）でチャット欄に入り、GRAVITY が顔の絵にする（実機の一覧で71個の符号を読んだ）
-from agent.gravity_faces import ALL_CODES, clean_faces
+from agent.gravity_faces import ALL_CODES, USABLE_CODES, clean_faces
 check("顔の符号は71個（実機の一覧で読んだもの）", len(ALL_CODES) == 71 and "[無表情]" in ALL_CODES and "[パチパチ]" in ALL_CODES)
+# 2026-10-23 本人「絵文字反映されてない」: [ほっとする]（顔）は絵になり、[しんどい]（ことば）は文字のまま出た
+check("使うのは、文に書いて絵になる顔（最初の21個）だけ", len(USABLE_CODES) == 21 and "[ほっとする]" in USABLE_CODES
+      and "[しんどい]" not in USABLE_CODES)
 a = Agent(mode=MODE_ENGAGE, output_mode="chat", ai_name="アイ", chat_send_mode="auto")
 a.mock.script_decide = [{"action": "engage", "reason": "お祝い", "target": "たろう",
-                         "text": "おめでとう！🎉 すごいね[おめでとう][パチパチ][拍手][にこやか]", "emotion": "joy"}]
+                         "text": "おめでとう！🎉 すごいね[しんどい][拍手][にこやか][大笑い][ウインク]", "emotion": "joy"}]
 a.say("アイ、合格したよ", speaker="たろう")
 check("チャットのときは、GRAVITY の顔の一覧と使い方を伝える（ふつうの絵文字・顔文字は使わない）",
       wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
@@ -121,8 +124,8 @@ check("チャットのときは、GRAVITY の顔の一覧と使い方を伝え�
       and "[にこやか]" in a.decide_calls()[0].messages[0].content
       and "ふつうの絵文字" in a.decide_calls()[0].messages[0].content
       and "絵文字の使い方は「## 絵文字」に従う" in a.decide_calls()[0].system)
-check("送る前に、ふつうの絵文字と一覧に無い符号を外し、顔は2個まで",
-      wait_until(lambda: len(a.chat.posted) == 1, 5.0) and a.chat.posted[0] == "おめでとう！ すごいね[おめでとう][パチパチ]",
+check("送る前に、ふつうの絵文字と、絵にならない符号（ことばのスタンプ・一覧に無いもの）を外し、顔は2個まで",
+      wait_until(lambda: len(a.chat.posted) == 1, 5.0) and a.chat.posted[0] == "おめでとう！ すごいね[にこやか][大笑い]",
       a.chat.posted)
 a.close()
 check("人が書いた長い括弧・空白入りの括弧は外さない", clean_faces("[今日のテーマ: 好きな食べ物] いいね[にこやか]")
