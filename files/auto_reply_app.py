@@ -4844,31 +4844,74 @@ class AutoReplyWorker:
         # ⚠️ 入れた直後に画面を読むと、まだ反映されていないことがある（2026-10-22 実機: 0.6秒後に読むと案内文のままだった）
         if not self._wait_for_input(d, lambda field: field.startswith(mine), self.MENTION_TEXT_WAIT):
             return None
-        tap = self._input_command("tap", *point)
-        try:
-            # ⚠️ 1回ずつ送ると間が空きすぎてダブルタップにならない。1回目を裏で走らせ、少しだけ空けて2回目
-            d.shell(f"{tap} & sleep {self.DOUBLE_TAP_GAP}; {tap}")
-        except Exception:
-            return None
-        if self._wait_for_input(d, lambda field: field.startswith(mine) and "@" in field[len(mine):],
-                                self.MENTION_ADDED_WAIT):
-            self._agent_note(f"@ アイコンのダブルタップで「{name}」へのメンションが付きました（文の後ろ）。")
-            is_sent = self._tap_send_button(d)
-            time.sleep(1.0)
-            self._close_keyboard_if_open(d)
-            return is_sent
-        try:
-            # プロフィールなどが開いたかもしれない（ダブルタップが1回ずつのタップとして届いたとき）。ルームの入力欄が
-            # 見えなければ、開いたもの（シートでも、画面いっぱいのページでも）を戻るで閉じる。⚠️ 見えていれば押さない（ルームから出る）
-            if not find_by_id(d.dump_hierarchy(compressed=True), ROOM_INPUT_ID, display):
-                self._keyevent(d, ANDROID_KEYCODE_BACK)
-                time.sleep(0.6)
-        except Exception:
-            pass
+        for attempt in range(2):
+            # ⚠️ 押す直前にアイコンの位置を測り直す（文を入れて反映を待つ間に、新しい発言でチャット欄が動くことがある。
+            #    ずれた所を押すと、メンションが付かないか、別の人へのメンションになる）
+            try:
+                xml = d.dump_hierarchy(compressed=True)
+            except Exception:
+                return None
+            if find_by_id(xml, ROOM_SHEET_ID, display):
+                break           # シートが開いているとダブルタップにならない（1回目でシートが閉じ、2回目がふつうのタップになる）
+            point = find_chat_portrait(xml, display, name)
+            if point is None:
+                break
+            tap = self._input_command("tap", *point)
+            try:
+                # ⚠️ 2回のタップは順番に送る（2026-10-23 本人「間髪入れずにダブルタップしないとメンションにならない」）。
+                #    前は1回目を裏で走らせていて、画面の読み取りで忙しいと2回目と重なったり入れ替わったりしてダブルタップにならなかった。
+                #    間は DOUBLE_TAP_GAP 秒＋命令1回ぶん（Android 15 の実測 17〜40ミリ秒）。Android のダブルタップは0.04〜0.3秒の間
+                d.shell(f"{tap}; sleep {self.DOUBLE_TAP_GAP}; {tap}")
+            except Exception:
+                return None
+            if self._wait_for_input(d, lambda field: field.startswith(mine) and "@" in field[len(mine):],
+                                    self.MENTION_ADDED_WAIT):
+                raw = self._current_input_text(d)
+                tagged = raw[raw.rfind("@") + 1:].strip() if "@" in raw else ""
+                if not friend_name_matches(tagged, name):
+                    # ずれた所を押して、別の人のアイコンだった。送らない（メンションごと入力欄を空にして、メンションなしで送り直す）
+                    self._agent_note(f"⚠️ 別の人（「{tagged}」）へのメンションになったので、送らずに、メンションなしで送り直します"
+                                     f"（「{name}」）。")
+                    self._clear_mention_draft(d)
+                    return None
+                self._agent_note(f"@ アイコンのダブルタップで「{name}」へのメンションが付きました（文の後ろ）。")
+                is_sent = self._tap_send_button(d)
+                time.sleep(1.0)
+                self._close_keyboard_if_open(d)
+                return is_sent
+            self._close_if_left_room_input(d)     # ミニプロフィールなどが開いていたら閉じて、もう1回だけ
+            if attempt == 0:
+                self._agent_note(f"@ メンションが付かなかったので、もう1回ダブルタップします（「{name}」）。")
         self._agent_note(f"⚠️ アイコンをダブルタップしてもメンションが付かなかったので、メンションなしで送ります（「{name}」）。")
         return None
 
-    DOUBLE_TAP_GAP = 0.08
+    def _close_if_left_room_input(self, d):
+        """
+        ダブルタップが1回ずつのタップとして届くと、ミニプロフィール（VoiceRoomPassportActivity）などが開く。ルームの入力欄が
+        見えなければ、開いたもの（シートでも、画面いっぱいのページでも）を戻るで閉じる。⚠️ 見えていれば押さない（ルームから出る）
+        """
+        try:
+            if not find_by_id(d.dump_hierarchy(compressed=True), ROOM_INPUT_ID, self._target_display):
+                self._keyevent(d, ANDROID_KEYCODE_BACK)
+                time.sleep(0.8)
+        except Exception:
+            pass
+
+    def _clear_mention_draft(self, d):
+        """入れた文とメンションを捨てる（入力欄を空にして、シートを閉じる）。⚠️ 送るボタンは押さない"""
+        try:
+            d(resourceIdMatches=rf".*:id/{ROOM_INPUT_ID}$").set_text("", timeout=self.FOCUSED_FIELD_WAIT)
+        except Exception:
+            pass
+        time.sleep(0.4)
+        try:
+            if find_by_id(d.dump_hierarchy(compressed=True), ROOM_SHEET_ID, self._target_display):
+                self._keyevent(d, ANDROID_KEYCODE_BACK)
+                time.sleep(0.8)
+        except Exception:
+            pass
+
+    DOUBLE_TAP_GAP = 0.05
     MENTION_TEXT_WAIT = 2.0          # 下の入力欄に入れた文が、画面の読み取りに出るまで待つ上限（秒）
     MENTION_ADDED_WAIT = 3.0         # ダブルタップのあと、シートが開いてメンションが付くまで待つ上限（秒）
 

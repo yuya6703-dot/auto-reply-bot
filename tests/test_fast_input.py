@@ -11,7 +11,7 @@ d.clear_text() と d.send_keys() は先にその切り替えを5秒待ち、3回
 【直し方】はじめから今選ばれている部品を直接さわる（d(focused=True).set_text / clear_text）。入らなかったときだけ前のやり方。
 ⚠️ 実機には触らない。にせの端末で、遅いやり方を呼ばないことと、入らないときに前のやり方へ戻ることを確かめる。
 """
-import os, sys, tempfile
+import os, re, sys, tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "files"))
@@ -148,11 +148,19 @@ class FakeMentionRoom:
     """音声ルーム。下の入力欄に文を入れられ、アイコンをダブルタップ（2回のタップを1回の shell で）すると、
     GRAVITY がシートを開いて文の後ろに「@名前 」を付ける。シートの「送る」で送る"""
 
-    def __init__(self, inserts=True, opens_page=False, sheet_open=False, extra_input=False):
+    def __init__(self, inserts=True, opens_page=False, sheet_open=False, extra_input=False, shift_after_text=False,
+                 fail_first=False, wrong_person=False):
         self.commands, self.calls, self.sent = [], [], []
         self.inserts, self.opens_page, self.sheet_open, self.extra_input = inserts, opens_page, sheet_open, extra_input
+        self.shift_after_text, self.fail_first, self.wrong_person = shift_after_text, fail_first, wrong_person
         self.page = False
         self.field = ""
+        self.text_set = False
+        self.double_taps = 0
+
+    def icon(self):
+        """その人のアイコンの真ん中（文を入れたあとにチャット欄が動く画面では、下へずれる）"""
+        return (49, 706) if (self.shift_after_text and self.text_set) else (49, 646)
 
     def __call__(self, **selector):
         room = self
@@ -161,6 +169,7 @@ class FakeMentionRoom:
             def set_text(self, text, timeout=None):
                 room.calls.append(("set_text", dict(selector), text))
                 room.field = text or ""
+                room.text_set = room.text_set or bool(text)
                 return True
 
             def clear_text(self, timeout=None):
@@ -172,12 +181,18 @@ class FakeMentionRoom:
         command = str(command)
         self.commands.append(command)
         self.calls.append(("shell", command))
-        if command.count("tap 49 646") == 2 and "&" in command:
-            if self.opens_page:
+        taps = re.findall(r"input -d 2 tap (\d+) (\d+)", command)
+        if len(taps) == 2 and taps[0] == taps[1] and "; sleep" in command and "&" not in command:   # 順番に2回（ダブルタップ）
+            self.double_taps += 1
+            if tuple(map(int, taps[0])) != self.icon():
+                pass                       # ずれた所を押した（何も起きない）
+            elif self.fail_first and self.double_taps == 1:
+                pass                       # 1回目はダブルタップと受け取られなかった
+            elif self.opens_page:
                 self.page = True
             elif self.inserts:
                 self.sheet_open = True
-                self.field += "@伏せ字3 "
+                self.field += "@別の人 " if self.wrong_person else "@伏せ字3 "
         elif "keyevent 4" in command:
             self.page = self.sheet_open = False
         elif self.sheet_open and "tap 472 922" in command:      # シートの「送る」
@@ -198,6 +213,8 @@ class FakeMentionRoom:
                     f'<node class="android.widget.TextView" resource-id="{GRAVITY}:id/btnSend" text="送る" package="{GRAVITY}" '
                     'display-id="2" bounds="[433,904][511,941]" clickable="true" /></hierarchy>')
         xml = ROOM.replace('text="メッセージを送信"', f'text="{shown}"')
+        if self.shift_after_text and self.text_set:      # 新しい発言が来て、チャット欄の行が下へずれた
+            xml = xml.replace("[21,618][78,675]", "[21,678][78,735]")
         if self.extra_input:   # GRAVITY を2つ開いていて、別の画面にも入力欄がある
             xml = xml.replace("</hierarchy>", f'<node class="android.widget.EditText" resource-id="{GRAVITY}:id/etText" '
                                               'text="メッセージを送信" package="{GRAVITY}" display-id="3" bounds="[0,0][9,9]" /></hierarchy>')
@@ -220,8 +237,9 @@ check("文を入れるのは、ダブルタップの前の1回だけ（下の入
       and "resourceIdMatches" in d.calls[texts[0]][1], d.calls)
 check("⚠️ ダブルタップのあとは、入力欄を書き直さない（書き直すと青いメンションがただの文字になる）",
       all(c[0] == "shell" for c in d.calls[tap_at:]), d.calls[tap_at:])
-check("その人のいちばん新しい発言のアイコンを、すばやく2回タップする（1回の shell で）",
-      d.calls[tap_at][1].count("input -d 2 tap 49 646") == 2 and "& sleep 0.08;" in d.calls[tap_at][1], d.calls[tap_at])
+check("その人のいちばん新しい発言のアイコンを、すばやく2回タップする（1回の shell で、裏で走らせず順番に。2026-10-23）",
+      d.calls[tap_at][1].count("input -d 2 tap 49 646") == 2 and "; sleep 0.05;" in d.calls[tap_at][1]
+      and "&" not in d.calls[tap_at][1], d.calls[tap_at])
 check("判断のログに", any("メンションが付きました" in n for n in notes), notes)
 d = FakeMentionRoom()
 check("その人の発言がチャット欄に見えなければ、何もさわらない（メンションなしで送る）",
@@ -239,6 +257,21 @@ check("ダブルタップでプロフィールなどのページが開いたら�
 d = FakeMentionRoom(inserts=False)
 check("何も開かず、ルームの入力欄が見えたままなら、戻るは押さない（ルームから出てしまう）",
       w._send_with_mention(d, "こんばんは", "伏せ字3") is None and not any("keyevent 4" in c for c in d.commands), d.commands)
+# 2026-10-23 本人「アイコンのダブルタップできてないよ」「間髪入れずにダブルタップしないとメンションにならない」
+d = FakeMentionRoom(shift_after_text=True)
+check("文を入れたあとにチャット欄が動いても、押す直前に測り直した位置をダブルタップする",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is True and d.sent == ["こんばんは@伏せ字3 "]
+      and any("input -d 2 tap 49 706" in c for c in d.commands), d.commands)
+d = FakeMentionRoom(fail_first=True)
+check("1回目でメンションが付かなければ、もう1回だけダブルタップする", w._send_with_mention(d, "こんばんは", "伏せ字3") is True
+      and d.double_taps == 2 and d.sent == ["こんばんは@伏せ字3 "] and any("もう1回" in n for n in notes), (d.double_taps, notes[-2:]))
+d = FakeMentionRoom(inserts=False)
+w._send_with_mention(d, "こんばんは", "伏せ字3")
+check("2回やっても付かなければ、そこでやめる（3回目はしない）", d.double_taps == 2, d.double_taps)
+d = FakeMentionRoom(wrong_person=True)
+check("⚠️ 別の人へのメンションが付いたら、送らない（入力欄を空にして、メンションなしで送り直す）",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.sent == [] and d.field == ""
+      and "別の人" in notes[-1], (d.sent, d.field, notes[-1:]))
 w.is_running = True
 w.is_alive = lambda: True
 ok, _ = w.enqueue_agent_text("こんばんは", mention="伏せ字3")
