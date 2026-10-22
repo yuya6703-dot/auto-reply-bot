@@ -47,7 +47,7 @@ from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE
                        PURPOSE_PROFILE, PURPOSE_SUMMARIZE, PURPOSE_TRANSCRIBE, RETRYABLE_KINDS, LLMError, LLMMessage,
                        LLMRequest)
 from .persona import DEFAULT_PERSONA_ID, Persona, account_persona_id
-from .tools.lookup import TOOL_LABELS, TOOLS, LookupResult
+from .tools.lookup import BASIC_TOOLS, SEARCH_TOOLS, TOOL_LABELS, TOOLS, LookupResult
 from .usage import UsageTracker
 
 STATE_STOPPED = "stopped"
@@ -107,6 +107,8 @@ class AgentDeps:
     journal: object = None
     # 調べる (tool, 調べる言葉, CancelToken) -> tools.lookup.LookupResult。無ければ調べない
     lookup: Callable = None
+    # () -> 今使える調べ方（tools.lookup の TOOLS のうち）。無ければ Wikipedia・天気だけ
+    lookup_tools: Callable = None
     # () -> 今の AI の声で使える声の様子（スタイル）の名前のリスト。AI が文ごとに選ぶ（読み上げツールに渡す）
     voice_styles: Callable = None
     # () -> 今の AI の声の名前（キャラ名・スタイル）。AI が自分の声を知るため
@@ -135,6 +137,7 @@ class AgentRuntime:
         self._persona = deps.store.load_persona(DEFAULT_PERSONA_ID) or Persona()
         self._account_personas = {}     # GRAVITYのアカウントごとの人格（読んだもの。無ければ None＝共通の人格）
         self._lookup_times = []         # 調べた時刻（1時間の上限）
+        self._search_times = []         # ウェブ検索・ニュースで調べた時刻（1日の上限）
         # 今チャットしている GRAVITY のアカウント（出来事の meta["account"] から。監視が見分けて付ける）
         self._account = ""
         self._turn_in_gravity = False       # 今の回が GRAVITY のチャットの出来事か（AIタブの手入力は記憶に入れない）
@@ -675,7 +678,8 @@ class AgentRuntime:
         extra = {"voice_styles": voice_styles} if combined else {}
         filler = self._start_filler(turn_id) if result.strong and cfg.output_mode != OUTPUT_CHAT else None
         request = builder(events, self.window, self.persona, cfg, note, now,
-                          timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines, **extra)
+                          timeout=self.config.decide_timeout_seconds, room=room, memory_lines=memory_lines,
+                          lookup_tools=self._lookup_tools(), **extra)
         try:
             if combined:
                 decision, prepared = request_decision_with_text(self._provider, request, turn_id, cancel,
@@ -1101,15 +1105,25 @@ class AgentRuntime:
             return LookupResult(False, tool or "", query, note="調べる機能はOFF")
         if tool not in TOOLS or not query:
             return LookupResult(False, tool or "", query, note="何をどこで調べるかが分からない")
+        if tool not in self._lookup_tools():
+            return LookupResult(False, tool, query, note=f"{TOOL_LABELS[tool]}は使えない（キーが保存されていない）")
+        searching = tool in SEARCH_TOOLS
         now = self._clock()
         with self._lock:
             self._lookup_times = [t for t in self._lookup_times if now - t < 3600]
+            self._search_times = [t for t in self._search_times if now - t < 86400]
             over = len(self._lookup_times) >= c.lookup_max_per_hour
-            if not over:
+            over_day = searching and len(self._search_times) >= c.web_search_max_per_day
+            if not over and not over_day:
                 self._lookup_times.append(now)
+                if searching:
+                    self._search_times.append(now)
         if over:
             self.log.write(f"🔎 調べる回数の上限（1時間に{c.lookup_max_per_hour}回）なので、調べずに答えます。")
             return LookupResult(False, tool, query, note="調べる回数の上限に達した")
+        if over_day:
+            self.log.write(f"🔎 ウェブ検索の回数の上限（1日に{c.web_search_max_per_day}回）なので、調べずに答えます。")
+            return LookupResult(False, tool, query, note="ウェブ検索の今日の回数の上限に達した")
         self.log.write(f"🔎 {TOOL_LABELS.get(tool, tool)}で「{query}」を調べます。")
         self._set_state(STATE_LOOKING_UP)
         holder = {}
@@ -1130,6 +1144,17 @@ class AgentRuntime:
         result = holder.get("result") or LookupResult(False, tool, query, note="時間内に答えが来なかった")
         self.log.write(f"🔎 {result.source}を読みました。" if result.ok else f"🔎 調べられませんでした（{result.note}）。")
         return result
+
+    def _lookup_tools(self):
+        """今使える調べ方。調べるがOFF・調べる道具が無ければ空。ウェブ検索・ニュースは検索のキーがあるときだけ"""
+        if not self.config.lookup_enabled or self.deps.lookup is None:
+            return ()
+        if self.deps.lookup_tools is None:
+            return BASIC_TOOLS
+        try:
+            return tuple(self.deps.lookup_tools())
+        except Exception:
+            return BASIC_TOOLS
 
     def _say_wait(self, turn_id):
         """

@@ -42,7 +42,7 @@ DECISION_SCHEMA = {
         "mood": {"type": "string"},
         "hold_seconds": {"type": ["number", "null"]},
         # 調べる（use_tool）とき。⚠️ null を混ぜた enum は書かない（本番で通った「null を許す型」だけ）。値は parse_decision が確かめる
-        "tool": {"type": ["string", "null"], "description": "use_tool のとき: wikipedia / weather"},
+        "tool": {"type": ["string", "null"], "description": "use_tool のとき: wikipedia / weather / web / news"},
         "tool_query": {"type": ["string", "null"], "description": "use_tool のとき: 調べる言葉・地名"},
         # 心の中（2026-10-16 本人「考えながら話をする仕組み…いわゆる心の中」）。口に出さない
         "inner": {"type": ["string", "null"], "description": "心の中で思ったこと（口に出さない。60字以内）"},
@@ -67,7 +67,7 @@ class Decision:
     model: Optional[str] = None
     topic: str = ""
     mood: str = ""
-    tool: Optional[str] = None            # use_tool のとき: wikipedia / weather
+    tool: Optional[str] = None            # use_tool のとき: wikipedia / weather / web / news
     tool_query: Optional[str] = None      # use_tool のとき: 調べる言葉・地名
     inner: Optional[str] = None           # 心の中で思ったこと（口に出さない）
 

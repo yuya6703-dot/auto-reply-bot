@@ -23,6 +23,7 @@ from .events import (EVENT_BLOCK_BEGIN, EVENT_BLOCK_END, KIND_CHAT_NOTICE, KIND_
 from .gate import is_ignored, mentions_name
 from .gravity_faces import face_lines
 from .llm.base import PURPOSE_DECIDE, PURPOSE_GENERATE, LLMMessage, LLMRequest
+from .tools.lookup import BASIC_TOOLS, TOOL_NEWS, TOOL_WEATHER, TOOL_WEB, TOOL_WIKIPEDIA, TOOLS
 
 WINDOW_MAX_ITEMS = 200
 WINDOW_MAX_SECONDS = 30 * 60
@@ -318,7 +319,7 @@ def memory_section(memory):
 
 
 def build_decide_request(events, window, persona, config, rules_note, now, timeout=20.0, room=None,
-                         memory_lines=None):
+                         memory_lines=None, lookup_tools=BASIC_TOOLS):
     """判断の依頼を作る"""
     ids = {e.event_id for e in events}
     recent = [_line(e, now, config) for e in window.recent_events(exclude_ids=ids)]
@@ -336,7 +337,7 @@ def build_decide_request(events, window, persona, config, rules_note, now, timeo
         "## 自分の直近の発言", *own_lines,
         "## 判断の履歴", window.action_summary(),
         "## 規則で決まっていること", rules_note,
-        *lookup_choices(config),
+        *lookup_choices(config, lookup_tools),
         "## 今回の出来事", EVENT_BLOCK_BEGIN, *current, EVENT_BLOCK_END,
         "どう動くかを決めてください。",
     ])
@@ -384,12 +385,13 @@ def voice_style_lines(config, voice_styles):
 
 
 def build_combined_request(events, window, persona, config, rules_note, now, timeout=20.0, room=None,
-                           memory_lines=None, voice_styles=None):
+                           memory_lines=None, voice_styles=None, lookup_tools=BASIC_TOOLS):
     """
     判断と文を1回で頼む（呼ばれたとき）。判断の依頼に、人格の全文と文の作り方を足す。
     発言しない（silent など）なら text は null。発言するのに text が無ければ、呼ぶ側が文だけをもう一度頼む
     """
-    request = build_decide_request(events, window, persona, config, rules_note, now, timeout, room, memory_lines)
+    request = build_decide_request(events, window, persona, config, rules_note, now, timeout, room, memory_lines,
+                                   lookup_tools)
     chat = config.output_mode == OUTPUT_CHAT
     style = GENERATE_CHAT_SYSTEM if chat else GENERATE_SYSTEM
     rules = style.split("守ること:", 1)[1].strip()
@@ -409,14 +411,21 @@ def build_combined_request(events, window, persona, config, rules_note, now, tim
                    max_output_tokens=500, hints={**request.hints, "combined": True})
 
 
-def lookup_choices(config):
-    """判断に「調べられること」を伝える（調べるがONのときだけ。OFFなら use_tool を選ばせない）"""
+TOOL_GUIDES = {
+    TOOL_WIKIPEDIA: "- wikipedia: 言葉・作品・有名な人・出来事・場所の説明。tool_query は調べる言葉（例: 富士山）",
+    TOOL_WEATHER: "- weather: 天気。tool_query は地名（例: 横浜）。今日から3日先まで",
+    TOOL_WEB: "- web: ウェブ検索。お店・商品・やり方・発売日など、Wikipediaに無さそうなこと。tool_query は検索の言葉（例: 渋谷 ラーメン 人気）",
+    TOOL_NEWS: "- news: ここ1週間のニュース。「最近」「今日の」「最新の」話題はこちら。tool_query は話題の言葉（例: 台風 進路）",
+}
+
+
+def lookup_choices(config, tools=BASIC_TOOLS):
+    """判断に「調べられること」を伝える（調べるがONのときだけ。OFFなら use_tool を選ばせない）。tools は今使える調べ方"""
     if not config.lookup_enabled:
         return []
     return ["## 調べられること",
             "頼まれて調べるとき・確かな答えが要るときは action を use_tool にして、tool と tool_query を入れる:",
-            "- wikipedia: 言葉・作品・有名な人・出来事・場所の説明。tool_query は調べる言葉（例: 富士山）",
-            "- weather: 天気。tool_query は地名（例: 横浜）。今日から3日先まで",
+            *(TOOL_GUIDES[t] for t in TOOLS if t in tools),
             "ルームの人のこと・一般の人の個人のことは調べない。知っていることで足りるなら、調べずに答えてよい。"]
 
 
@@ -428,7 +437,8 @@ def lookup_section(lookup):
         return [f"## 調べた結果（出典: {lookup.source}。調べた言葉: {lookup.query}）",
                 LOOKUP_BLOCK_BEGIN, *lookup.text.splitlines(), LOOKUP_BLOCK_END,
                 "調べた結果をもとに答えてください。質問と関係なさそうなら、見つからなかったと言う。"
-                "出典を短く添える（例:「Wikipediaによると」「予報だと」）。URL は書かない。結果に無いことを付け足さない。"]
+                "出典を短く添える（例:「Wikipediaによると」「予報だと」「ネットで見たら」「ニュースだと」）。URL は書かない。"
+                "結果に無いことを付け足さない。サイトごとに言っていることが違えば、違うと言う。ニュースは いつの話か を添える。"]
     return ["## 調べた結果", f"調べられなかった（{lookup.note}）。調べられなかったことを伝え、知っている範囲で答えるなら、"
             "確かでないと分かる言い方にする。"]
 

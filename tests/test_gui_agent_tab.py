@@ -63,6 +63,8 @@ class Harness(ctk.CTk):
     build_agent_tab = A.App.build_agent_tab
     _ensure_agent_runtime = A.App._ensure_agent_runtime
     _agent_provider = A.App._agent_provider
+    _make_lookup = A.App._make_lookup
+    _search_api_key = A.App._search_api_key
     _selected_agent_mock_mode = A.App._selected_agent_mock_mode
     on_agent_mock_mode_selected = A.App.on_agent_mock_mode_selected
     _agent_speak = A.App._agent_speak
@@ -520,6 +522,21 @@ h.worker.is_running = False
 h.agent_lookup_var.set(False)
 h.on_agent_lookup_toggled()
 check("OFFに戻せる（確かめない）", db.get_setting("agent.lookup_enabled") == "0")
+from agent.tools.lookup import BASIC_TOOLS, SEARCH_KEY_ID, TOOL_NEWS, TOOL_WEB
+check("Tavily のキーが無ければ、ウェブ検索・ニュースは選ばせない（確かめる文で、保存すれば使えると知らせる）",
+      h.agent_runtime.deps.lookup_tools() == BASIC_TOOLS and "保存すると" in dialogs[-3][2], dialogs[-3])
+h.api_keys.save(SEARCH_KEY_ID, "tvly-test-key-0000")
+answers.append(True)
+h.agent_lookup_var.set(True)
+h.on_agent_lookup_toggled()
+check("キーがあれば、ウェブ検索・ニュースも使う・送る先・1日の上限を書いて確かめる",
+      dialogs[-1][0] == "ask" and "Tavily" in dialogs[-1][2] and "1日30回" in dialogs[-1][2], dialogs[-1])
+check("キーがあれば、エージェントにウェブ検索・ニュースが渡る（作り直さなくても効く）",
+      TOOL_WEB in h.agent_runtime.deps.lookup_tools() and TOOL_NEWS in h.agent_runtime.deps.lookup_tools())
+h.api_keys.delete(SEARCH_KEY_ID)
+check("キーを消したら、すぐにウェブ検索・ニュースを選ばせない", h.agent_runtime.deps.lookup_tools() == BASIC_TOOLS)
+h.agent_lookup_var.set(False)
+h.on_agent_lookup_toggled()
 
 print("■ 静かなときに自分から話しかける（既定OFF）")
 check("既定はOFF", h.agent_initiative_var.get() is False)

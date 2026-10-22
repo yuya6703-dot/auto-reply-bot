@@ -115,6 +115,8 @@ class AgentConfig:
     lookup_wait_text: str = "ちょっと調べるね、待ってて！"   # 調べる前に出す一言（空なら出さない）。⚠️ 下書きを見せる設定でも確かめずに送る（本人の決定）
     lookup_max_per_hour: int = 10
     lookup_timeout_seconds: float = 8.0
+    # ウェブ検索・ニュース（Tavily。キーを保存したときだけ）は1日の上限も持つ。無料は毎月1,000回 → 1日30回なら月に収まる
+    web_search_max_per_day: int = 30
     # 声を聞く（PC の音声入力。iPad など。既定OFF。2026-10-16 本人「iPad mini 6から音を拾う仕組み」→「1から6まで」の6）
     hearing_enabled: bool = False
     hearing_device: str = ""                      # 音声入力の名前（MME）

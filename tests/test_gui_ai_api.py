@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 設定タブの「🤖 AI API」区画（入力欄・👁・保存・削除・接続確認）が、本物のコードのまま組み立って動くかを確かめる。
+「🔎 ウェブ検索・ニュース（Tavily）」のキーの区画も（2026-10-23。通信しない: 接続確認は にせものの調べ道具で）。
 画面が一瞬出る。設計書/05「3. AI API キーの入力と保存」。
 
 ⚠️ ウィジェットを書き写して組み立ててはいけない（test_gui_widgets.py と同じ理由）。App の実装をそのまま借りる。
@@ -39,6 +40,13 @@ class Harness(ctk.CTk):
     delete_ai_api_key = A.App.delete_ai_api_key
     test_ai_api_connection = A.App.test_ai_api_connection
     _on_ai_api_test_done = A.App._on_ai_api_test_done
+    build_search_api_section = A.App.build_search_api_section
+    _refresh_search_api_status = A.App._refresh_search_api_status
+    save_search_api_key = A.App.save_search_api_key
+    delete_search_api_key = A.App.delete_search_api_key
+    test_search_api_connection = A.App.test_search_api_connection
+    _search_api_key = A.App._search_api_key
+    _make_lookup = A.App._make_lookup
 
     def __init__(self, db):
         super().__init__()
@@ -157,6 +165,53 @@ check("「はい」なら消す", h.api_keys.load("unassigned") is None and "未
 dialogs.clear()
 h.delete_ai_api_key()
 check("保存が無ければ、そう知らせる", dialogs and dialogs[-1][0] == "info", dialogs)
+
+print("■ ウェブ検索・ニュース（Tavily）のキー")
+from agent.tools.lookup import SEARCH_KEY_ID, TOOLS, LookupResult
+SEARCH_KEY = "tvly-fake-gui-key-0123456789"
+h.build_search_api_section(h.frame)
+h.update()
+check("キーの欄は「●」で隠れる", h.search_api_key_entry.cget("show") == "●")
+check("状態は「未保存（ウェブ検索・ニュースは使いません）」", "未保存" in h.search_api_status_label.cget("text")
+      and "使いません" in h.search_api_status_label.cget("text"), h.search_api_status_label.cget("text"))
+dialogs.clear()
+h.test_search_api_connection()
+check("キーが無ければ接続確認はしない（知らせる）", dialogs and dialogs[-1][0] == "info" and not h.posted, dialogs)
+h.search_api_key_entry.insert(0, SEARCH_KEY)
+h.save_search_api_key()
+check("保存したら欄を空にして「保存済み」", h.search_api_key_entry.get() == ""
+      and "保存済み" in h.search_api_status_label.cget("text"))
+check("DB には暗号文だけ（AI API とは別の名前）", db.get_setting("ai_api_key.tavily", "").startswith(K.DPAPI_PREFIX)
+      and SEARCH_KEY not in db.get_setting("ai_api_key.tavily", ""))
+check("調べ道具はキーを使う直前に読む", h._search_api_key() == SEARCH_KEY
+      and h._make_lookup().available_tools() == TOOLS)
+
+
+class FakeLookup:
+    def __init__(self, result):
+        self.result, self.calls = result, []
+
+    def run(self, tool, query, cancel=None):
+        self.calls.append((tool, query))
+        return self.result
+
+
+fake = FakeLookup(LookupResult(True, "web", "Tavily", text="- x", source="ウェブ検索"))
+h._make_lookup = lambda: fake
+h.test_search_api_connection()
+check("確認中は押せない", h.search_api_test_btn.cget("state") == "disabled")
+run_posted(h)
+check("1回だけウェブ検索して「つながりました」", fake.calls == [("web", "Tavily")]
+      and "つながりました" in h.search_api_status_label.cget("text") and h.search_api_test_btn.cget("state") == "normal")
+fake.result = LookupResult(False, "web", "Tavily", note="検索のキーが使えない（設定タブで保存し直す）")
+h.test_search_api_connection()
+run_posted(h)
+check("失敗したらわけを表示", "キーが使えない" in h.search_api_status_label.cget("text"), h.search_api_status_label.cget("text"))
+answers.append(True)
+h.delete_search_api_key()
+check("削除できる（AI API のキーには触れない）", h.api_keys.load(SEARCH_KEY_ID) is None
+      and "未保存" in h.search_api_status_label.cget("text"))
+check("ウェブ検索のキーもログに出さない", all(SEARCH_KEY not in m for m in h.raw_logs), h.raw_logs)
 
 print("■ 最後に: ログのどこにもキーが無い")
 check("ログ全体", all(FAKE_KEY not in m for m in h.raw_logs), h.raw_logs)

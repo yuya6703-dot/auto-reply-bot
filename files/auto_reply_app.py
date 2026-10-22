@@ -100,7 +100,7 @@ from agent.llm.mock import MockProvider, MODE_LABELS as MOCK_MODE_LABELS, MODE_S
 from agent.llm.gemini import GeminiProvider, MODELS as GEMINI_MODELS, DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
 from agent.persona import Persona
 from agent.memory.journal import ConversationJournal, FOLDER_NAME as AGENT_JOURNAL_FOLDER
-from agent.tools.lookup import Lookup as AgentLookup, user_agent as lookup_user_agent
+from agent.tools.lookup import SEARCH_KEY_ENV, SEARCH_KEY_ID, TOOL_WEB, Lookup as AgentLookup, user_agent as lookup_user_agent
 from agent.hearing import (VoiceListener, list_input_devices as list_voice_input_devices, LOOPBACK_DEFAULT,
                            assess_hearing_input, default_output_name, mumu_speakers, owner_mic_problem)
 from agent.voice_style import choose_style as choose_voice_style, speech_adjust
@@ -10071,7 +10071,7 @@ class App(ctk.CTk):
         # 頼まれたら調べる（2026-10-16 本人「調べるからちょっと待っててねみたいな一言」「チャットの中の話ね」）
         lookup_config = AgentConfig.load(self.db.get_setting)
         self.agent_lookup_var = ctk.BooleanVar(value=lookup_config.lookup_enabled)
-        ctk.CTkSwitch(control, text="🔎 頼まれたら調べる（Wikipedia・天気。調べる前に「待って」の一言を出す）",
+        ctk.CTkSwitch(control, text="🔎 頼まれたら調べる（Wikipedia・天気・ウェブ検索・ニュース。調べる前に「待って」の一言を出す）",
                       variable=self.agent_lookup_var, command=self.on_agent_lookup_toggled).pack(
             anchor="w", padx=12, pady=(0, 4))
         wait_row = ctk.CTkFrame(control, fg_color="transparent")
@@ -11170,11 +11170,15 @@ class App(ctk.CTk):
     def on_agent_lookup_toggled(self):
         on = bool(self.agent_lookup_var.get())
         wait = self.agent_wait_text_entry.get().strip()
+        searchable = bool(self._search_api_key())
         if on and not messagebox.askyesno(
                 "頼まれたら調べる",
                 "チャットで頼まれたら、AIが Wikipedia（日本語版）と天気（Open-Meteo）を調べて答えます。\n"
                 "調べる言葉（作品名・地名など）は AI が決めて、Wikipedia・Open-Meteo へ送ります"
                 "（ルームの人のことは調べないように指示しています）。調べるのは1時間に10回までです。\n"
+                + ("設定タブで Tavily のキーを保存しているので、ウェブ検索とニュースも使います"
+                   "（調べる言葉は Tavily へ送ります。1日30回まで）。\n" if searchable else
+                   "設定タブで Tavily のキーを保存すると、ウェブ検索とニュースも使えます。\n")
                 + (f"調べる前に「{wait}」と出します。下書きを見せる設定でも、この一言だけは確かめずに送ります。\n"
                    if wait else "")
                 + "\n頼まれたら調べるようにしますか？"):
@@ -11183,7 +11187,8 @@ class App(ctk.CTk):
         self.db.save_setting("agent.lookup_enabled", "1" if on else "0")
         if self.agent_runtime is not None:
             self.agent_runtime.config.lookup_enabled = on
-        self._append_agent_log("🔎 頼まれたら調べます（Wikipedia・天気）。" if on else "🔎 調べるのをやめました。")
+        what = "Wikipedia・天気・ウェブ検索・ニュース" if searchable else "Wikipedia・天気"
+        self._append_agent_log(f"🔎 頼まれたら調べます（{what}）。" if on else "🔎 調べるのをやめました。")
 
     def save_agent_wait_text(self):
         """調べる前の「待って」の一言（空なら出さない）"""
@@ -11490,17 +11495,18 @@ class App(ctk.CTk):
             self.append_log(f"⚠️ AIの記録（{AGENT_DB_FILE_NAME}）が壊れていたので、バックアップから戻しました。")
         elif status == OPEN_RECREATED:
             self.append_log(f"⚠️ AIの記録（{AGENT_DB_FILE_NAME}）が壊れていたので、空で作り直しました。")
+        # 頼まれたら調べる（Wikipedia・天気。検索のキーがあればウェブ検索・ニュースも）
+        lookup = self._make_lookup()
         deps = AgentDeps(
             provider_factory=self._agent_provider,
             speak=self._agent_speak,
             post_chat=self._agent_post_chat,
             journal=ConversationJournal(AGENT_JOURNAL_DIR, enabled_getter=lambda: True),
-            # 頼まれたら調べる（Wikipedia・天気）。⚠️ Wikimedia の決まりで、User-Agent にアプリ名と連絡先（公開リポジトリ）を入れる
             voice_styles=self._agent_voice_styles,
             voice_profile=self._agent_voice_profile,
             owner_profile=OwnerProfile(lambda: self.db.get_setting("agent.owner_profile_dir", "") or ""),
-            lookup=AgentLookup(lookup_user_agent("GraHojoTool", APP_VERSION,
-                                                 f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}")).run,
+            lookup=lookup.run,
+            lookup_tools=lookup.available_tools,
             stop_speech=self.speech_service.stop_all,
             store=store,
             on_log=lambda line: self._post_to_ui(lambda: self._append_agent_log(line)),
@@ -11511,6 +11517,18 @@ class App(ctk.CTk):
         self.agent_store = store
         self.agent_runtime = AgentRuntime(deps, AgentConfig.load(self.db.get_setting))
         return self.agent_runtime
+
+    def _make_lookup(self):
+        # ⚠️ Wikimedia の決まりで、User-Agent にアプリ名と連絡先（公開リポジトリ）を入れる
+        return AgentLookup(lookup_user_agent("GraHojoTool", APP_VERSION, f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"),
+                           search_key=self._search_api_key)
+
+    def _search_api_key(self):
+        """ウェブ検索（Tavily）のキー。使う直前に読む（無い・読めなければ None）"""
+        try:
+            return self.api_keys.load(SEARCH_KEY_ID, SEARCH_KEY_ENV)
+        except SecretStoreError:
+            return None
 
     def _agent_provider(self):
         """設定タブ「🤖 AI API」で選んだ提供元を作る。まだ使えなければ None、キーが無ければ ValueError（理由を言う）"""
@@ -11798,6 +11816,7 @@ class App(ctk.CTk):
         self.build_auto_ok_section(self.settings_scroll)
         self.build_daily_task_section(self.settings_scroll)
         self.build_ai_api_section(self.settings_scroll)
+        self.build_search_api_section(self.settings_scroll)
 
         frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
         frame.pack(fill="x", padx=20, pady=(10, 20))
@@ -13773,6 +13792,106 @@ class App(ctk.CTk):
     def _on_ai_api_test_done(self, info, result):
         self._refresh_ai_api_status(note=f"接続確認: {result.message}", ok=result.ok)
         self.append_log(f"{'✅' if result.ok else '⚠️'} AI API（{info.label}）の接続確認: {result.message}")
+
+    # --- ウェブ検索・ニュース（Tavily。2026-10-23 本人「代わりに調べて…チャットで返して」→「Tavilyで作る」） ---
+    # キーは AI API と同じく DPAPI で暗号化して settings へ（ai_api_key.tavily）。⚠️ 画面・ログにキーを出さない
+    def build_search_api_section(self, parent):
+        section = ctk.CTkFrame(parent)
+        section.pack(fill="x", padx=20, pady=(10, 0))
+        ctk.CTkLabel(section, text="🔎 ウェブ検索・ニュース（Tavily）", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=12, pady=(10, 3))
+        ctk.CTkLabel(
+            section,
+            text="キーを保存すると、AIタブの「頼まれたら調べる」で、ウェブ検索とニュース（ここ1週間）も使います。\n"
+                 "キーは https://app.tavily.com で作れます（無料で毎月1,000回・カード不要）。"
+                 "調べる言葉は Tavily（アメリカの会社）に送られます。\n"
+                 "キーは AI API と同じく暗号化して保存し、画面やログには表示しません。ウェブ検索は1日30回までにしています。",
+            justify="left", text_color="gray70"
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+        key_frame = ctk.CTkFrame(section, fg_color="transparent")
+        key_frame.pack(anchor="w", fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(key_frame, text="APIキー:", width=70, anchor="w").pack(side="left", padx=(0, 8))
+        self.search_api_key_entry = ctk.CTkEntry(key_frame, width=300, show=self.AI_API_KEY_MASK)
+        self.search_api_key_entry.pack(side="left", padx=(0, 5))
+        self.search_api_key_entry.bind("<Button-3>", self._show_entry_context_menu)
+        self.search_api_key_entry.bind("<Return>", lambda e: self.save_search_api_key())
+        ctk.CTkButton(key_frame, text="💾 保存", width=70,
+                      command=self.save_search_api_key).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(key_frame, text="🗑 削除", width=70, fg_color="red", hover_color="darkred",
+                      command=self.delete_search_api_key).pack(side="left", padx=(0, 5))
+        self.search_api_test_btn = ctk.CTkButton(key_frame, text="🔌 接続確認", width=100,
+                                                 fg_color="#555555", hover_color="#3a3a3a",
+                                                 command=self.test_search_api_connection)
+        self.search_api_test_btn.pack(side="left")
+        self.search_api_status_label = ctk.CTkLabel(section, text="", justify="left", text_color="gray70")
+        self.search_api_status_label.pack(anchor="w", padx=12, pady=(0, 12))
+        self._refresh_search_api_status()
+
+    def _refresh_search_api_status(self, note="", ok=None):
+        """保存の状態を表示する。⚠️ キーの一部も表示しない"""
+        state = self.api_keys.status(SEARCH_KEY_ID, SEARCH_KEY_ENV)
+        if state == STATUS_SAVED:
+            text, color = "保存済み（暗号化してこのPCに保存）", "#4a9e4a"
+        elif state == STATUS_ENV:
+            text, color = f"環境変数 {SEARCH_KEY_ENV} のキーを使います（保存はしていません）", "#4a9e4a"
+        elif state == STATUS_UNREADABLE:
+            text, color = "保存されていますが、このPCのユーザーでは読み出せません。入れ直してください。", "#d08a4a"
+        else:
+            text, color = "未保存（ウェブ検索・ニュースは使いません）", "gray70"
+        if note:
+            text += f"\n{note}"
+            color = "#4a9e4a" if ok else "#d08a4a"
+        self.search_api_status_label.configure(text=f"状態: {text}", text_color=color)
+
+    def save_search_api_key(self):
+        key, problem = validate_api_key(self.search_api_key_entry.get())
+        if key is None:
+            messagebox.showwarning("ウェブ検索のキー", problem)
+            return
+        try:
+            self.api_keys.save(SEARCH_KEY_ID, key)
+        except (SecretStoreError, ValueError) as e:
+            messagebox.showerror("ウェブ検索のキー", f"保存できませんでした。\n\n{e}")
+            return
+        finally:
+            key = None
+        self.search_api_key_entry.delete(0, "end")
+        self._refresh_search_api_status()
+        self.append_log("🔐 ウェブ検索（Tavily）のキーを暗号化して保存しました。")
+
+    def delete_search_api_key(self):
+        if self.api_keys.status(SEARCH_KEY_ID) not in (STATUS_SAVED, STATUS_UNREADABLE):
+            messagebox.showinfo("ウェブ検索のキーの削除", "保存されているキーがありません。")
+            return
+        if not messagebox.askyesno("ウェブ検索のキーの削除", "保存済みのウェブ検索（Tavily）のキーを削除しますか？"):
+            return
+        self.api_keys.delete(SEARCH_KEY_ID)
+        self._refresh_search_api_status()
+        self.append_log("🗑️ ウェブ検索（Tavily）の保存済みのキーを削除しました。")
+
+    def test_search_api_connection(self):
+        """保存済みのキーで1回だけ検索して確かめる（無料の回数を1回使う）"""
+        if not self._search_api_key():
+            messagebox.showinfo("接続確認", "キーを保存してから押してください。")
+            return
+        self.search_api_test_btn.configure(state="disabled")
+        self.search_api_status_label.configure(text="状態: 接続を確認しています...", text_color="gray70")
+
+        def run():
+            try:
+                result = self._make_lookup().run(TOOL_WEB, "Tavily")
+                note, ok = ("接続確認: つながりました" if result.ok else f"接続確認: {result.note}"), result.ok
+            except Exception:
+                write_error_log(f"ウェブ検索の接続確認でエラー:\n{traceback.format_exc()}")
+                note, ok = "接続確認: 想定外のエラー（error_log.txt）", False
+
+            def done():
+                self.search_api_test_btn.configure(state="normal")
+                self._refresh_search_api_status(note=note, ok=ok)
+                self.append_log(f"{'✅' if ok else '⚠️'} ウェブ検索（Tavily）の{note}")
+            self._post_to_ui(done)
+
+        threading.Thread(target=run, daemon=True).start()
 
     # --- エミュレータ(MuMu) ---
     def build_emulator_section(self, parent):
