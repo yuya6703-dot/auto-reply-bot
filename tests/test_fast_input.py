@@ -136,63 +136,109 @@ d = FakeRoomInput(field="消せない文字", direct_broken=True)
 w._clear_input(d)
 check("消すのに失敗しても止まらない（そのあとの入れ方が中身を置き換える）", d.calls == ["focused.clear_text"], d.calls)
 
-print("■ メンションはアイコンのダブルタップで（2026-10-16 本人「直接入力だとメンションされないため」）")
+print("■ メンションは、文を入れてからアイコンをダブルタップし、そのまま送る（2026-10-22 実機で確かめた順番）")
+# 本人「メンションを文字入力じゃなくてアイコンダブルタップにしてって言ったのに改善してない」「アイコンダブルタップしたらアプリ側で
+# 自動で文字入力されるのよ」。10/22 まではダブルタップのあとに「@名前 ＋文」で入力欄を丸ごと入れ直していて、青いメンションが
+# ただの文字になっていた。実機: 下の入力欄に「てすと」→ ダブルタップ → シートが開いて「てすと@名前.. 」（文の後ろに本物のメンション）
 with open(os.path.join(_HERE, "fixtures", "voiceroom_guest.xml"), encoding="utf-8") as f:
     ROOM = f.read()
 
 
 class FakeMentionRoom:
-    """音声ルーム。アイコンをダブルタップ（2回のタップを1回の shell で）すると、入力欄に「@名前 」が入る"""
+    """音声ルーム。下の入力欄に文を入れられ、アイコンをダブルタップ（2回のタップを1回の shell で）すると、
+    GRAVITY がシートを開いて文の後ろに「@名前 」を付ける。シートの「送る」で送る"""
 
-    def __init__(self, inserts=True, opens_profile=False, opens_page=False):
-        self.commands = []
-        self.inserts, self.opens_profile, self.opens_page = inserts, opens_profile, opens_page
+    def __init__(self, inserts=True, opens_page=False, sheet_open=False, extra_input=False):
+        self.commands, self.calls, self.sent = [], [], []
+        self.inserts, self.opens_page, self.sheet_open, self.extra_input = inserts, opens_page, sheet_open, extra_input
+        self.page = False
         self.field = ""
 
+    def __call__(self, **selector):
+        room = self
+
+        class Field:
+            def set_text(self, text, timeout=None):
+                room.calls.append(("set_text", dict(selector), text))
+                room.field = text or ""
+                return True
+
+            def clear_text(self, timeout=None):
+                room.calls.append(("clear_text", dict(selector)))
+                room.field = ""
+        return Field()
+
     def shell(self, command):
-        self.commands.append(str(command))
-        if str(command).count("tap 49 646") == 2 and "&" in str(command):
-            if self.inserts:
-                self.field = "@伏せ字3 "
+        command = str(command)
+        self.commands.append(command)
+        self.calls.append(("shell", command))
+        if command.count("tap 49 646") == 2 and "&" in command:
+            if self.opens_page:
+                self.page = True
+            elif self.inserts:
+                self.sheet_open = True
+                self.field += "@伏せ字3 "
+        elif "keyevent 4" in command:
+            self.page = self.sheet_open = False
+        elif self.sheet_open and "tap 472 922" in command:      # シートの「送る」
+            self.sent.append(self.field)
+            self.field, self.sheet_open = "", False
         return type("R", (), {"output": ""})()
 
     def dump_hierarchy(self, compressed=True):
-        if self.opens_page and self.commands and not any("keyevent 4" in c for c in self.commands):
-            # 画面いっぱいのページ（他の人のプロフィールなど）。シートではないので design_bottom_sheet も、ルームの入力欄も無い
-            return ('<?xml version="1.0" ?><hierarchy rotation="0"><node resource-id="anonymous.sns.community.gravity:id/tvUserName" '
-                    'text="伏せ字3" display-id="2" bounds="[0,100][540,160]" /></hierarchy>')
-        if self.opens_profile and self.commands:
-            return ROOM.replace('resource-id="anonymous.sns.community.gravity:id/etText"', 'resource-id="x:id/none"')                 .replace("</hierarchy>", '<node resource-id="anonymous.sns.community.gravity:id/design_bottom_sheet" '
-                                         'display-id="2" bounds="[0,500][540,960]" /></hierarchy>')
-        return ROOM.replace('text="メッセージを送信"', f'text="{self.field}"') if self.field else ROOM
+        if self.page:      # 画面いっぱいのページ（他の人のプロフィールなど）。入力欄も、後ろのチャット欄も無い
+            return (f'<hierarchy><node resource-id="{GRAVITY}:id/tvUserName" text="伏せ字3" package="{GRAVITY}" '
+                    'display-id="2" bounds="[0,100][540,160]" /></hierarchy>')
+        shown = self.field.replace("&", "&amp;").replace('"', "&quot;") or "メッセージを送信"
+        if self.sheet_open:   # シートが開くと、画面の読み取りにはシートの部品しか出ない（後ろのチャット欄は読めない）
+            return ('<hierarchy>'
+                    f'<node resource-id="{GRAVITY}:id/design_bottom_sheet" package="{GRAVITY}" display-id="2" bounds="[0,884][540,960]" />'
+                    f'<node class="android.widget.EditText" resource-id="{GRAVITY}:id/etText" text="{shown}" package="{GRAVITY}" '
+                    'display-id="2" bounds="[147,896][433,948]" focused="true" />'
+                    f'<node class="android.widget.TextView" resource-id="{GRAVITY}:id/btnSend" text="送る" package="{GRAVITY}" '
+                    'display-id="2" bounds="[433,904][511,941]" clickable="true" /></hierarchy>')
+        xml = ROOM.replace('text="メッセージを送信"', f'text="{shown}"')
+        if self.extra_input:   # GRAVITY を2つ開いていて、別の画面にも入力欄がある
+            xml = xml.replace("</hierarchy>", f'<node class="android.widget.EditText" resource-id="{GRAVITY}:id/etText" '
+                                              'text="メッセージを送信" package="{GRAVITY}" display-id="3" bounds="[0,0][9,9]" /></hierarchy>')
+        return xml
+
+    def window_size(self):
+        return 540, 960
 
 
 notes = []
 w = worker()
 w.agent_note = notes.append
 d = FakeMentionRoom()
-prefix = w._mention_by_icon(d, "伏せ字3")
-check("その人のいちばん新しい発言の行のアイコンを、すばやく2回タップする（1回の shell で）",
-      d.commands and d.commands[0].count("input -d 2 tap 49 646") == 2 and "& sleep 0.08;" in d.commands[0], d.commands)
-check("入力欄に入ったメンション（「@名前 」）を返す", prefix == "@伏せ字3 ", repr(prefix))
-check("判断のログに", any("メンションを入れました" in n for n in notes), notes)
+check("送れたと返す", w._send_with_mention(d, "こんばんは！", "伏せ字3") is True, (notes, d.calls))
+check("文の後ろに本物のメンションが付いた形で送る", d.sent == ["こんばんは！@伏せ字3 "], d.sent)
+tap_at = next(i for i, c in enumerate(d.calls) if c[0] == "shell" and "tap 49 646" in c[1])
+texts = [i for i, c in enumerate(d.calls) if c[0] in ("set_text", "clear_text")]
+check("文を入れるのは、ダブルタップの前の1回だけ（下の入力欄へ。シートは開かない）",
+      len(texts) == 1 and texts[0] < tap_at and d.calls[texts[0]][2] == "こんばんは！"
+      and "resourceIdMatches" in d.calls[texts[0]][1], d.calls)
+check("⚠️ ダブルタップのあとは、入力欄を書き直さない（書き直すと青いメンションがただの文字になる）",
+      all(c[0] == "shell" for c in d.calls[tap_at:]), d.calls[tap_at:])
+check("その人のいちばん新しい発言のアイコンを、すばやく2回タップする（1回の shell で）",
+      d.calls[tap_at][1].count("input -d 2 tap 49 646") == 2 and "& sleep 0.08;" in d.calls[tap_at][1], d.calls[tap_at])
+check("判断のログに", any("メンションが付きました" in n for n in notes), notes)
 d = FakeMentionRoom()
-check("その人の発言がチャット欄に見えなければ、タップしない（メンションなし）", w._mention_by_icon(d, "いない人") is None
-      and d.commands == [] and "見えないので" in notes[-1])
-d = FakeMentionRoom(inserts=False, opens_profile=True)
-check("ダブルタップでメンションが入らず、プロフィールなどが開いたら閉じる（メンションなしで送る）",
-      w._mention_by_icon(d, "伏せ字3") is None and any("input -d 2 keyevent 4" in c for c in d.commands), d.commands)
-d = FakeMentionRoom(inserts=False, opens_page=True)
-check("シートではなく画面いっぱいのページ（プロフィールなど）が開いても、戻ってルームに帰る（そのページに居続けない）",
-      w._mention_by_icon(d, "伏せ字3") is None and any("input -d 2 keyevent 4" in c for c in d.commands), d.commands)
+check("その人の発言がチャット欄に見えなければ、何もさわらない（メンションなしで送る）",
+      w._send_with_mention(d, "こんばんは", "いない人") is None and d.calls == [] and "見えないので" in notes[-1])
+d = FakeMentionRoom(sheet_open=True)
+check("入力のシートが開いていたら（後ろのアイコンの位置が分からない）、さわらない",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.calls == [])
+d = FakeMentionRoom(extra_input=True)
+check("入力欄がいくつもある（GRAVITY を複数開いている）ときは、どの欄に入るか分からないのでさわらない",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.calls == [])
+d = FakeMentionRoom(opens_page=True)
+check("ダブルタップでプロフィールなどのページが開いたら、戻るでルームに帰る（何も送らない）",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.sent == []
+      and any("input -d 2 keyevent 4" in c for c in d.commands) and "メンションが付かなかった" in notes[-1], d.commands)
 d = FakeMentionRoom(inserts=False)
 check("何も開かず、ルームの入力欄が見えたままなら、戻るは押さない（ルームから出てしまう）",
-      w._mention_by_icon(d, "伏せ字3") is None and not any("keyevent 4" in c for c in d.commands), d.commands)
-d = FakeRoomInput(field="@伏せ字3 ")
-w = worker()
-check("メンションが入っていたら、入力欄を空にせず、メンションの後ろに文を入れて送る",
-      w._send_reply(d, "こんばんは！", prefix="@伏せ字3 ") is True and d.sent == ["@伏せ字3 こんばんは！"]
-      and "focused.clear_text" not in d.calls, (d.sent, d.calls))
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and not any("keyevent 4" in c for c in d.commands), d.commands)
 w.is_running = True
 w.is_alive = lambda: True
 ok, _ = w.enqueue_agent_text("こんばんは", mention="伏せ字3")

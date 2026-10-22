@@ -4806,20 +4806,42 @@ class AutoReplyWorker:
 
     AGENT_ACCOUNT_RECHECK_SECONDS = 60
 
-    def _mention_by_icon(self, d, name):
+    def _send_with_mention(self, d, text, name):
         """
-        チャット欄の、その人のいちばん新しい発言の行のアイコンをダブルタップして、メンションを入れる
-        （2026-10-16 本人「メンションは文字を直接入力するのではなく、話したい相手のアイコンをダブルタップするのみにする。
-        直接入力だとメンションされないため」）。入力欄に「@」が入ったら、入った文字（「@名前 」）を返す。入らなければ None
-        （⚠️ 開いた画面があれば閉じる。メンションなしで送る）
+        AI の文を、相手へのメンション付きで送る。戻り値: True＝送った / False＝送ろうとして失敗した /
+        None＝メンションを付けられなかった（何も送っていない。呼ぶ側がメンションなしのふつうの送り方で送る）。
+
+        順番が大事（2026-10-22 実機で確かめた。本人「アイコンダブルタップしたらアプリ側で自動で文字入力されるのよ」
+        「なまえの文字がアカウント名が青く表示されていたらメンション成功」）:
+          1) シートを開かずに、下の入力欄（etText）へ文を入れる
+          2) その人のいちばん新しい発言のアイコンをダブルタップ → GRAVITY がシートを開き、文の後ろに本物のメンション（青い「@名前 」）を付ける
+             （実機: 「てすと」を入れてダブルタップ →「てすと@名前.. 」）
+          3) そのまま「送る」を押す
+        ⚠️ メンションのあとに入力欄を書き直さない。書き直すと青いメンションが消え、ただの文字の「@名前」になる
+           （10/22 まではダブルタップ →「@名前 ＋文」で丸ごと入れ直していて、メンションになっていなかった）。
+           画面の部品の上では、本物のメンションもただの文字（「@名前 」）にしか見えないので、「あとから触らない」順番で守る
+        ⚠️ シートが開いていると後ろのチャット欄が読めない（アイコンの位置が分からない）ので、シートを開く前にやる
         """
+        display = self._target_display
         try:
             xml = d.dump_hierarchy(compressed=True)
         except Exception:
             return None
-        point = find_chat_portrait(xml, self._target_display, name)
+        point = find_chat_portrait(xml, display, name)
         if point is None:
             self._agent_note(f"@ 「{name}」の発言がチャット欄に見えないので、メンションなしで送ります。")
+            return None
+        if find_by_id(xml, ROOM_SHEET_ID, display) or len(find_by_id(xml, ROOM_INPUT_ID)) != 1:
+            # 入力のシートが開いている・入力欄がいくつもある（GRAVITY を複数開いている）ときは、どの欄に入るか分からない
+            self._agent_note(f"@ 入力欄を決められないので、メンションなしで送ります（「{name}」）。")
+            return None
+        try:
+            d(resourceIdMatches=rf".*:id/{ROOM_INPUT_ID}$").set_text(text, timeout=self.FOCUSED_FIELD_WAIT)
+        except Exception:
+            return None
+        mine = self._normalize_for_compare(text)
+        # ⚠️ 入れた直後に画面を読むと、まだ反映されていないことがある（2026-10-22 実機: 0.6秒後に読むと案内文のままだった）
+        if not self._wait_for_input(d, lambda field: field.startswith(mine), self.MENTION_TEXT_WAIT):
             return None
         tap = self._input_command("tap", *point)
         try:
@@ -4827,23 +4849,37 @@ class AutoReplyWorker:
             d.shell(f"{tap} & sleep {self.DOUBLE_TAP_GAP}; {tap}")
         except Exception:
             return None
-        time.sleep(1.0)
-        text = self._current_input_text(d).strip()
-        if text.startswith("@"):
-            self._agent_note(f"@ アイコンのダブルタップで「{name}」にメンションを入れました。")
-            return text + " "
+        if self._wait_for_input(d, lambda field: field.startswith(mine) and "@" in field[len(mine):],
+                                self.MENTION_ADDED_WAIT):
+            self._agent_note(f"@ アイコンのダブルタップで「{name}」へのメンションが付きました（文の後ろ）。")
+            is_sent = self._tap_send_button(d)
+            time.sleep(1.0)
+            self._close_keyboard_if_open(d)
+            return is_sent
         try:
             # プロフィールなどが開いたかもしれない（ダブルタップが1回ずつのタップとして届いたとき）。ルームの入力欄が
             # 見えなければ、開いたもの（シートでも、画面いっぱいのページでも）を戻るで閉じる。⚠️ 見えていれば押さない（ルームから出る）
-            xml = d.dump_hierarchy(compressed=True)
-            if not find_by_id(xml, ROOM_INPUT_ID, self._target_display):
+            if not find_by_id(d.dump_hierarchy(compressed=True), ROOM_INPUT_ID, display):
                 self._keyevent(d, ANDROID_KEYCODE_BACK)
+                time.sleep(0.6)
         except Exception:
             pass
-        self._agent_note(f"⚠️ アイコンをダブルタップしてもメンションが入らなかったので、メンションなしで送ります（「{name}」）。")
+        self._agent_note(f"⚠️ アイコンをダブルタップしてもメンションが付かなかったので、メンションなしで送ります（「{name}」）。")
         return None
 
     DOUBLE_TAP_GAP = 0.08
+    MENTION_TEXT_WAIT = 2.0          # 下の入力欄に入れた文が、画面の読み取りに出るまで待つ上限（秒）
+    MENTION_ADDED_WAIT = 3.0         # ダブルタップのあと、シートが開いてメンションが付くまで待つ上限（秒）
+
+    def _wait_for_input(self, d, ok, timeout):
+        """入力欄の文字（空白・改行は除いて比べる）が ok を満たすまで、少しずつ読み直して待つ。満たしたら True"""
+        deadline = time.monotonic() + timeout
+        while True:
+            time.sleep(0.3)
+            if ok(self._normalize_for_compare(self._current_input_text(d))):
+                return True
+            if time.monotonic() >= deadline:
+                return False
 
     def _update_agent_account(self, d):
         """
@@ -6155,19 +6191,11 @@ class AutoReplyWorker:
         except Exception:
             pass
 
-    def _send_reply(self, d, reply_message, prefix=None):
-        """
-        入力欄に返信ワードを入れて送信する（入力欄は呼び出し側でタップ済み）。
-        prefix はアイコンのダブルタップで入ったメンション（「@名前 」）。⚠️ 入力欄を空にしない（メンションが消える）。
-        貼り付けが使えれば後ろに貼り付け、使えなければ「メンション＋文」で入れ直す（MuMu は貼り付けが使えない）
-        """
-        if prefix:
-            fill = reply_message if self._clipboard_paste_available else prefix.rstrip() + " " + reply_message
-        else:
-            self._clear_input(d)
-            fill = reply_message
+    def _send_reply(self, d, reply_message):
+        """入力欄に返信ワードを入れて送信する（入力欄は呼び出し側でタップ済み）。メンション付きは _send_with_mention"""
+        self._clear_input(d)
 
-        if not self._fill_reply_text(d, fill):
+        if not self._fill_reply_text(d, reply_message):
             return False
 
         time.sleep(0.4)
@@ -6299,7 +6327,7 @@ class AutoReplyWorker:
         return self._config_cache
 
     def _execute_reply(self, d, nodes, half_y, y_min_internal, y_max_internal, reply_message,
-                       failure_count, FAILURE_WARN_THRESHOLD, all_nodes=None, prefix=None):
+                       failure_count, FAILURE_WARN_THRESHOLD, all_nodes=None):
         """
         入力欄タップ〜送信〜スクロールまでを実行し、(更新後のfailure_count, 送信できたか) を返す。
 
@@ -6309,7 +6337,7 @@ class AutoReplyWorker:
         sent_ok = False
         if self._find_and_tap_input(d, nodes, half_y, all_nodes=all_nodes):
             time.sleep(1.0)
-            sent_ok = self._send_reply(d, reply_message, prefix=prefix)
+            sent_ok = self._send_reply(d, reply_message)
 
             if sent_ok:
                 failure_count = 0
@@ -6355,18 +6383,25 @@ class AutoReplyWorker:
 
             self.log(f"🤖 AIの文を送信します:「{text}」" if isinstance(text, AgentChatText)
                      else f"✍️ 手入力送信します:「{text}」")
-            prefix = None
+            sent_ok = None
             if isinstance(text, AgentChatText) and text.mention:
-                prefix = self._mention_by_icon(d, text.mention)
-                try:                       # ダブルタップで画面が変わった。入力欄・送るボタンの位置を読み直す
-                    xml_dump = d.dump_hierarchy(compressed=True)
-                    _, _, nodes, all_nodes = self._extract_chat_texts(xml_dump, y_min_internal, y_max_internal)
-                except Exception:
-                    pass
-            failure_count, sent_ok = self._execute_reply(
-                d, nodes, half_y, y_min_internal, y_max_internal, text,
-                failure_count, FAILURE_WARN_THRESHOLD, all_nodes=all_nodes, prefix=prefix
-            )
+                # メンション付き: 文を入れてからアイコンをダブルタップし、そのまま送る（_send_with_mention）
+                sent_ok = self._send_with_mention(d, str(text), text.mention)
+                if sent_ok is not None:
+                    failure_count = 0 if sent_ok else failure_count + 1
+                    self._restore_target_app_if_left(d)
+                    self._scroll_down(d, y_min_internal, y_max_internal, silent=False)
+                else:
+                    try:                   # 画面にさわったかもしれない。入力欄・送るボタンの位置を読み直す
+                        xml_dump = d.dump_hierarchy(compressed=True)
+                        _, _, nodes, all_nodes = self._extract_chat_texts(xml_dump, y_min_internal, y_max_internal)
+                    except Exception:
+                        pass
+            if sent_ok is None:
+                failure_count, sent_ok = self._execute_reply(
+                    d, nodes, half_y, y_min_internal, y_max_internal, text,
+                    failure_count, FAILURE_WARN_THRESHOLD, all_nodes=all_nodes
+                )
             sent_any = True
             if not sent_ok:
                 self.log("⚠️ 手入力送信に失敗しました。入力欄に文字が残っていないか確認してください。")

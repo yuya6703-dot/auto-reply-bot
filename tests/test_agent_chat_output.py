@@ -158,29 +158,39 @@ w._manual_queue = [A.AgentChatText("届かなかった文")]
 w._drain_manual_sends(None, [], 0, 0, 960, 0, 3)
 check("送れなかったときも出す", notes[-1].startswith("⚠️ チャットに送れませんでした") and "届かなかった文" in notes[-1], notes)
 
-print("■ メンションは、送る前にアイコンのダブルタップで（2026-10-16 本人「直接入力だとメンションされないため」）")
+print("■ メンション付きの文は、文を入れてからアイコンをダブルタップして送る（2026-10-22 実機で確かめた順番）")
 calls = []
-w._mention_by_icon = lambda d, name: (calls.append(name), "@" + name + " ")[1]
+w._send_with_mention = lambda d, text, name: (calls.append((text, name)), True)[1]
+w._restore_target_app_if_left = lambda d: None
+w._scroll_down = lambda d, y1, y2, silent=False: None
 w._extract_chat_texts = lambda xml, y1, y2: (None, None, ["読み直した欄"], ["読み直した全部"])
 d = type("D", (), {"dump_hierarchy": lambda self, compressed=True: "<hierarchy/>"})()
-got = []
-w._execute_reply = lambda d, nodes, half_y, y1, y2, text, fc, thr, all_nodes=None, prefix=None: (
-    got.append((str(text), prefix, nodes, all_nodes)), (fc, True))[1]
+got, notes = [], []
+w.agent_note = notes.append
+w._execute_reply = lambda d, nodes, half_y, y1, y2, text, fc, thr, all_nodes=None: (
+    got.append((str(text), nodes, all_nodes)), (fc, True))[1]
 item = A.AgentChatText("こんばんは")
 item.mention = "たろう"
 w._manual_queue = [item, A.AgentChatText("みんなへ"), "本人の手入力"]
 w._drain_manual_sends(d, ["前の欄"], 0, 0, 960, 0, 3)
-check("メンションする相手がいる文だけ、その人のアイコンをダブルタップする", calls == ["たろう"], calls)
-check("ダブルタップで入ったメンションの後ろに文を入れる。画面は読み直してから送る",
-      got[0] == ("こんばんは", "@たろう ", ["読み直した欄"], ["読み直した全部"]), got[0])
-check("メンションのない文・本人の手入力は、今までどおり（メンションなし）",
-      [g[1] for g in got[1:]] == [None, None] and [g[0] for g in got[1:]] == ["みんなへ", "本人の手入力"], got[1:])
-w._mention_by_icon = lambda d, name: None
+check("メンションする相手がいる文だけ、メンション付きの送り方で送る（ふつうの送り方は使わない）",
+      calls == [("こんばんは", "たろう")] and [g[0] for g in got] == ["みんなへ", "本人の手入力"], (calls, got))
+check("送れたことを判断のログに", "✉️ チャットに送りました:「こんばんは」" in notes, notes)
+w._send_with_mention = lambda d, text, name: None
 got.clear()
 item = A.AgentChatText("こんばんは")
 item.mention = "いない人"
 w._manual_queue = [item]
 w._drain_manual_sends(d, ["前の欄"], 0, 0, 960, 0, 3)
-check("メンションが入らなかったら、メンションなしで送る（文に @ を書き足さない）", got and got[0][:2] == ("こんばんは", None), got)
+check("メンションを付けられなかったら、画面を読み直して、メンションなしのふつうの送り方で送る（文に @ を書き足さない）",
+      got == [("こんばんは", ["読み直した欄"], ["読み直した全部"])], got)
+w._send_with_mention = lambda d, text, name: False
+got.clear()
+item = A.AgentChatText("こんばんは")
+item.mention = "たろう"
+w._manual_queue = [item]
+w._drain_manual_sends(d, ["前の欄"], 0, 0, 960, 0, 3)
+check("メンション付きで送ろうとして失敗したら、二重に送らない（送れなかったと知らせる）",
+      got == [] and notes[-1].startswith("⚠️ チャットに送れませんでした"), (got, notes[-1:]))
 
 finish()
