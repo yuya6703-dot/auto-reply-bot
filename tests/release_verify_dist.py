@@ -38,10 +38,11 @@ ap.add_argument("--strict-paths", action="store_true", help="手元のパス（�
 ap.add_argument("--allow-error-log", help="error_log.txt に出てよい行（正規表現）。無ければ1行でも失敗")
 # ⚠️ リリースのたびに、その版で足した機能の名前（関数名・ボタンの文言など）に差し替える
 ap.add_argument("--symbols", default=",".join([
-    "GravityChatBridge", "AgentChatText", "enqueue_agent_text", "find_chat_portrait", "_mention_by_icon",
-    "read_room_info", "on_agent_mute_chat_toggled", "_warn_if_own_cable", "VoiceListener", "list_input_devices",
-    "AIの記憶", "📢", "🎙 AIのマイクがミュートのときは",
-]), help="exe の本体に入っているはずの名前（カンマ区切り）。既定は v1.10.0 で足したもの")
+    "acquire_single_instance", "もう起動しています", "_send_with_mention", "_close_sheet_keeping_text",
+    "room_input_focused", "_check_hearing_route", "_owner_mic_problem", "on_agent_reconsider_toggled",
+    "GRAVITYの顔で表す", "UnifiedLog", "on_log_filter_changed", "build_search_api_section",
+    "🔎 ウェブ検索・ニュース（Tavily）",
+]), help="exe の本体に入っているはずの名前（カンマ区切り）。既定は v1.11.0 で足したもの")
 a = ap.parse_args()
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -292,6 +293,24 @@ if title:
             print(f"  info 窓を撮れなかった: {e}")
     others = [t for h, t in windows_of(proc.pid) if h != hwnd]
     check("エラーなどの別の窓が出ていない", not others, str(others))
+    # 同じフォルダの2つ目は、アプリの窓を作らずに「もう起動しています」と知らせて終わる（v1.11.0。2つが同じ MuMu を取り合った）
+    second = subprocess.Popen([exe_path], cwd=app_dir, env=env)
+    notice = []
+    deadline2 = time.time() + 30
+    while time.time() < deadline2 and second.poll() is None and not notice:
+        notice = [(h, t) for h, t in windows_of(second.pid) if t]
+        time.sleep(0.5)
+    check("同じフォルダの2つ目はアプリの窓を作らない（知らせの窓だけ）",
+          bool(notice) and all(TITLE not in t for _, t in notice), str([t for _, t in notice]))
+    for h, _ in notice:
+        user32.PostMessageW(h, 0x0010, 0, 0)       # 知らせを閉じる（OK と同じく終わる）
+    try:
+        second.wait(15)
+        check("2つ目は知らせを閉じると終わる", True)
+    except subprocess.TimeoutExpired:
+        check("2つ目は知らせを閉じると終わる", False, str([t for _, t in windows_of(second.pid)]))
+        second.kill()
+    check("1つ目はそのまま動いている", proc.poll() is None, f"exit={proc.poll()}")
     user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE（ふつうに閉じる）
     try:
         proc.wait(20)
