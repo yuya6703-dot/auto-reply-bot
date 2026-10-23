@@ -1109,6 +1109,13 @@ def find_by_id(xml_dump, resource_name, display=None, text=None):
     return boxes
 
 
+def room_input_focused(xml_dump, display):
+    """その画面のルームの入力欄（etText）にフォーカスがあるか（文を入れると入る。入力のシートが開く前触れ）"""
+    root = ET.fromstring(xml_dump)
+    return any(_resource_name(node) == ROOM_INPUT_ID and node.get("focused") == "true"
+               for node in _display_nodes(root, display))
+
+
 def find_chat_portrait(xml_dump, display, name):
     """
     チャット欄で、その人（名前が切れて出ても）のいちばん新しい発言の行のアイコン（押せる ivPortrait）の真ん中 (x, y)。
@@ -4841,7 +4848,8 @@ class AutoReplyWorker:
 
         順番が大事（2026-10-22 実機で確かめた。本人「アイコンダブルタップしたらアプリ側で自動で文字入力されるのよ」
         「なまえの文字がアカウント名が青く表示されていたらメンション成功」）:
-          1) シートを開かずに、下の入力欄（etText）へ文を入れる
+          1) 下の入力欄（etText）へ文を入れる。⚠️ 2026-10-24 実機: 入れると入力のシートが開くようになった（10/22 は開かなかった）
+             → 戻る1回で閉じる（文は下の入力欄に残る。_close_sheet_keeping_text）
           2) その人のいちばん新しい発言のアイコンをダブルタップ → GRAVITY がシートを開き、文の後ろに本物のメンション（青い「@名前 」）を付ける
              （実機: 「てすと」を入れてダブルタップ →「てすと@名前.. 」）
           3) そのまま「送る」を押す
@@ -4870,6 +4878,9 @@ class AutoReplyWorker:
         mine = self._normalize_for_compare(text)
         # ⚠️ 入れた直後に画面を読むと、まだ反映されていないことがある（2026-10-22 実機: 0.6秒後に読むと案内文のままだった）
         if not self._wait_for_input(d, lambda field: field.startswith(mine), self.MENTION_TEXT_WAIT):
+            return None
+        if not self._close_sheet_keeping_text(d):
+            self._agent_note(f"@ 入力のシートが閉じないので、メンションなしで送ります（「{name}」）。")
             return None
         for attempt in range(2):
             # ⚠️ 押す直前にアイコンの位置を測り直す（文を入れて反映を待つ間に、新しい発言でチャット欄が動くことがある。
@@ -4911,6 +4922,34 @@ class AutoReplyWorker:
                 self._agent_note(f"@ メンションが付かなかったので、もう1回ダブルタップします（「{name}」）。")
         self._agent_note(f"⚠️ アイコンをダブルタップしてもメンションが付かなかったので、メンションなしで送ります（「{name}」）。")
         return None
+
+    def _close_sheet_keeping_text(self, d):
+        """
+        文を入れたあと、入力のシートが開いていたら戻る1回で閉じ、チャット欄が見えるまで待つ。見えたら True。
+        ⚠️ 2026-10-24 実機: 下の入力欄に文を入れると、フォーカスが入ってキーボードと入力のシートが開く（10/22 は開かなかった）。
+           開いたままだとチャット欄が読めず（アイコンの位置が分からない）、押しても1回目はシートを閉じるだけ・2回目がふつうの
+           タップになる（ミニプロフィールが開く）。戻る1回でシートもキーボードも閉じ、文は下の入力欄に残る。
+        ⚠️ 戻るは1回だけ（シートが無いのに押すとルームから出る）
+        """
+        display = self._target_display
+        deadline = time.monotonic() + self.MENTION_TEXT_WAIT
+        pressed = False
+        while True:
+            try:
+                xml = d.dump_hierarchy(compressed=True)
+            except Exception:
+                return False
+            if find_by_id(xml, ROOM_SHEET_ID, display):
+                if not pressed:
+                    self._keyevent(d, ANDROID_KEYCODE_BACK)
+                    pressed = True
+            elif find_by_id(xml, CHAT_LIST_ID, display) and (
+                    pressed or not room_input_focused(xml, display) or time.monotonic() >= deadline):
+                # 入力欄にフォーカスがあるのにシートがまだ無いときは、これから開くかもしれないので少し待つ
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.3)
 
     def _close_if_left_room_input(self, d):
         """

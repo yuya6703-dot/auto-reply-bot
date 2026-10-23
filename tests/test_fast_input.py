@@ -149,10 +149,12 @@ class FakeMentionRoom:
     GRAVITY がシートを開いて文の後ろに「@名前 」を付ける。シートの「送る」で送る"""
 
     def __init__(self, inserts=True, opens_page=False, sheet_open=False, extra_input=False, shift_after_text=False,
-                 fail_first=False, wrong_person=False):
+                 fail_first=False, wrong_person=False, sheet_on_text=False, sheet_sticks=False):
         self.commands, self.calls, self.sent = [], [], []
         self.inserts, self.opens_page, self.sheet_open, self.extra_input = inserts, opens_page, sheet_open, extra_input
         self.shift_after_text, self.fail_first, self.wrong_person = shift_after_text, fail_first, wrong_person
+        # 2026-10-24 実機: 下の入力欄に文を入れると、フォーカスが入ってキーボードと入力のシートが開く（10/22 は開かなかった）
+        self.sheet_on_text, self.sheet_sticks = sheet_on_text, sheet_sticks
         self.page = False
         self.field = ""
         self.text_set = False
@@ -170,6 +172,8 @@ class FakeMentionRoom:
                 room.calls.append(("set_text", dict(selector), text))
                 room.field = text or ""
                 room.text_set = room.text_set or bool(text)
+                if room.sheet_on_text and text and not room.sheet_open:
+                    room.sheet_open = True
                 return True
 
             def clear_text(self, timeout=None):
@@ -184,7 +188,10 @@ class FakeMentionRoom:
         taps = re.findall(r"input -d 2 tap (\d+) (\d+)", command)
         if len(taps) == 2 and taps[0] == taps[1] and "; sleep" in command and "&" not in command:   # 順番に2回（ダブルタップ）
             self.double_taps += 1
-            if tuple(map(int, taps[0])) != self.icon():
+            if self.sheet_open:
+                # シートが開いていると、1回目はシートを閉じるだけ、2回目がふつうのタップになってミニプロフィールが開く
+                self.sheet_open, self.page = False, True
+            elif tuple(map(int, taps[0])) != self.icon():
                 pass                       # ずれた所を押した（何も起きない）
             elif self.fail_first and self.double_taps == 1:
                 pass                       # 1回目はダブルタップと受け取られなかった
@@ -193,8 +200,11 @@ class FakeMentionRoom:
             elif self.inserts:
                 self.sheet_open = True
                 self.field += "@別の人 " if self.wrong_person else "@伏せ字3 "
-        elif "keyevent 4" in command:
-            self.page = self.sheet_open = False
+        elif "keyevent 4" in command:      # 戻る: 開いているページ・シート（とキーボード）を閉じる。入れた文は下の入力欄に残る
+            if self.page:
+                self.page = False
+            elif not self.sheet_sticks:
+                self.sheet_open = False
         elif self.sheet_open and "tap 472 922" in command:      # シートの「送る」
             self.sent.append(self.field)
             self.field, self.sheet_open = "", False
@@ -272,6 +282,21 @@ d = FakeMentionRoom(wrong_person=True)
 check("⚠️ 別の人へのメンションが付いたら、送らない（入力欄を空にして、メンションなしで送り直す）",
       w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.sent == [] and d.field == ""
       and "別の人" in notes[-1], (d.sent, d.field, notes[-1:]))
+# 2026-10-24 リリース前の実機: 文を入れると入力のシートが開くようになっていた。開いたままだとチャット欄が読めず、
+# 押す直前の測り直しでダブルタップせずに抜けていた（3回とも「メンションが付かなかった」・1〜2秒で終わる）。
+# 戻る1回でシートもキーボードも閉じ、文は下の入力欄に残る（実機で確かめた）
+d = FakeMentionRoom(sheet_on_text=True)
+check("文を入れてシートが開いたら、戻る1回で閉じてからダブルタップし、メンション付きで送る",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is True and d.sent == ["こんばんは@伏せ字3 "], (notes[-2:], d.commands))
+backs = [i for i, c in enumerate(d.calls) if c[0] == "shell" and "keyevent 4" in c[1]]
+taps = [i for i, c in enumerate(d.calls) if c[0] == "shell" and "tap 49 646" in c[1]]
+check("戻るは1回だけ、ダブルタップの前（シートが無いのに押すとルームから出る）", len(backs) == 1 and taps and backs[0] < taps[0],
+      d.calls)
+check("文は入れ直さない（入れるのは1回だけ）", sum(c[0] == "set_text" for c in d.calls) == 1, d.calls)
+d = FakeMentionRoom(sheet_on_text=True, sheet_sticks=True)
+check("戻るでシートが閉じなければ、ダブルタップしない（メンションなしで送る。戻るを何度も押さない）",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.double_taps == 0 and d.sent == []
+      and sum("keyevent 4" in c for c in d.commands) == 1, d.commands)
 w.is_running = True
 w.is_alive = lambda: True
 ok, _ = w.enqueue_agent_text("こんばんは", mention="伏せ字3")

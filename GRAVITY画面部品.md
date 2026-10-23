@@ -213,6 +213,10 @@ cvRoot → include → llFeedItem
 | チャット欄 `rvMessages`（⚠️ 上端は画面で変わる。実測 159 / 248） | 発言 `userMessageView`（`clRoot`, `ivPortrait`（**すばやくダブルタップ**すると、入力のシートが開いて、その人への本物のメンション（青い「@名前」）が入力欄の文の**後ろ**に付く。
 1回だけのタップはミニプロフィール（`VoiceRoomPassportActivity`。⚠️ 中にギフト・通報などのボタンがある。戻るで閉じる）。
 入力のシートが開いているとダブルタップにならない（1回目でシートが閉じ、2回目がふつうのタップになる）。
+⚠️ 2026-10-24 実機: 下の入力欄 `etText` に文を入れると（uiautomator2 の set_text）、入力欄にフォーカスが入って、キーボードと入力のシートが
+0.4秒ほどで開く（10/22 は開かなかった）。戻る1回でシートもキーボードも閉じ、入れた文は下の入力欄に残る → 閉じてからダブルタップする。
+自分のアカウントの発言のアイコンは、ダブルタップしても1回のタップでも何も起きない（自分にはメンションできない）。
+`input -d N tap` は1回20〜35ミリ秒（`/system/bin/input` は `cmd input` を呼ぶだけ）。`tap; sleep 0.05; tap` の始まりの間はおよそ90ミリ秒で、メンションが付く。
 ⚠️ 画面の部品の上では、本物のメンションもただの文字「@名前 」にしか見えない。メンションのあとに入力欄を書き直すと、ただの文字になる。2026-10-22 実機）, `llName`→`tvName`→`shimmerTextView`, `ivCharmLevel`, `flContainer`→`tvContent`）。お知らせ `tvText`（「〜がマイクをもらいました」など）。ミッションの札 `clContent`（`tvContent`「ルーム個人ミッションを達成しました !」, `ivReward`, `tvCount`「x1000」, `btnNext`「景品GETへ」）。⚠️ 景品GETへ は押さない |
 | 右の席 `rvSeats` | 座っている席 `ivAvatar` + `vSideView`（`tvPos`=席番号, `ivMuted`（その席がミュート。斜線のマイクの印）, `ivVolume`（話せる席）, オーナーは `ivAnchorLevelIcon`）。空いた席 `ivAdd` + `tvPosition`。⚠️ ivAdd は押さない（席の申請になる） |
 | 右下 | `clCount`→`tvUserCount`「ゲスト（N人）」, `rvViewers`。初回課金の案内 `clFirstRecharge`（`ivFirstRechargeClose`, 「あと5日」） |
