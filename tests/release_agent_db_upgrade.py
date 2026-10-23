@@ -69,7 +69,15 @@ check("前の版の AgentStore で作れた", made.returncode == 0, made.stderr[
 print(f"前の版の表の版: {made.stdout.strip()}")
 KEPT = ("usage_records", "persona")
 before = dump(db, KEPT)
-check("前の版では記憶の表が無い（版1の形で作れている）", "account" not in columns(db, "memories") if columns(db, "memories") else True)
+old_schema = made.stdout.strip()
+if old_schema == "1":
+    check("前の版では記憶の表が無い（版1の形で作れている）", "account" not in columns(db, "memories") if columns(db, "memories") else True)
+else:
+    # v1.10.0 から前の版の表の版はもう 4。表の形が変わらない版の上げでも、記録がそのままかは下で同じように見る
+    with sqlite3.connect(db) as _c:
+        _v = _c.execute("SELECT * FROM schema_version").fetchall() if "schema_version" in [
+            r[0] for r in _c.execute("SELECT name FROM sqlite_master WHERE type='table'")] else None
+    check(f"前の版の形（表の版 {old_schema}）で作れている", _v is None or _v == [(int(old_schema),)], _v)
 
 sys.path.insert(0, NEW_DIR)
 from agent.memory.store import AgentStore, SCHEMA_VERSION, OPEN_OK  # noqa: E402
