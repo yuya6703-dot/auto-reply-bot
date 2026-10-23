@@ -111,8 +111,10 @@ check("自分の発言には目印を付けない", "［" not in _line(ev("@ほ�
 check("名前の照合: 切れた名前は先頭一致（2文字以上）", name_matches("オーナー太..", "オーナー太郎") and not name_matches("オ..", "オーナー太郎")
       and not name_matches("オーナー", "オーナー太郎"))
 check("オーナーを AI に伝える（規則は変わらないことも）", any("オーナー" in line and "規則と守ること" in line for line in self_lines(cfg)))
-check("チャットの文字数の上限は声より長い（反応60・参加200）", max_chars_for("react", AgentConfig(output_mode="chat")) == 60
-      and max_chars_for("engage", AgentConfig(output_mode="chat")) == 200 and max_chars_for("engage", AgentConfig()) == 120)
+# 2026-10-24 チャットの参加は200→120（GRAVITY の入力欄は約145字で止まり、メンションの「@名前 」が後ろに付く）
+check("チャットの文字数の上限（反応60・参加120。声は反応40・参加120）", max_chars_for("react", AgentConfig(output_mode="chat")) == 60
+      and max_chars_for("engage", AgentConfig(output_mode="chat")) == 120 and max_chars_for("react", AgentConfig()) == 40
+      and max_chars_for("engage", AgentConfig()) == 120)
 check("チャットは改行を2つ（3行）まで残す", tidy_text("一行目\n\n二行目 \n三行目\n四行目", keep_newlines=True)
       == "一行目\n二行目\n三行目 四行目", repr(tidy_text("一行目\n\n二行目 \n三行目\n四行目", keep_newlines=True)))
 check("声は改行を空白に", tidy_text("一行目\n二行目") == "一行目 二行目")

@@ -61,12 +61,22 @@ check("呼ばれた出来事は長く待てる（90秒）", a.runtime._hold_limi
       and a.runtime._hold_limit(make_event("ねえ")) == 30.0)
 a.close()
 
-print("■ チャットは改行を残し、声より長く書ける（2026-10-16）")
+print("■ チャットは改行を残す・参加は120字まで（2026-10-16 / 2026-10-24）")
 a = Agent(mode=MODE_ENGAGE, output_mode=OUTPUT_CHAT)
-a.mock.script_generate = [{"text": "それいいね！\n" + "あ" * 150 + "\nまた教えて", "emotion": "joy"}]
+a.mock.script_generate = [{"text": "それいいね！\n" + "あ" * 100 + "\nまた教えて", "emotion": "joy"}]
 a.say("最近どう？", speaker="C")
-check("改行入り・150字を超える文もチャットに送る（上限200）", wait_until(lambda: len(a.chat.posted) == 1)
+check("改行入り・100字を超える文もチャットに送る", wait_until(lambda: len(a.chat.posted) == 1)
       and a.chat.posted[0].count("\n") == 2, a.utterance_rows())
+check("文を作るときに「文字数の上限: 120字」と伝える", "文字数の上限: 120字" in a.generate_calls()[-1].messages[0].content,
+      a.generate_calls()[-1].messages[0].content[-300:])
+a.close()
+# GRAVITY の入力欄は約145字で止まる（2026-10-22 実測）。メンションは文の後ろに「@名前 」で付くので、その分を残す
+check("参加の上限は、入力欄（約145字）にメンションの「@名前 」の分を残す", AgentConfig().chat_engage_max_chars <= 125)
+a = Agent(mode=MODE_ENGAGE, output_mode=OUTPUT_CHAT)
+a.mock.script_generate = [{"text": "あ" * 130, "emotion": "calm"}]
+a.say("ねえ？")
+check("120字を超える文は送らない（入力欄で途中までになった文を送らない）", wait_until(lambda: a.utterance_rows() != [])
+      and a.utterance_rows()[-1][1] == "dropped:C2" and a.chat.posted == [], a.utterance_rows())
 a.close()
 
 print("■ T46 捨てた下書きは数えない")

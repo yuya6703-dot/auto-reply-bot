@@ -136,7 +136,9 @@ class AgentConfig:
     react_max_chars: int = 40              # C2: 短い反応の上限（声）
     engage_max_chars: int = 120            # C2: 参加の上限（声）
     chat_react_max_chars: int = 60         # C2: チャットの短い反応の上限（チャットは読むので声より長くてよい）
-    chat_engage_max_chars: int = 200       # C2: チャットの参加の上限（GRAVITYの1通は250字まで）
+    # C2: チャットの参加の上限。GRAVITY の入力欄は約145字で止まり（2026-10-22 実測）、メンションは文の後ろに「@名前 」で
+    #     付くので、その分を残す（2026-10-24 本人「まかせる」で200→120。これまでのAIの発言の最長は95字）
+    chat_engage_max_chars: int = 120
     hold_max_seconds: float = 30.0         # 保留した出来事は、これより古くなったら記録だけにする
     addressed_hold_max_seconds: float = 90.0   # 呼ばれた出来事は、回数の上限が空くまで長めに待つ（1分の上限を待てるように）
     ignore_words: list = field(default_factory=list)   # R9: これだけの出来事は判断しない
