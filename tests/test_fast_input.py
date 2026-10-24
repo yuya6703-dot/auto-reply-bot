@@ -237,8 +237,9 @@ class FakeMentionRoom:
 notes = []
 w = worker()
 w.agent_note = notes.append
+# ここから: 前の送り方（文を入れてからダブルタップ＝文の後ろにメンション）。2026-10-24 から、貼り付けられないときの予備
 d = FakeMentionRoom()
-check("送れたと返す", w._send_with_mention(d, "こんばんは！", "伏せ字3") is True, (notes, d.calls))
+check("送れたと返す", w._send_with_mention_after(d, "こんばんは！", "伏せ字3") is True, (notes, d.calls))
 check("文の後ろに本物のメンションが付いた形で送る", d.sent == ["こんばんは！@伏せ字3 "], d.sent)
 tap_at = next(i for i, c in enumerate(d.calls) if c[0] == "shell" and "tap 49 646" in c[1])
 texts = [i for i, c in enumerate(d.calls) if c[0] in ("set_text", "clear_text")]
@@ -253,41 +254,41 @@ check("その人のいちばん新しい発言のアイコンを、すばやく2
 check("判断のログに", any("メンションが付きました" in n for n in notes), notes)
 d = FakeMentionRoom()
 check("その人の発言がチャット欄に見えなければ、何もさわらない（メンションなしで送る）",
-      w._send_with_mention(d, "こんばんは", "いない人") is None and d.calls == [] and "見えないので" in notes[-1])
+      w._send_with_mention_after(d, "こんばんは", "いない人") is None and d.calls == [] and "見えないので" in notes[-1])
 d = FakeMentionRoom(sheet_open=True)
 check("入力のシートが開いていたら（後ろのアイコンの位置が分からない）、さわらない",
-      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.calls == [])
+      w._send_with_mention_after(d, "こんばんは", "伏せ字3") is None and d.calls == [])
 d = FakeMentionRoom(extra_input=True)
 check("入力欄がいくつもある（GRAVITY を複数開いている）ときは、どの欄に入るか分からないのでさわらない",
-      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.calls == [])
+      w._send_with_mention_after(d, "こんばんは", "伏せ字3") is None and d.calls == [])
 d = FakeMentionRoom(opens_page=True)
 check("ダブルタップでプロフィールなどのページが開いたら、戻るでルームに帰る（何も送らない）",
-      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.sent == []
+      w._send_with_mention_after(d, "こんばんは", "伏せ字3") is None and d.sent == []
       and any("input -d 2 keyevent 4" in c for c in d.commands) and "メンションが付かなかった" in notes[-1], d.commands)
 d = FakeMentionRoom(inserts=False)
 check("何も開かず、ルームの入力欄が見えたままなら、戻るは押さない（ルームから出てしまう）",
-      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and not any("keyevent 4" in c for c in d.commands), d.commands)
+      w._send_with_mention_after(d, "こんばんは", "伏せ字3") is None and not any("keyevent 4" in c for c in d.commands), d.commands)
 # 2026-10-23 本人「アイコンのダブルタップできてないよ」「間髪入れずにダブルタップしないとメンションにならない」
 d = FakeMentionRoom(shift_after_text=True)
 check("文を入れたあとにチャット欄が動いても、押す直前に測り直した位置をダブルタップする",
-      w._send_with_mention(d, "こんばんは", "伏せ字3") is True and d.sent == ["こんばんは@伏せ字3 "]
+      w._send_with_mention_after(d, "こんばんは", "伏せ字3") is True and d.sent == ["こんばんは@伏せ字3 "]
       and any("input -d 2 tap 49 706" in c for c in d.commands), d.commands)
 d = FakeMentionRoom(fail_first=True)
-check("1回目でメンションが付かなければ、もう1回だけダブルタップする", w._send_with_mention(d, "こんばんは", "伏せ字3") is True
+check("1回目でメンションが付かなければ、もう1回だけダブルタップする", w._send_with_mention_after(d, "こんばんは", "伏せ字3") is True
       and d.double_taps == 2 and d.sent == ["こんばんは@伏せ字3 "] and any("もう1回" in n for n in notes), (d.double_taps, notes[-2:]))
 d = FakeMentionRoom(inserts=False)
-w._send_with_mention(d, "こんばんは", "伏せ字3")
+w._send_with_mention_after(d, "こんばんは", "伏せ字3")
 check("2回やっても付かなければ、そこでやめる（3回目はしない）", d.double_taps == 2, d.double_taps)
 d = FakeMentionRoom(wrong_person=True)
 check("⚠️ 別の人へのメンションが付いたら、送らない（入力欄を空にして、メンションなしで送り直す）",
-      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.sent == [] and d.field == ""
+      w._send_with_mention_after(d, "こんばんは", "伏せ字3") is None and d.sent == [] and d.field == ""
       and "別の人" in notes[-1], (d.sent, d.field, notes[-1:]))
 # 2026-10-24 リリース前の実機: 文を入れると入力のシートが開くようになっていた。開いたままだとチャット欄が読めず、
 # 押す直前の測り直しでダブルタップせずに抜けていた（3回とも「メンションが付かなかった」・1〜2秒で終わる）。
 # 戻る1回でシートもキーボードも閉じ、文は下の入力欄に残る（実機で確かめた）
 d = FakeMentionRoom(sheet_on_text=True)
 check("文を入れてシートが開いたら、戻る1回で閉じてからダブルタップし、メンション付きで送る",
-      w._send_with_mention(d, "こんばんは", "伏せ字3") is True and d.sent == ["こんばんは@伏せ字3 "], (notes[-2:], d.commands))
+      w._send_with_mention_after(d, "こんばんは", "伏せ字3") is True and d.sent == ["こんばんは@伏せ字3 "], (notes[-2:], d.commands))
 backs = [i for i, c in enumerate(d.calls) if c[0] == "shell" and "keyevent 4" in c[1]]
 taps = [i for i, c in enumerate(d.calls) if c[0] == "shell" and "tap 49 646" in c[1]]
 check("戻るは1回だけ、ダブルタップの前（シートが無いのに押すとルームから出る）", len(backs) == 1 and taps and backs[0] < taps[0],
@@ -295,8 +296,135 @@ check("戻るは1回だけ、ダブルタップの前（シートが無いのに
 check("文は入れ直さない（入れるのは1回だけ）", sum(c[0] == "set_text" for c in d.calls) == 1, d.calls)
 d = FakeMentionRoom(sheet_on_text=True, sheet_sticks=True)
 check("戻るでシートが閉じなければ、ダブルタップしない（メンションなしで送る。戻るを何度も押さない）",
-      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.double_taps == 0 and d.sent == []
+      w._send_with_mention_after(d, "こんばんは", "伏せ字3") is None and d.double_taps == 0 and d.sent == []
       and sum("keyevent 4" in c for c in d.commands) == 1, d.commands)
+
+# ----------------------------------------------------------------------
+# 2026-10-24 本人「送信する内容の後にメンションするんじゃなくてメンションしてから内容書いてチャットに送信して」。
+# 実機: 入力欄が空のままダブルタップ →「@名前 」（青）→ PC のクリップボードに文を入れて MuMu に写ってから貼り付け →「@名前 文」、青いまま
+print("■ メンションを先に入れ、その後ろに文を貼って送る（2026-10-24）")
+PC = {"kind": A.CLIPBOARD_TEXT, "text": "本人がコピーしてあった文", "writes": []}
+
+
+def fake_clipboard_read():
+    return PC["kind"], (PC["text"] if PC["kind"] == A.CLIPBOARD_TEXT else None)
+
+
+def fake_clipboard_write(text):
+    PC["writes"].append(text)
+    PC["kind"], PC["text"] = (A.CLIPBOARD_TEXT, text) if text is not None else (A.CLIPBOARD_EMPTY, None)
+
+
+A.win_clipboard_read, A.win_clipboard_write = fake_clipboard_read, fake_clipboard_write
+
+
+class PasteRoom(FakeMentionRoom):
+    """PC のクリップボードが MuMu に写り（sync）、貼り付け（keyevent 279）でカーソルの位置（文の終わり）に足される"""
+
+    def __init__(self, sync=True, **kw):
+        super().__init__(**kw)
+        self.sync = sync
+
+    @property
+    def clipboard(self):
+        return PC["text"] if self.sync and PC["kind"] == A.CLIPBOARD_TEXT else "（前からMuMuにあった文）"
+
+    def shell(self, command):
+        if "keyevent 279" in str(command):
+            self.commands.append(str(command))
+            self.calls.append(("shell", str(command)))
+            if self.sheet_open:
+                self.field += self.clipboard
+            return type("R", (), {"output": ""})()
+        return super().shell(command)
+
+
+guards = []
+w = worker()
+w.agent_note = notes.append
+w.clipboard_guard = lambda borrowed, restored: guards.append((borrowed, restored))
+w.MENTION_PASTE_SYNC_WAIT = 0.6
+d = PasteRoom()
+check("送れたと返す", w._send_with_mention(d, "こんばんは！", "伏せ字3") is True, (notes[-2:], d.calls))
+check("メンションが先・文が後の形で送る", d.sent == ["@伏せ字3 こんばんは！"], d.sent)
+tap_at = next(i for i, c in enumerate(d.calls) if c[0] == "shell" and "tap 49 646" in c[1])
+check("入力欄が空のままダブルタップする（文は先に入れない）", not any(c[0] in ("set_text", "clear_text") for c in d.calls[:tap_at]),
+      d.calls[:tap_at])
+check("⚠️ メンションのあとは入力欄を書き直さず、貼り付けで足す", all(c[0] == "shell" for c in d.calls[tap_at:])
+      and any("keyevent 279" in c[1] for c in d.calls[tap_at:]), d.calls[tap_at:])
+check("PC のクリップボードは元に戻す", PC["kind"] == A.CLIPBOARD_TEXT and PC["text"] == "本人がコピーしてあった文"
+      and PC["writes"] == ["こんばんは！", "本人がコピーしてあった文"], PC)
+check("借りている間は知らせ、返したら戻した中身を渡す（クリップボードの読み上げが AI の文を読まないため）",
+      guards == [(True, None), (False, "本人がコピーしてあった文")], guards)
+check("判断のログに", any("その後ろに文を入れました" in n for n in notes), notes[-2:])
+
+PC.update(kind=A.CLIPBOARD_TEXT, text="前の文", writes=[])
+d = PasteRoom()
+d.field = "書きかけ"
+check("入力欄に文が残っていたら、空にしてからメンションを入れる（メンションを先頭にするため）",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is True and d.sent == ["@伏せ字3 こんばんは"], (d.sent, d.calls[:3]))
+
+PC.update(kind=A.CLIPBOARD_OTHER, text=None, writes=[])
+d = PasteRoom()
+check("PC のクリップボードに文字以外（画像など）が入っていたら借りない（戻せない）→ 文の後ろにメンションで送る",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is True and d.sent == ["こんばんは@伏せ字3 "] and PC["writes"] == []
+      and any("文の後ろにメンションを付けて送ります" in n for n in notes), (d.sent, PC["writes"], notes[-2:]))
+
+PC.update(kind=A.CLIPBOARD_TEXT, text="前の文", writes=[])
+d = PasteRoom(sync=False)
+check("MuMu に写らなければ、下書きを捨てて文の後ろにメンションで送る（PC のクリップボードは戻す）",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is True and d.sent == ["こんばんは@伏せ字3 "]
+      and PC["text"] == "前の文" and not any("keyevent 279" in c for c in d.commands), (d.sent, PC, d.commands[-4:]))
+
+PC.update(kind=A.CLIPBOARD_EMPTY, text=None, writes=[])
+d = PasteRoom()
+check("PC のクリップボードが空なら、空に戻す", w._send_with_mention(d, "こんばんは", "伏せ字3") is True
+      and d.sent == ["@伏せ字3 こんばんは"] and PC["kind"] == A.CLIPBOARD_EMPTY, (d.sent, PC))
+
+PC.update(kind=A.CLIPBOARD_TEXT, text="前の文", writes=[])
+d = PasteRoom(wrong_person=True)
+check("⚠️ 別の人へのメンションが付いたら、貼らずに送らない（入力欄を空にして、メンションなしで送り直す）",
+      w._send_with_mention(d, "こんばんは", "伏せ字3") is None and d.sent == [] and d.field == "" and PC["writes"] == [],
+      (d.sent, d.field, PC["writes"]))
+d = PasteRoom()
+check("その人の発言が見えなければ、何もさわらない", w._send_with_mention(d, "こんばんは", "いない人") is None and d.calls == [])
+
+print("■ クリップボードの読み上げは、監視がクリップボードを借りている間の文（AIの文）を読まない（2026-10-24）")
+
+
+class ClipWatcher:
+    """App のクリップボードの読み上げだけを借りる器（画面は作らない）"""
+    _watch_clipboard = A.App._watch_clipboard
+    _clipboard_borrow = A.App._clipboard_borrow
+    _clipboard_borrowed = A.App._clipboard_borrowed
+
+    def __init__(self):
+        self.text, self.spoken, self._clipboard_last_text = "前からコピーしてあった文", [], "前からコピーしてあった文"
+        self.clipboard_watch_var = type("V", (), {"get": lambda _self: True})()
+
+    def _read_clipboard_text(self):
+        return self.text
+
+    def request_speech(self, text, source=""):
+        self.spoken.append(text)
+
+    def after(self, ms, callback):
+        return "id"
+
+
+cw = ClipWatcher()
+cw._clipboard_borrow(True, None)
+cw.text = "こんばんは（AIの文）"
+cw._watch_clipboard()
+check("借りている間は読まない", cw.spoken == [], cw.spoken)
+cw.text = "前からコピーしてあった文"
+cw._clipboard_borrow(False, "前からコピーしてあった文")
+cw._watch_clipboard()
+check("返したあとも、戻した中身を新しくコピーしたとみなして読まない", cw.spoken == [], cw.spoken)
+cw.text = "本人が新しくコピーした文"
+cw._watch_clipboard()
+check("本人が新しくコピーした文は、今まで通り読む", cw.spoken == ["本人が新しくコピーした文"], cw.spoken)
+
 w.is_running = True
 w.is_alive = lambda: True
 ok, _ = w.enqueue_agent_text("こんばんは", mention="伏せ字3")

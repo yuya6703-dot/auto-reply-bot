@@ -143,6 +143,8 @@ class Harness(ctk.CTk):
     _agent_tasks_ready = A.App._agent_tasks_ready
     _agent_run_tasks = A.App._agent_run_tasks
     _chat_tasks = A.App._chat_tasks
+    _clipboard_borrow = A.App._clipboard_borrow
+    _clipboard_borrowed = A.App._clipboard_borrowed
     on_agent_mute_chat_toggled = A.App.on_agent_mute_chat_toggled
     _hearing_route = A.App._hearing_route
     _owner_mic_problem = A.App._owner_mic_problem

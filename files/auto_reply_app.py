@@ -279,6 +279,78 @@ DEFAULT_KEYWORDS = {
 # Androidのキーコード。貼り付けは KEYCODE_PASTE。
 ANDROID_KEYCODE_PASTE = 279
 
+# --- Windows のクリップボード（2026-10-24 メンションのあとに文を足すため） ---
+# ⚠️ MuMu の Android 側のクリップボードには、uiautomator2 から書けない（SecurityException）。入力の仕組み（AdbKeyboard）への
+#    切り替えも MuMu が止める。ただし MuMu は PC のクリップボードを Android 側へ写す（実測 約2.4秒）ので、PC のクリップボードに
+#    入れてから貼り付ければ、カーソルの位置に文を足せる（入力欄を丸ごと入れ替えないので、青いメンションが残る）。
+# ⚠️ 監視のスレッドから使うので tkinter のクリップボードは使わない（画面のスレッド専用）
+CLIPBOARD_TEXT = "text"        # 文字が入っている
+CLIPBOARD_EMPTY = "empty"      # 何も入っていない
+CLIPBOARD_OTHER = "other"      # 文字以外（画像など）だけが入っている。戻せないので借りない
+_CF_UNICODETEXT = 13
+_GMEM_MOVEABLE = 0x0002
+
+
+def _clipboard_api():
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    return user32, kernel32
+
+
+def _open_clipboard(user32):
+    # ほかのアプリが開いていることがあるので、少しだけ待って開き直す
+    for _ in range(20):
+        if user32.OpenClipboard(None):
+            return True
+        time.sleep(0.05)
+    raise OSError("クリップボードを開けませんでした")
+
+
+def win_clipboard_read():
+    """(種類, 文字)。種類は CLIPBOARD_TEXT / CLIPBOARD_EMPTY / CLIPBOARD_OTHER"""
+    user32, kernel32 = _clipboard_api()
+    _open_clipboard(user32)
+    try:
+        if not user32.IsClipboardFormatAvailable(_CF_UNICODETEXT):
+            return (CLIPBOARD_EMPTY if user32.CountClipboardFormats() == 0 else CLIPBOARD_OTHER), None
+        handle = user32.GetClipboardData(_CF_UNICODETEXT)
+        pointer = kernel32.GlobalLock(handle) if handle else None
+        if not pointer:
+            return CLIPBOARD_OTHER, None
+        try:
+            return CLIPBOARD_TEXT, ctypes.wstring_at(pointer)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def win_clipboard_write(text):
+    """クリップボードを text だけにする（None なら空にする）"""
+    user32, kernel32 = _clipboard_api()
+    _open_clipboard(user32)
+    try:
+        user32.EmptyClipboard()
+        if text is None:
+            return
+        data = (text + "\0").encode("utf-16-le")
+        handle = kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
+        pointer = kernel32.GlobalLock(handle)
+        ctypes.memmove(pointer, data, len(data))
+        kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(_CF_UNICODETEXT, handle):
+            kernel32.GlobalFree(handle)
+            raise OSError("クリップボードに入れられませんでした")
+    finally:
+        user32.CloseClipboard()
+
 # uiautomator2がエミュレータに入れる入力補助IMEのパッケージ名。
 # ⚠️ この補助バーには「Send」「Clear Text」ボタンが並んでいる。
 # 送信ボタンを画面から探すとき、アプリ側の「送る」ではなく
@@ -1697,6 +1769,7 @@ class GravityChatBridge:
 # GRAVITYの音声ルームのチャット欄と入力欄の部品（GRAVITY画面部品.md。ゲストの画面で実測）
 CHAT_LIST_ID = "rvMessages"     # チャット欄の一覧。⚠️ 上端は画面で変わる（実測 159 と 248）。決め打ちせず毎回探す
 ROOM_INPUT_ID = "etText"        # 入力欄。空のときは案内文「メッセージを送信」が文字として入っている
+ROOM_INPUT_HINT = "メッセージを送信"
 
 
 ROOM_SHEET_ID = "design_bottom_sheet"     # 下から出るシート（チャットの入力・人の情報・ギフトなど）
@@ -4780,6 +4853,8 @@ class AutoReplyWorker:
         self._agent_bridge = None
         # AIタブの判断のログにも出したいこと（AIの文を実際に送れたか・チャット欄が隠れたか）。App が渡す（監視スレッドから呼ぶ）
         self.agent_note = None
+        # PC のクリップボードを借りるとき (借りる/返す, 返した中身) で知らせる。App がクリップボードの読み上げを止めるのに使う
+        self.clipboard_guard = None
         # 今チャットしている GRAVITY のアカウントが、どの GRAVITY か（MuMu の Android のユーザー。本体=0、アプリ複製=10〜）。
         # ⚠️ アカウントそのものは GRAVITY のアカウント（名前）。ユーザー番号は、名前を引くための手がかりにだけ使う
         self.agent_account_user = None
@@ -4845,6 +4920,119 @@ class AutoReplyWorker:
         """
         AI の文を、相手へのメンション付きで送る。戻り値: True＝送った / False＝送ろうとして失敗した /
         None＝メンションを付けられなかった（何も送っていない。呼ぶ側がメンションなしのふつうの送り方で送る）。
+
+        メンションを先・文を後にする（2026-10-24 本人「送信する内容の後にメンションするんじゃなくてメンションしてから内容書いて
+        チャットに送信して」。実機で、メンションのあとに貼り付けた文が付き、メンションは青いまま）:
+          1) 入力欄が空のまま、その人のいちばん新しい発言のアイコンをダブルタップ → GRAVITY がシートを開き、本物のメンション（青い「@名前 」）を入れる
+          2) 文を PC のクリップボードに入れ、MuMu に写ってから貼り付ける（カーソルの位置に足す。入力欄を丸ごと入れ替えないのでメンションが残る）
+          3) そのまま「送る」を押す。PC のクリップボードは元に戻す
+        貼り付けられなければ、下書きを捨てて前の送り方（文を入れてからダブルタップ＝文の後ろにメンション。_send_with_mention_after）にする。
+        ⚠️ メンションのあとに入力欄を書き直さない（set_text で書き直すと、青いメンションがただの文字になる）
+        """
+        display = self._target_display
+        try:
+            xml = d.dump_hierarchy(compressed=True)
+        except Exception:
+            return None
+        if find_chat_portrait(xml, display, name) is None:
+            self._agent_note(f"@ 「{name}」の発言がチャット欄に見えないので、メンションなしで送ります。")
+            return None
+        if find_by_id(xml, ROOM_SHEET_ID, display) or len(find_by_id(xml, ROOM_INPUT_ID)) != 1:
+            # 入力のシートが開いている・入力欄がいくつもある（GRAVITY を複数開いている）ときは、どの欄に入るか分からない
+            self._agent_note(f"@ 入力欄を決められないので、メンションなしで送ります（「{name}」）。")
+            return None
+        current = self._current_input_text(d).strip()
+        if current and current != ROOM_INPUT_HINT:
+            # 入力欄に文が残っていると、メンションはその後ろに付く。先頭にするため、空にしてシートを閉じる
+            try:
+                d(resourceIdMatches=rf".*:id/{ROOM_INPUT_ID}$").set_text("", timeout=self.FOCUSED_FIELD_WAIT)
+            except Exception:
+                return None
+            if not self._close_sheet_keeping_text(d):
+                return None
+        mine = self._normalize_for_compare(text)
+        for attempt in range(2):
+            try:
+                xml = d.dump_hierarchy(compressed=True)
+            except Exception:
+                return None
+            if find_by_id(xml, ROOM_SHEET_ID, display):
+                break
+            point = find_chat_portrait(xml, display, name)       # 押す直前に測り直す（チャット欄が動くことがある）
+            if point is None:
+                break
+            tap = self._input_command("tap", *point)
+            try:
+                d.shell(f"{tap}; sleep {self.DOUBLE_TAP_GAP}; {tap}")
+            except Exception:
+                return None
+            if self._wait_for_input(d, lambda field: field.startswith("@"), self.MENTION_ADDED_WAIT):
+                raw = self._current_input_text(d)
+                tagged = raw[1:].strip()
+                if not friend_name_matches(tagged, name):
+                    self._agent_note(f"⚠️ 別の人（「{tagged}」）へのメンションになったので、送らずに、メンションなしで送り直します"
+                                     f"（「{name}」）。")
+                    self._clear_mention_draft(d)
+                    return None
+                if self._paste_after_mention(d, text) and self._wait_for_input(
+                        d, lambda field: field.startswith("@") and field.endswith(mine), self.MENTION_TEXT_WAIT):
+                    self._agent_note(f"@ アイコンのダブルタップで「{name}」へのメンションを入れ、その後ろに文を入れました。")
+                    is_sent = self._tap_send_button(d)
+                    time.sleep(1.0)
+                    self._close_keyboard_if_open(d)
+                    return is_sent
+                # 貼り付けられなかった。下書きを捨てて、文の後ろにメンションを付ける前の送り方にする
+                self._agent_note(f"@ メンションのあとに文を入れられなかったので、文の後ろにメンションを付けて送ります（「{name}」）。")
+                self._clear_mention_draft(d)
+                return self._send_with_mention_after(d, text, name)
+            self._close_if_left_room_input(d)     # ミニプロフィールなどが開いていたら閉じて、もう1回だけ
+            if attempt == 0:
+                self._agent_note(f"@ メンションが付かなかったので、もう1回ダブルタップします（「{name}」）。")
+        self._agent_note(f"⚠️ アイコンをダブルタップしてもメンションが付かなかったので、メンションなしで送ります（「{name}」）。")
+        return None
+
+    MENTION_PASTE_SYNC_WAIT = 5.0    # PC のクリップボードが MuMu に写るまで待つ上限（秒。実測 約2.4秒）
+
+    def _paste_after_mention(self, d, text):
+        """
+        文を PC のクリップボードに入れ、MuMu に写ってから入力欄に貼り付ける。貼り付けを送れたら True。
+        PC のクリップボードは必ず元に戻す。⚠️ 文字以外（画像など）が入っていたら戻せないので、借りずに False
+        """
+        try:
+            kind, saved = win_clipboard_read()
+        except Exception:
+            return False
+        if kind == CLIPBOARD_OTHER:
+            return False
+        guard = self.clipboard_guard
+        if guard is not None:
+            guard(True, None)        # クリップボードの読み上げに、借りている間は読まないよう知らせる
+        try:
+            win_clipboard_write(text)
+            deadline = time.monotonic() + self.MENTION_PASTE_SYNC_WAIT
+            while True:
+                time.sleep(0.2)
+                try:
+                    if d.clipboard == text:
+                        break
+                except Exception:
+                    pass
+                if time.monotonic() >= deadline:
+                    return False
+            return bool(self._keyevent(d, ANDROID_KEYCODE_PASTE))
+        except Exception:
+            return False
+        finally:
+            try:
+                win_clipboard_write(saved if kind == CLIPBOARD_TEXT else None)
+            except Exception:
+                pass
+            if guard is not None:
+                guard(False, saved)
+
+    def _send_with_mention_after(self, d, text, name):
+        """
+        前の送り方（2026-10-22〜10-24）: 文を入れてからダブルタップ → 文の後ろにメンション。貼り付けられないときに使う。
 
         順番が大事（2026-10-22 実機で確かめた。本人「アイコンダブルタップしたらアプリ側で自動で文字入力されるのよ」
         「なまえの文字がアカウント名が青く表示されていたらメンション成功」）:
@@ -10106,6 +10294,7 @@ class App(ctk.CTk):
         self.worker.set_agent_bridge(self.agent_bridge)
         # 監視ワーカーで起きた、AIに関わること（実際に送れたか・チャット欄が隠れたか）も判断のログに出す
         self.worker.agent_note = lambda message: self._post_to_ui(lambda: self._append_agent_log(message))
+        self.worker.clipboard_guard = self._clipboard_borrow
 
         frame = ctk.CTkScrollableFrame(self.tab_agent, fg_color="transparent")
         frame.pack(fill="both", expand=True, padx=20, pady=15)
@@ -13078,12 +13267,21 @@ class App(ctk.CTk):
                 self._clipboard_after_id = None
             self.append_log("⚙️ クリップボードの自動読み上げを OFF にしました。")
 
+    # メンションのあとに文を貼るため、監視がPCのクリップボードを借りている間（2026-10-24）。⚠️ 借りた文（AIの文）を読み上げない
+    _clipboard_borrowed = False
+
+    def _clipboard_borrow(self, borrowed, restored):
+        """監視のスレッドから呼ばれる。返したら、戻した中身を「もう読んだ」にする（戻したものを新しくコピーしたとみなさない）"""
+        if not borrowed:
+            self._clipboard_last_text = (restored or "").strip()
+        self._clipboard_borrowed = borrowed
+
     def _watch_clipboard(self):
         """クリップボードを定期的に見て、内容が変わっていたら読み上げる"""
         if getattr(self, "_closing", False) or not self.clipboard_watch_var.get():
             self._clipboard_after_id = None
             return
-        text = (self._read_clipboard_text() or "").strip()
+        text = None if self._clipboard_borrowed else (self._read_clipboard_text() or "").strip()
         if text and text != self._clipboard_last_text:
             self._clipboard_last_text = text
             self.request_speech(text, source="クリップボード")

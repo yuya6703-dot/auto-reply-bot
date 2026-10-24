@@ -219,6 +219,9 @@ cvRoot → include → llFeedItem
 入力欄（下の欄）はふつうの文字で**150字まで**（160字・200字を入れると先頭から150字に切られる。2026-10-24 実測）。
 ⚠️ 2026-10-24 夕方: 下の欄に入れた文が、開いた入力のシートの欄に引き継がれないことがあった（シートの欄は空のまま。朝は引き継がれた。わけは未調査）。
 `input -d N tap` は1回20〜35ミリ秒（`/system/bin/input` は `cmd input` を呼ぶだけ）。`tap; sleep 0.05; tap` の始まりの間はおよそ90ミリ秒で、メンションが付く。
+**メンションを先頭にする（2026-10-24 実機）**: 入力欄が空のままダブルタップ → シートが開いて「@名前 」（青）→ 後ろに文を**貼り付け**（KEYCODE_PASTE=279）→「@名前 文」、青いまま送れる。
+⚠️ uiautomator2 からは Android 側のクリップボードに書けない（SecurityException）・入力の仕組み（AdbKeyboard）への切り替えも MuMu が止める。
+MuMu は **PC のクリップボードを Android 側へ写す**（約2.4秒）ので、PC のクリップボードに入れてから貼る。PC のクリップボードは、書いた直後の一瞬だけ「文字以外」に見える（0.3秒後には文字）。
 ⚠️ 画面の部品の上では、本物のメンションもただの文字「@名前 」にしか見えない。メンションのあとに入力欄を書き直すと、ただの文字になる。2026-10-22 実機）, `llName`→`tvName`→`shimmerTextView`, `ivCharmLevel`, `flContainer`→`tvContent`）。お知らせ `tvText`（「〜がマイクをもらいました」など）。ミッションの札 `clContent`（`tvContent`「ルーム個人ミッションを達成しました !」, `ivReward`, `tvCount`「x1000」, `btnNext`「景品GETへ」）。⚠️ 景品GETへ は押さない |
 | 右の席 `rvSeats` | 座っている席 `ivAvatar` + `vSideView`（`tvPos`=席番号, `ivMuted`（その席がミュート。斜線のマイクの印）, `ivVolume`（話せる席）, オーナーは `ivAnchorLevelIcon`）。空いた席 `ivAdd` + `tvPosition`。⚠️ ivAdd は押さない（席の申請になる） |
 | 右下 | `clCount`→`tvUserCount`「ゲスト（N人）」, `rvViewers`。初回課金の案内 `clFirstRecharge`（`ivFirstRechargeClose`, 「あと5日」） |
