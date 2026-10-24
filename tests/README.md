@@ -146,7 +146,7 @@ python tests/release_update_e2e.py 前の版のzip 新しい版のzip 作業フ�
 ⚠️ 起動は `LOCALAPPDATA`・`APPDATA`・`TEMP`・`USERPROFILE`・`PATH` を差し替えた環境で行う（スクリプトがやる）。アプリは起動時に、
 適用待ちでない `%LOCALAPPDATA%\AutoReplyTool\pending_update` を消すので、差し替えずに起動すると本人のアプリの準備物を消しうる。
 
-⚠️ `release_verify_dist.py` の `--symbols` は、リリースのたびにその版で足した機能の名前に差し替える（既定は v1.11.0 のもの）。
+⚠️ `release_verify_dist.py` の `--symbols` は、リリースのたびにその版で足した機能の名前に差し替える（既定は v1.11.0 のもの）。`--agent-default` は、その版で変えた AI の設定の既定値（既定は v1.11.1 の `chat_engage_max_chars=120`）。
 v1.9.0 からは前の版にも `agent` パッケージがあるので、前の版は `auto_reply_app.py` だけでなく `files/` 一式を取り出して渡す。
 
 ⚠️ リリースしたコミットを取り出したフォルダ（`git worktree add`）から動かす。作業中のフォルダから動かすと、まだコミットしていない

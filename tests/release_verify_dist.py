@@ -43,7 +43,11 @@ ap.add_argument("--symbols", default=",".join([
     "GRAVITYの顔で表す", "UnifiedLog", "on_log_filter_changed", "build_search_api_section",
     "🔎 ウェブ検索・ニュース（Tavily）",
 ]), help="exe の本体に入っているはずの名前（カンマ区切り）。既定は v1.11.0 で足したもの")
+# ⚠️ リリースのたびに、その版で変えた AI の設定の既定値（agent.config の AgentConfig）に差し替える
+ap.add_argument("--agent-default", action="append", default=None,
+                help="exe の中の AgentConfig の既定値（名前=値。何度でも）。既定は v1.11.1 で変えたもの")
 a = ap.parse_args()
+a.agent_default = a.agent_default or ["chat_engage_max_chars=120"]
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 EXE = "自動送信ボット.exe"
@@ -142,6 +146,24 @@ AGENT.sort()
 check("files/agent/ のモジュールの一覧を作れた", bool(AGENT), _agent_root)
 miss_mods = [m for m in AGENT if m not in mods]
 check(f"AIまわりのモジュール {len(AGENT)} 個が全部入っている", not miss_mods, str(miss_mods))
+# 設定の既定値は agent.config の中（本体のスクリプトではない）なので、PYZ のコードから AgentConfig の定数を読む。
+# ⚠️ dis の命令の形は Python の版で変わるので、ビルドと同じ版（CIと同じ 3.11）で動かす
+import dis  # noqa: E402
+import marshal  # noqa: E402
+_cfg = pyz.extract("agent.config")
+_cfg = _cfg[1] if isinstance(_cfg, tuple) else _cfg
+_cfg = marshal.loads(_cfg) if isinstance(_cfg, (bytes, bytearray)) else _cfg
+_cls = next((c for c in _cfg.co_consts if hasattr(c, "co_name") and c.co_name == "AgentConfig"), None)
+_defaults = {}
+if _cls is not None:
+    _prev = None
+    for _ins in dis.get_instructions(_cls):
+        if _ins.opname == "STORE_NAME" and _prev is not None and _prev.opname == "LOAD_CONST":
+            _defaults[_ins.argval] = _prev.argval
+        _prev = _ins
+for _spec in a.agent_default:
+    _name, _want = _spec.split("=", 1)
+    check(f"AIの設定の既定値 {_name} が {_want}", str(_defaults.get(_name)) == _want, f"exe の中は {_defaults.get(_name)!r}")
 for m in ("sqlite3", "ssl", "urllib.request", "sounddevice", "customtkinter", "uiautomator2", "cryptography",
           "pyaudiowpatch"):
     if not check(f"ライブラリ {m} が入っている", m in mods):
