@@ -70,8 +70,8 @@ check("改行入り・100字を超える文もチャットに送る", wait_until
 check("文を作るときに「文字数の上限: 120字」と伝える", "文字数の上限: 120字" in a.generate_calls()[-1].messages[0].content,
       a.generate_calls()[-1].messages[0].content[-300:])
 a.close()
-# GRAVITY の入力欄は約145字で止まる（2026-10-22 実測）。メンションは文の後ろに「@名前 」で付くので、その分を残す
-check("参加の上限は、入力欄（約145字）にメンションの「@名前 」の分を残す", AgentConfig().chat_engage_max_chars <= 125)
+# GRAVITY の入力欄はふつうの文字で150字まで・超えた分は切られる（2026-10-24 実測）。メンションは文の後ろに「@名前 」で付くので、その分を残す
+check("参加の上限は、入力欄（150字）にメンションの「@名前 」の分を残す", AgentConfig().chat_engage_max_chars <= 125)
 a = Agent(mode=MODE_ENGAGE, output_mode=OUTPUT_CHAT)
 a.mock.script_generate = [{"text": "あ" * 130, "emotion": "calm"}]
 a.say("ねえ？")
