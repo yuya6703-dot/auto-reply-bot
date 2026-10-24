@@ -456,6 +456,106 @@ check("終わってもルームには戻らない（丸は押していない）"
 check("戻り方をログで伝える", any("右の丸を押すとルームに戻れます" in m for m in logs), logs[-2:])
 check("止まった知らせは出ない", notices == [], notices)
 
+# ----------------------------------------------------------------------
+# 2026-10-24 本人「チャットからタスクしてって言ったら」→ 作る・「ルームに戻る」。チャットで頼まれたときだけ、終わったら丸を押して戻る
+BUBBLE = (f'<node index="0" text="" resource-id="{GRAVITY}:id/bpvVoiceRoom" class="android.widget.RelativeLayout" '
+          f'package="{GRAVITY}" content-desc="" clickable="false" bounds="[412,650][540,778]" display-id="2" />')
+
+
+class BubbleMuMu(FakeMuMu):
+    """小さくしたあとは、ルーム以外のどの画面にも丸(bpvVoiceRoom)が重なって読める（実機の記録 2026-10-14）。丸を押すとルームに戻る"""
+
+    def __init__(self, *args, bubble=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.minimized, self.bubble = False, bubble
+
+    def dump_hierarchy(self):
+        xml = super().dump_hierarchy()
+        if self.minimized and self.bubble and self.screen != "room_guest" and "bpvVoiceRoom" not in xml:
+            xml = xml.replace("</hierarchy>", BUBBLE.replace('display-id="2"', f'display-id="{self.display}"') + "</hierarchy>")
+        return xml
+
+
+def bubble_room(start="room_guest", bubble=True):
+    mu = BubbleMuMu(base_screens(), start, bubble=bubble)
+    wire_navigation(mu)
+    room_tap = mu.on_tap["room_guest"]
+
+    def minimize(x, y):
+        nxt = room_tap(x, y)
+        if nxt == "room_minimized":
+            mu.minimized = True
+        return nxt
+    mu.on_tap["room_guest"] = minimize
+    for name in list(mu.screens):
+        if name == "room_guest":
+            continue
+        original = mu.on_tap.get(name)
+
+        def tap(x, y, original=original):
+            if mu.minimized and mu.bubble and inside((412, 650, 540, 778), x, y):
+                mu.minimized = False
+                return "room_guest"
+            return original(x, y) if original else None
+        mu.on_tap[name] = tap
+    return mu
+
+
+print("■ チャットで頼まれたら、終わったあと小さくしたルームの丸を押してルームに戻る（2026-10-24）")
+w, db, logs = new_worker()
+mu = bubble_room()
+w._connect_to_emulator = lambda: mu
+w.return_to_room = True
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("始めに「小さくする」を押した", mu.taps[:1] == [("room_guest", 449, 28)], mu.taps[:2])
+check("ルーレットを回した", any("x300" in m for m in logs), logs[-6:])
+check("最後に押したのは丸（ルームに戻る）", inside((412, 650, 540, 778), mu.taps[-1][1], mu.taps[-1][2])
+      and mu.taps[-1][0] != "room_guest", mu.taps[-2:])
+check("ルームの画面に戻った", mu.screen == "room_guest" and w.returned_to_room is True, (mu.screen, w.returned_to_room))
+check("終わり方は done", w.outcome == "done", w.outcome)
+check("戻ったことをログに", any("音声ルームに戻りました" in m for m in logs)
+      and not any("小さくしたままです" in m for m in logs), logs[-3:])
+check("退出は押していない", not mu.exited_room)
+check("入力はすべて、こなした画面へ", all(c.startswith(f"input -d {mu.display} ") for c in mu.inputs), mu.inputs[-3:])
+
+print("■ 丸が見つからなければ、戻れなかったと返す（押さない）")
+w, db, logs = new_worker()
+mu = bubble_room(bubble=False)
+w._connect_to_emulator = lambda: mu
+w.return_to_room = True
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("戻れなかった", w.returned_to_room is False and mu.screen != "room_guest", (w.returned_to_room, mu.screen))
+check("わけをログに", any("丸が見つからない" in m for m in logs), logs[-3:])
+check("丸のあたりは押していない", not any(inside((412, 650, 540, 778), x, y) for _, x, y in mu.taps), mu.taps[-3:])
+
+print("■ ルームから始めていなければ（小さくしていなければ）、戻るものは無い")
+w, db, logs = new_worker()
+mu = bubble_room(start="mypage")
+w._connect_to_emulator = lambda: mu
+w.return_to_room = True
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("戻れた扱い（そのまま監視を再開してよい）・丸は押していない", w.returned_to_room is True
+      and not any(inside((412, 650, 540, 778), x, y) for _, x, y in mu.taps), (w.returned_to_room, mu.taps[-2:]))
+
+print("■ ボタンで始めたときは、今まで通り戻らない（2026-10-14 本人の決定）")
+w, db, logs = new_worker()
+mu = bubble_room()
+w._connect_to_emulator = lambda: mu
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("丸は押さず、戻り方をログで伝える", mu.screen != "room_guest" and any("小さくしたままです" in m for m in logs)
+      and not any(s != "room_guest" and inside((412, 650, 540, 778), x, y) for s, x, y in mu.taps), (mu.screen, logs[-2:]))
+
+print("■ 今日の分が済んでいたら、終わり方は already（ルームは小さくしない）")
+w, db, logs = new_worker()
+mu = bubble_room()
+w._connect_to_emulator = lambda: mu
+w._open_windows = lambda d: [{"user": "0", "display": mu.display}]
+w._load_accounts = lambda: {"0": {w.JOB_DONE_FIELDS[A.GravityTaskWorker.JOB_ROULETTE]: w._today()}}
+w.return_to_room = True
+w._job_main(A.GravityTaskWorker.JOB_ROULETTE)
+check("already・ルームのまま・何も押していない", w.outcome == "already" and w.returned_to_room is True and mu.taps == []
+      and mu.screen == "room_guest", (w.outcome, mu.taps))
+
 print("■ 「小さくする」が退出に近すぎたら、押さずに止める")
 w, db, logs = new_worker()
 screens = base_screens()

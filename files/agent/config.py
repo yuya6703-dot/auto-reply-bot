@@ -89,6 +89,8 @@ class AgentConfig:
     reconsider_enabled: bool = True
     reconsider_seconds: float = 15.0
     reconsider_gap_seconds: float = 60.0
+    # オーナーにチャットで「タスクして」と頼まれたら、「📋 タスクをこなす」をして、終わったらルームに戻る（2026-10-24 本人「作る」）
+    owner_tasks_enabled: bool = True
     filler_words: str = "えーと、うーん、あー、んーと"
     # 静かなときに自分から話すか考える（既定OFF。外に見える動きなので本人がONにしたときだけ）
     initiative_enabled: bool = False
@@ -151,7 +153,7 @@ class AgentConfig:
     EDITABLE = ("ai_name", "self_names", "owner_names", "ignored_people", "daily_call_limit", "daily_cost_limit_usd",
                 "monthly_cost_limit_usd", "model", "output_mode", "chat_send_mode", "initiative_enabled",
                 "conversation_enabled", "chat_mention", "chat_emoji", "thinking_fillers", "mute_fallback_chat",
-                "reconsider_enabled",
+                "reconsider_enabled", "owner_tasks_enabled",
                 "memory_enabled", "impressions_enabled", "relationships_enabled", "journal_enabled",
                 "lookup_enabled", "lookup_wait_text", "digest_enabled", "hearing_enabled", "hearing_device",
                 "hearing_threshold", "hearing_hints", "hearing_owner_device", "owner_profile_enabled",

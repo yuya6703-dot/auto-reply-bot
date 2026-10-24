@@ -83,7 +83,7 @@ GRAVITY（Android版 15.2.1）の画面ごとの部品（resource-id）と、画
 | `nav_view` / `tab_layout` | 下のタブの帯（y=889〜960） |
 | `tab_feed` `tab_planet` `tabVoiceRoom` `tab_message` `tab_center` | 下のタブ。文字は `tvFeed` `tvPlant` `tvVoiceRoom` `tvMessage` `tvCenter` |
 | `tvRedMessage` / `centerRedPoint` | メッセージの未読数 / マイページの赤い点 |
-| `bpvVoiceRoom` | 小さくした音声ルームの丸（[412,650][540,778] あたり。どの画面にも重なる）。⚠️ 押すとルームが開く |
+| `bpvVoiceRoom` | 小さくした音声ルームの丸（[412,650][540,778] あたり。どの画面にも重なる）。⚠️ 押すとルームが開く。タスクの途中では押さない。チャットで「タスクして」と頼まれたときだけ、終わったら押して戻る（2026-10-24） |
 | `shimmerTextView` | **人の名前**はほぼこれ（親が `tvName` / `tv_name` / `tvTitle` / `tvAnchorName` など） |
 | `portrait2D` `ivPortrait` `ivPortraitFrame` | アイコンとその枠 |
 | 戻るボタン | **画面ごとに名前が違う**: `ivLeft` `btnBack` `rlBack` `iv_back` `ivBack` `back_iv`（`rlBack` の中） |

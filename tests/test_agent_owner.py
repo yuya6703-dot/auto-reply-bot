@@ -148,6 +148,72 @@ a.runtime._delegation = {"text": "x", "owner": "オーナー", "until": time.tim
 check("時間が過ぎたら終わり", a.runtime._delegation_active() is None and any("時間が過ぎた" in line for line in a.logs))
 a.close()
 
+print("■ オーナーの「タスクして」（2026-10-24 本人「チャットからタスクしてって言ったらこなしてくれるのかな」→ 作る）")
+from agent.owner import CMD_TASKS
+for text in ("アイ、タスクして", "@アイ.. タスクやっといて", "アイ デイリータスクこなしてきて", "アイ、タスクお願い",
+             "アイ、タスク行ってきて"):
+    check(f"頼む形なら合図:「{text}」", parse_command(text, NAMES) == (CMD_TASKS, None), parse_command(text, NAMES))
+for text in ("アイ、タスクしてる？", "アイ、タスクやってないの？", "アイ、タスクやった？", "アイ、タスク終わった？",
+             "タスクして"):           # 最後は AI に呼びかけていない
+    check(f"様子・呼びかけなしは合図にしない:「{text}」", parse_command(text, NAMES) is None, parse_command(text, NAMES))
+
+
+class FakeTasks:
+    """画面側のにせもの。tasks_ready が返すわけと、run_tasks が呼ばれた時刻・そのときまでに出した返事を覚える"""
+
+    def __init__(self, a, reason=None):
+        self.a, self.reason, self.runs = a, reason, []
+
+    def ready(self):
+        return self.reason
+
+    def run(self):
+        self.runs.append(list(self.a.speaker.spoken))
+
+
+a = agent()
+tasks = FakeTasks(a)
+a.runtime.deps.tasks_ready, a.runtime.deps.run_tasks = tasks.ready, tasks.run
+a.runtime.submit(chat("アイ、タスクして", speaker="オーナー"))
+check("「やってくるね」と返してから、画面側にタスクを頼む（AIは呼ばない）",
+      wait_until(lambda: len(tasks.runs) == 1, 5.0)
+      and tasks.runs[0] == ["わかった、タスクやってくるね！少しのあいだチャットを見られなくなるよ"]
+      and len(a.decide_calls()) == 0, (tasks.runs, a.speaker.spoken))
+check("判断のログに", any("タスクして → 監視を止めて" in line for line in a.logs), a.logs[-3:])
+a.runtime.announce_tasks_result("done")
+check("終わったら（画面側に頼まれて）「ただいま！タスク終わったよ」",
+      wait_until(lambda: a.speaker.spoken[-1:] == ["ただいま！タスク終わったよ"], 5.0), a.speaker.spoken)
+a.runtime.announce_tasks_result("already")
+check("今日の分が済んでいたら、そう言う", wait_until(lambda: a.speaker.spoken[-1:] == ["ただいま！今日のタスクはもう終わってたよ"], 5.0),
+      a.speaker.spoken)
+a.runtime.submit(chat("アイ、タスクして", speaker="たろう"))
+check("オーナーでない人の「タスクして」ではタスクをしない（ふつうに判断）", wait_until(lambda: len(a.decide_calls()) >= 1, 5.0)
+      and len(tasks.runs) == 1, tasks.runs)
+a.close()
+
+a = agent()
+tasks = FakeTasks(a, reason="チャット欄を見ていないから")
+a.runtime.deps.tasks_ready, a.runtime.deps.run_tasks = tasks.ready, tasks.run
+a.runtime.submit(chat("アイ、タスクして", speaker="オーナー"))
+check("始められなければ、わけを言って頼まない", wait_until(
+    lambda: a.speaker.spoken == ["ごめん、今はタスクを始められないんだ（チャット欄を見ていないから）"], 5.0)
+      and tasks.runs == [], (a.speaker.spoken, tasks.runs))
+a.close()
+
+a = agent(owner_tasks_enabled=False)
+tasks = FakeTasks(a)
+a.runtime.deps.tasks_ready, a.runtime.deps.run_tasks = tasks.ready, tasks.run
+a.runtime.submit(chat("アイ、タスクして", speaker="オーナー"))
+check("OFFなら断る", wait_until(lambda: a.speaker.spoken == ["ごめん、今はタスクをこなす設定がOFFなんだ"], 5.0)
+      and tasks.runs == [], (a.speaker.spoken, tasks.runs))
+a.close()
+a = agent()
+a.runtime.submit(chat("アイ、タスクして", speaker="オーナー"))
+check("画面側の道具が無ければ（AIタブの手入力など）断る", wait_until(
+    lambda: a.speaker.spoken == ["ごめん、今はタスクをこなす設定がOFFなんだ"], 5.0), a.speaker.spoken)
+check("既定はON", AgentConfig().owner_tasks_enabled is True)
+a.close()
+
 print("■ オーナーの「覚えておいて」")
 a = agent(memory_enabled=True)
 a.runtime.submit(chat("こんばんは", speaker="たろう"))

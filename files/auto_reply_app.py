@@ -6956,6 +6956,14 @@ class GravityTaskWorker(AutoReplyWorker):
         self._minimized_room = False
         # 音声ルームを小さくしたアカウントの呼び名（複数のアカウントをこなしたとき、どれのルームかを知らせるため）
         self._minimized_room_accounts = []
+        # 音声ルームを小さくした画面（チャットで頼まれたときは、終わったらそこのルームに戻る）
+        self._minimized_room_displays = []
+        # 終わったら、小さくした音声ルームに戻るか（チャットで「タスクして」と頼まれたときだけ。2026-10-24）
+        self.return_to_room = False
+        # 終わり方: done / notes（本人の番が残った）/ already（今日の分は済み）/ stopped / cancelled。走っている間は None
+        self.outcome = None
+        # 小さくしたルームに全部戻れたか（小さくしていなければ True）
+        self.returned_to_room = False
         # 今こなしているアカウントの画面。決めたら、部品の数で選び直さない（別のアカウントの画面へ移らないため）
         self._account_display = None
         # 今こなしているアカウントの、マイページで読んだ名前とID
@@ -6964,11 +6972,14 @@ class GravityTaskWorker(AutoReplyWorker):
         self._bot_part_complete = False
 
     # --- 起動 / 停止 ---
-    def start_job(self, job):
-        """仕事(JOB_TASKS / JOB_ROULETTE)を別スレッドで始める。始められたときだけ True"""
+    def start_job(self, job, return_to_room=False):
+        """仕事(JOB_TASKS / JOB_ROULETTE)を別スレッドで始める。始められたときだけ True。return_to_room なら終わったらルームに戻る"""
         if self.is_running or self.is_alive():
             return False
         self.is_running = True
+        self.return_to_room = return_to_room
+        self.outcome = None
+        self.returned_to_room = False
         self.thread = threading.Thread(target=self._job_main, args=(job,), daemon=True)
         self.thread.start()
         return True
@@ -6983,6 +6994,9 @@ class GravityTaskWorker(AutoReplyWorker):
         self._target_display = None
         self._account_display = None
         self._minimized_room_accounts = []
+        self._minimized_room_displays = []
+        d = None
+        outcome = "stopped"
         try:
             if not self._monitor_target_package():
                 raise TaskStop("対象のアプリが決まっていません。設定タブの「📱 エミュレータ(MuMu)」で"
@@ -6990,9 +7004,11 @@ class GravityTaskWorker(AutoReplyWorker):
             d = self._connect_to_emulator()
             self.log(f"📋 {name}を始めます。")
             notice = self._run_on_accounts(d, job)
+            outcome = ("already" if notice and "今日の分は済んでいます" in notice[0] else "notes") if notice else "done"
             if notice:
                 self.notify_callback(*notice)
         except TaskCancelled:
+            outcome = "cancelled"
             self.log(f"⏹️ {name}を中止しました。")
         except TaskStop as e:
             self.log(f"⏸️ {name}を止めました: {e}")
@@ -7003,10 +7019,15 @@ class GravityTaskWorker(AutoReplyWorker):
             self.log(f"❌ {name}の途中でエラーが起きたため止めました: {first_line}")
             self.notify_callback(f"{name}を止めました", f"エラーが起きました: {first_line}")
         finally:
-            if self._minimized_room_accounts:
-                # 終わってもルームには戻らない（本人の決定）。戻り方だけ伝える
+            if self.return_to_room:
+                # チャットで頼まれたときは、小さくしたルームに戻る（2026-10-24 本人「ルームに戻る」）
+                self.returned_to_room = d is not None and self._return_to_voice_rooms(d) if self._minimized_room_displays \
+                    else True
+            elif self._minimized_room_accounts:
+                # ボタンで始めたときは、終わってもルームには戻らない（2026-10-14 本人の決定）。戻り方だけ伝える
                 which = "、".join(self._minimized_room_accounts)
                 self.log(f"ℹ️ 音声ルームは小さくしたままです（{which}）。画面の右の丸を押すとルームに戻れます。")
+            self.outcome = outcome
             self._account_display = None
             self.is_running = False
 
@@ -7112,6 +7133,7 @@ class GravityTaskWorker(AutoReplyWorker):
                     self._save_accounts(accounts)
                 if self._minimized_room:
                     self._minimized_room_accounts.append(self._account_label(user, record))
+                    self._minimized_room_displays.append(window["display"])
             if complete:
                 record[field] = today
                 self._save_accounts(accounts)
@@ -7162,10 +7184,60 @@ class GravityTaskWorker(AutoReplyWorker):
         raise TaskStop(f"知らない画面が出ています（{cls.rsplit('.', 1)[-1] or '不明'}）。"
                        f"何も押さずに止めました。MuMuの画面を確かめてください。")
 
+    def _return_to_voice_rooms(self, d):
+        """小さくした音声ルームに全部戻る。戻れたら（小さくしていなければ）True"""
+        ok = True
+        for display in self._minimized_room_displays:
+            ok = self._return_to_voice_room(d, display) and ok
+        return ok
+
+    def _return_to_voice_room(self, d, display):
+        """
+        小さくした音声ルームに戻る（チャットで「タスクして」と頼まれたときだけ。2026-10-24 本人「ルームに戻る」）。
+        画面の右の丸(bpvVoiceRoom)を押す。⚠️ タスクの途中では押さない部品なので、_tap を通さずにここだけで押す。
+        丸はほとんどの画面に重なって読めるが、出ていない画面（ガチャなど）で終わったときは、ホームへ戻ってから探す
+        """
+        self._account_display = self._target_display = display
+        try:
+            xml, component = self._read_screen(d)
+            if is_voice_room_screen(component):
+                return True
+            boxes = find_by_id(xml, "bpvVoiceRoom", display)
+            if not boxes:
+                self._go_main(d, "tab_center")
+                xml, component = self._read_screen(d)
+                boxes = find_by_id(xml, "bpvVoiceRoom", display)
+            if not boxes:
+                self.log("⚠️ 小さくした音声ルームの丸が見つからないので、ルームに戻れませんでした。")
+                return False
+            x, y = box_center(boxes[0])
+            self.log("🔼 小さくした音声ルームに戻ります（画面の右の丸を押します）。")
+            if not AutoReplyWorker._tap(self, d, x, y):
+                self.log("⚠️ 丸を押す操作を送れませんでした。")
+                return False
+            deadline = time.time() + self.SCREEN_WAIT_SECONDS
+            while True:
+                time.sleep(0.7)
+                xml, component = self._read_screen(d)
+                if is_voice_room_screen(component) and find_by_id(xml, CHAT_LIST_ID, display):
+                    self.log("✅ 音声ルームに戻りました。")
+                    return True
+                if time.time() >= deadline:
+                    self.log("⚠️ 丸を押しても、音声ルームの画面になりませんでした。")
+                    return False
+        except (TaskStop, TaskCancelled) as e:
+            self.log(f"⚠️ 音声ルームに戻れませんでした: {e}")
+            return False
+        except Exception:
+            write_error_log(f"音声ルームに戻るところでエラー:\n{traceback.format_exc()}")
+            self.log("⚠️ 音声ルームに戻るところでエラーが起きました（error_log.txt）。")
+            return False
+
     def _minimize_voice_room_if_needed(self, d):
         """
         音声ルームの画面から始めたときは、退出せずに「小さくする」(ivZoomout)を押してホーム画面へ移る（本人の指示）。
-        小さくしたルームは、画面の右に丸い窓(bpvVoiceRoom)として残る。終わってもルームには戻らない（本人の決定）。
+        小さくしたルームは、画面の右に丸い窓(bpvVoiceRoom)として残る。ボタンで始めたときは、終わってもルームには戻らない（本人の決定）。
+        チャットで「タスクして」と頼まれたときだけ、終わったら丸を押して戻る（_return_to_voice_room。2026-10-24）。
 
         ⚠️ 「小さくする」のすぐ右隣が退出(ivExit)。押す位置が退出の枠（と余白）に入るなら押さずに止める。
         ⚠️ 音声ルームは押してよい画面に入れていない（タスクの途中で勝手にルームを触らないため）。
@@ -10107,6 +10179,11 @@ class App(ctk.CTk):
         ctk.CTkSwitch(control, text="💭 返さなかったら、相手がどう思うか心の中で考えて、少しあとでもう一度考える（1分に1回まで）",
                       variable=self.agent_reconsider_var, command=self.on_agent_reconsider_toggled).pack(
             anchor="w", padx=12, pady=(0, 6))
+        # オーナーに「タスクして」と頼まれたら（2026-10-24）
+        self.agent_owner_tasks_var = ctk.BooleanVar(value=AgentConfig.load(self.db.get_setting).owner_tasks_enabled)
+        ctk.CTkSwitch(control, text="📋 オーナーにチャットで「タスクして」と頼まれたら、監視を止めてタスクをこなし、終わったらルームに戻る",
+                      variable=self.agent_owner_tasks_var, command=self.on_agent_owner_tasks_toggled).pack(
+            anchor="w", padx=12, pady=(0, 6))
         # 頼まれたら調べる（2026-10-16 本人「調べるからちょっと待っててねみたいな一言」「チャットの中の話ね」）
         lookup_config = AgentConfig.load(self.db.get_setting)
         self.agent_lookup_var = ctk.BooleanVar(value=lookup_config.lookup_enabled)
@@ -11185,6 +11262,14 @@ class App(ctk.CTk):
         self._append_agent_log("💭 返さなかったら、相手の気持ちを考えてもう一度考えます。" if on
                                else "💭 返さないと決めたら、考え直しません。")
 
+    def on_agent_owner_tasks_toggled(self):
+        on = bool(self.agent_owner_tasks_var.get())
+        self.db.save_setting("agent.owner_tasks_enabled", "1" if on else "0")
+        if self.agent_runtime is not None:
+            self.agent_runtime.config.owner_tasks_enabled = on
+        self._append_agent_log("📋 オーナーに「タスクして」と頼まれたら、タスクをこなします（終わったらルームに戻ります）。" if on
+                               else "📋 オーナーに「タスクして」と頼まれても、タスクはこなしません（断ります）。")
+
     def on_agent_filler_toggled(self):
         on = bool(self.agent_filler_var.get())
         self.db.save_setting("agent.thinking_fillers", "1" if on else "0")
@@ -11546,6 +11631,8 @@ class App(ctk.CTk):
             owner_profile=OwnerProfile(lambda: self.db.get_setting("agent.owner_profile_dir", "") or ""),
             lookup=lookup.run,
             lookup_tools=lookup.available_tools,
+            tasks_ready=self._agent_tasks_ready,
+            run_tasks=self._agent_run_tasks,
             stop_speech=self.speech_service.stop_all,
             store=store,
             on_log=lambda line: self._post_to_ui(lambda: self._append_agent_log(line)),
@@ -14526,7 +14613,7 @@ class App(ctk.CTk):
     # ====================================================
     # 📋 GRAVITYのタスク・ルーレット
     # ====================================================
-    def start_gravity_job(self, job):
+    def start_gravity_job(self, job, return_to_room=False):
         # ⚠️ 監視中に始めると、2つの処理が同じ画面を操作して混ざる（AutoReplyWorker の注意書き参照）
         if self.worker.is_running or self.worker.is_alive():
             self.append_log("⚠️ 自動返信の監視中は実行できません。「■ 停止」で監視を止めてから押してください。")
@@ -14536,7 +14623,7 @@ class App(ctk.CTk):
             return
         name = GravityTaskWorker.JOB_NAMES.get(job, job)
         self.append_log(f"\n--- GRAVITYの{name} ---")
-        if not self.task_worker.start_job(job):
+        if not self.task_worker.start_job(job, return_to_room=return_to_room):
             self.append_log("⚠️ 前の実行がまだ終わっていないため、始められませんでした。")
             return
         self._set_gravity_job_buttons(running=True)
@@ -14560,6 +14647,73 @@ class App(ctk.CTk):
             self.after(500, self._watch_gravity_job)
         else:
             self._set_gravity_job_buttons(running=False)
+            if self._chat_tasks == "running":
+                self._finish_tasks_from_chat()
+
+    # --- オーナーにチャットで「タスクして」と頼まれたとき（2026-10-24 本人「チャットからタスクしてって言ったらこなしてくれるのかな」
+    #     →「作る」「ルームに戻る」「なりすましは気にしない」） ---
+    # 監視を止める → タスク（ルームは小さくする）→ 小さくしたルームに戻る → 監視を再開 → AI が結果を言う。
+    # ⚠️ 監視とタスクは同じ画面を操作するので、同時には動かさない（監視が止まりきってからタスクを始める）
+    CHAT_TASKS_STOP_WAIT_MS = 60_000
+    # 頼まれたタスクの段階: None / "waiting"（監視が止まるのを待っている）/ "running"（タスクを始めた）。
+    # ⚠️ 終わりの処理は "running" のときだけ（ボタンで始めたタスクの見張りが残っていると、始める前に「終わった」と受け取るため）
+    _chat_tasks = None
+
+    def _agent_tasks_ready(self):
+        """AI から呼ばれる（AI のスレッド）。始められないわけ（始められるなら None）"""
+        if self._chat_tasks or self.task_worker.is_running or self.task_worker.is_alive():
+            return "もうタスクをこなしている途中だよ"
+        if not self.worker.is_running:
+            return "チャット欄を見ていないから"
+        if not self.db.get_setting("mumu_target_package", ""):
+            return "GRAVITYが選ばれていないから"
+        return None
+
+    def _agent_run_tasks(self):
+        """AI から呼ばれる（AI のスレッド）。画面のスレッドで始める"""
+        self._chat_tasks = "waiting"
+        self._post_to_ui(self._start_tasks_from_chat)
+
+    def _start_tasks_from_chat(self):
+        self.append_log("\n--- 👑 オーナーに頼まれたので、監視を止めてタスクをこなします（終わったらルームに戻ります） ---")
+        if self.worker.is_running:
+            self.stop_monitoring()
+        self._tasks_after_monitor_stopped(0)
+
+    def _tasks_after_monitor_stopped(self, waited_ms):
+        if self.worker.is_running or self.worker.is_alive():
+            if waited_ms < self.CHAT_TASKS_STOP_WAIT_MS:
+                self.after(500, lambda: self._tasks_after_monitor_stopped(waited_ms + 500))
+                return
+            self.append_log("⚠️ 監視が止まらないので、タスクは始めませんでした。")
+            self._chat_tasks = None
+            return
+        self.start_gravity_job(GravityTaskWorker.JOB_TASKS, return_to_room=True)
+        if self.task_worker.is_running or self.task_worker.is_alive():
+            self._chat_tasks = "running"
+        else:
+            # 始められなかった（ルームはそのまま）。監視に戻る
+            self._chat_tasks = None
+            self.append_log("⚠️ タスクを始められなかったので、監視を再開します。")
+            self.start_monitoring(auto=True)
+            self._announce_tasks_result("not_started")
+
+    def _finish_tasks_from_chat(self):
+        self._chat_tasks = None
+        if not self.task_worker.returned_to_room:
+            message = ("タスクのあと、小さくした音声ルームに戻れなかったので、監視は再開していません。"
+                       "MuMuの画面でルームに戻ってから「▶ チャット欄で自動開始」を押してください。")
+            self.append_log(f"⚠️ {message}")
+            self._show_gravity_notice("ルームに戻れませんでした", message)
+            return
+        self.append_log("✅ ルームに戻ったので、監視を再開します。")
+        self.start_monitoring(auto=True)
+        self._announce_tasks_result(self.task_worker.outcome or "stopped")
+
+    def _announce_tasks_result(self, kind):
+        runtime = getattr(self, "agent_runtime", None)
+        if runtime is not None and runtime.running:
+            runtime.announce_tasks_result(kind)
 
     def _notify_gravity_job(self, title, message):
         """

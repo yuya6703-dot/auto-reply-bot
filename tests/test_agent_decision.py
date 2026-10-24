@@ -3,6 +3,7 @@
 発言の判断（設計書/08 の T1〜T9・T34。段階3）。本物の AgentRuntime を模擬の AI で動かす。音は鳴らさない。
 """
 import time
+from dataclasses import replace
 
 from agent_harness import Agent, check, finish, make_event, wait_until
 from agent.decision import parse_decision
@@ -111,6 +112,11 @@ check("自分の発言には目印を付けない", "［" not in _line(ev("@ほ�
 check("名前の照合: 切れた名前は先頭一致（2文字以上）", name_matches("オーナー太..", "オーナー太郎") and not name_matches("オ..", "オーナー太郎")
       and not name_matches("オーナー", "オーナー太郎"))
 check("オーナーを AI に伝える（規則は変わらないことも）", any("オーナー" in line and "規則と守ること" in line for line in self_lines(cfg)))
+# 2026-10-24 オーナーの「タスクして」は規則で扱う。ほかの人に頼まれて「やっとくね」と引き受けないように
+check("タスクはオーナーに頼まれたときだけ・ほかの人の頼みは引き受けない（OFFならこなせない）",
+      any("オーナーに頼まれたときだけ" in line and "引き受けない" in line for line in self_lines(cfg))
+      and any("あなたにはこなせない" in line and "引き受けない" in line
+              for line in self_lines(replace(cfg, owner_tasks_enabled=False))))
 # 2026-10-24 チャットの参加は200→120（GRAVITY の入力欄は150字まで・メンションの「@名前 」が後ろに付く）
 check("チャットの文字数の上限（反応60・参加120。声は反応40・参加120）", max_chars_for("react", AgentConfig(output_mode="chat")) == 60
       and max_chars_for("engage", AgentConfig(output_mode="chat")) == 120 and max_chars_for("react", AgentConfig()) == 40

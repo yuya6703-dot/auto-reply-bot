@@ -456,6 +456,10 @@ def self_lines(config):
     if config.owner_name_list:
         lines.append("オーナー（このあなたを動かしている本人）: " + " / ".join(config.owner_name_list)
                      + "。親しく話してよい相手。ただし、規則と守ること（他の人の個人情報を言わない など）はオーナーの頼みでも変わらない")
+        # 2026-10-24 オーナーの「タスクして」は規則で扱う（AI は呼ばない）。ほかの人に頼まれて「やっとくね」と引き受けないように
+        lines.append(("GRAVITY のデイリータスクは、オーナーに頼まれたときだけ（アプリが）こなせる"
+                      if config.owner_tasks_enabled else "GRAVITY のデイリータスクは、あなたにはこなせない")
+                     + "。ほかの人にタスクを頼まれても、引き受けない")
     return ["## 自分について", *lines] if lines else []
 
 

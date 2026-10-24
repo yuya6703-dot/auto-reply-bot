@@ -139,6 +139,10 @@ class Harness(ctk.CTk):
     on_agent_conversation_toggled = A.App.on_agent_conversation_toggled
     on_agent_filler_toggled = A.App.on_agent_filler_toggled
     on_agent_reconsider_toggled = A.App.on_agent_reconsider_toggled
+    on_agent_owner_tasks_toggled = A.App.on_agent_owner_tasks_toggled
+    _agent_tasks_ready = A.App._agent_tasks_ready
+    _agent_run_tasks = A.App._agent_run_tasks
+    _chat_tasks = A.App._chat_tasks
     on_agent_mute_chat_toggled = A.App.on_agent_mute_chat_toggled
     _hearing_route = A.App._hearing_route
     _owner_mic_problem = A.App._owner_mic_problem
@@ -805,6 +809,15 @@ check("考え直すのをOFFにできる（動いているエージェントに�
       and h.agent_runtime.config.reconsider_enabled is False)
 h.agent_reconsider_var.set(True)
 h.on_agent_reconsider_toggled()
+# 2026-10-24 オーナーに「タスクして」と頼まれたら
+check("オーナーに頼まれたらタスクをこなすのは既定ON", h.agent_owner_tasks_var.get() is True)
+check("AI にタスクの道具が渡っている", callable(h.agent_runtime.deps.tasks_ready) and callable(h.agent_runtime.deps.run_tasks))
+h.agent_owner_tasks_var.set(False)
+h.on_agent_owner_tasks_toggled()
+check("タスクをこなすのをOFFにできる（動いているエージェントにもすぐ効く）", db.get_setting("agent.owner_tasks_enabled") == "0"
+      and h.agent_runtime.config.owner_tasks_enabled is False)
+h.agent_owner_tasks_var.set(True)
+h.on_agent_owner_tasks_toggled()
 check("チャットのメンションは既定ON", h.agent_mention_var.get() is True)
 h.agent_mention_var.set(False)
 h.on_agent_mention_toggled()

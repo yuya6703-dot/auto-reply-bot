@@ -42,7 +42,7 @@ from .gravity_faces import clean_faces
 from .hearing import is_backchannel, is_laughter
 from .inbox import Inbox
 from .memory.recall import MemoryKeeper, is_sensitive
-from .owner import (CMD_DELEGATE, CMD_DELEGATE_END, CMD_MUTE, CMD_REMEMBER, CMD_UNMUTE, is_owner, parse_command)
+from .owner import (CMD_DELEGATE, CMD_DELEGATE_END, CMD_MUTE, CMD_REMEMBER, CMD_TASKS, CMD_UNMUTE, is_owner, parse_command)
 from .llm.base import (KIND_AUTH, KIND_BAD_REQUEST, KIND_BILLING, PURPOSE_DECIDE, PURPOSE_DIGEST, PURPOSE_GENERATE,
                        PURPOSE_PROFILE, PURPOSE_SUMMARIZE, PURPOSE_TRANSCRIBE, RETRYABLE_KINDS, LLMError, LLMMessage,
                        LLMRequest)
@@ -109,6 +109,10 @@ class AgentDeps:
     lookup: Callable = None
     # () -> 今使える調べ方（tools.lookup の TOOLS のうち）。無ければ Wikipedia・天気だけ
     lookup_tools: Callable = None
+    # オーナーに「タスクして」と頼まれたとき（2026-10-24）。tasks_ready() -> 始められないわけ（始められるなら None）。
+    # run_tasks() -> 監視を止めてタスクをこなし、ルームに戻る（画面側。終わったら announce_tasks_result を呼ぶ）。無ければ頼まれても断る
+    tasks_ready: Callable = None
+    run_tasks: Callable = None
     # () -> 今の AI の声で使える声の様子（スタイル）の名前のリスト。AI が文ごとに選ぶ（読み上げツールに渡す）
     voice_styles: Callable = None
     # () -> 今の AI の声の名前（キャラ名・スタイル）。AI が自分の声を知るため
@@ -175,6 +179,7 @@ class AgentRuntime:
         self._muted_until = None           # オーナーの合図で静かにしている間（この時刻まで）
         self._partners = {}                # 話している相手 {名前: この時刻まで}（返事をした相手。続けて話せるように）
         self._digest_request = None        # 「今のまとめを作る」と頼まれた日（画面から）
+        self._announcements = []           # 手が空いたら言う決まった一言（タスクの結果など。画面から）
         self._heard = []                   # 文字にした声 [(時刻, 秒)]（1時間の上限）
         self._owner_heard = []             # オーナーのマイクで聞いた文 [(時刻, 文)]（ルームの音で同じ声を2度聞かない）
         self._last_fallback = -1e9
@@ -446,6 +451,7 @@ class AgentRuntime:
                 if not events:
                     self._maybe_summarize()
                     self._maybe_digest()
+                    self._maybe_announce()
                     self._maybe_read_owner_profile()
                     self._set_state(STATE_GATHERING if self.inbox.pending_count() else STATE_IDLE)
                     continue
@@ -866,7 +872,17 @@ class AgentRuntime:
 
     OWNER_REPLIES = {"mute": "わかった、静かにしてるね", "unmute": "はーい、戻ったよ！", "remembered": "覚えたよ！",
                      "delegate_end": "おかえり！伝えるのはやめておくね",
-                     "memory_off": "ごめん、今は覚える設定がOFFなんだ", "sensitive": "それは覚えないでおくね"}
+                     "memory_off": "ごめん、今は覚える設定がOFFなんだ", "sensitive": "それは覚えないでおくね",
+                     "tasks": "わかった、タスクやってくるね！少しのあいだチャットを見られなくなるよ",
+                     "tasks_off": "ごめん、今はタスクをこなす設定がOFFなんだ",
+                     "tasks_busy": "ごめん、今はタスクを始められないんだ（{reason}）"}
+    # タスクのあと、ルームに戻ってから言う一言（画面側が announce_tasks_result で頼む）
+    TASK_RESULT_REPLIES = {"done": "ただいま！タスク終わったよ",
+                           "notes": "ただいま！タスク終わったよ。自分でやる分が少し残ってるから、あとで見てね",
+                           "already": "ただいま！今日のタスクはもう終わってたよ",
+                           "stopped": "ただいま！タスクの途中で止まっちゃった…あとでPCで見てね",
+                           "cancelled": "ただいま！タスクは途中でやめたよ",
+                           "not_started": "ごめん、タスクを始められなかった…"}
 
     def _owner_commands(self, events, turn_id):
         """オーナーの合図を見て扱う。扱った出来事の id を返す（その出来事は AI の判断に回さない）"""
@@ -903,6 +919,8 @@ class AgentRuntime:
                 self.log.write("👑 オーナーの合図: もういいよ")
                 self.set_muted(0)
                 self._say_fixed(self.OWNER_REPLIES["unmute"], turn_id, e.speaker)
+            elif kind == CMD_TASKS:
+                self._owner_tasks(turn_id, e.speaker)
             elif kind == CMD_REMEMBER:
                 ok, why = self.memory.remember_from_owner(value)
                 if ok:
@@ -915,6 +933,49 @@ class AgentRuntime:
         if len(self._owner_done) > 500:
             self._owner_done = set(list(self._owner_done)[-200:])
         return handled
+
+    def _owner_tasks(self, turn_id, target):
+        """
+        オーナーの「タスクして」（2026-10-24）。始められるかを先に確かめ、始められるなら「やってくるね」と返してから頼む
+        （⚠️ 返事を送り終わる前に監視を止めると、返事が送れない。_say_fixed はチャットに送り終わるまで待つ）
+        """
+        if not self.config.owner_tasks_enabled or self.deps.run_tasks is None:
+            self.log.write("👑 オーナーの合図: タスクして → こなす設定がOFFなので断りました")
+            self._say_fixed(self.OWNER_REPLIES["tasks_off"], turn_id, target)
+            return
+        reason = self.deps.tasks_ready() if self.deps.tasks_ready is not None else None
+        if reason:
+            self.log.write(f"👑 オーナーの合図: タスクして → 始められません（{reason}）")
+            self._say_fixed(self.OWNER_REPLIES["tasks_busy"].format(reason=reason), turn_id, target)
+            return
+        self.log.write("👑 オーナーの合図: タスクして → 監視を止めてタスクをこなし、終わったらルームに戻ります")
+        self._say_fixed(self.OWNER_REPLIES["tasks"], turn_id, target)
+        try:
+            self.deps.run_tasks()
+        except Exception:
+            self.deps.on_error(traceback.format_exc())
+            self.log.write("⚠️ タスクを始められませんでした（詳細は error_log.txt）。")
+
+    def announce_tasks_result(self, kind):
+        """タスクのあと、ルームに戻ってから言う（画面から呼ぶ。手が空いたら言う）"""
+        text = self.TASK_RESULT_REPLIES.get(kind)
+        if text:
+            self.announce(text)
+
+    def announce(self, text):
+        """決まった一言を、手が空いたら言う（画面から呼ぶ。チャットなら下書きの設定に従う・発言の回数の上限には数えない）"""
+        with self._lock:
+            self._announcements.append(text)
+        self.inbox.wake()
+
+    def _maybe_announce(self):
+        with self._lock:
+            texts, self._announcements = self._announcements, []
+        for text in texts:
+            if self._stop_flag.is_set() or self._emergency:
+                return
+            turn_id = self._new_turn([], self._clock(), store_events=False)
+            self._say_fixed(text, turn_id, None)
 
     # 呼ばれていたのに AI の返事が作れなかったときの決まった返事（2026-10-22 本人「反応が難しい場合なにも無視するんじゃなくて
     # ちゃんと発言するようにしてほしい」。実物: AI の呼び出しの失敗（混雑・時間切れ）で、呼びかけ11件に何も言わずに終わっていた）

@@ -31,12 +31,16 @@ class FakeWorker:
         self.started = []
         self.stopped = False
         self.forgotten = 0
+        self.return_to_room = None      # 最後に始めた仕事で「終わったらルームに戻る」か
+        self.outcome = None
+        self.returned_to_room = False
 
     def is_alive(self):
         return self.alive
 
-    def start_job(self, job):
+    def start_job(self, job, return_to_room=False):
         self.started.append(job)
+        self.return_to_room = return_to_room
         self.is_running = self.alive = True
         return True
 
@@ -69,12 +73,23 @@ class Harness(ctk.CTk):
     _watch_gravity_job = A.App._watch_gravity_job
     start_monitoring = A.App.start_monitoring
     _begin_monitoring = A.App._begin_monitoring
+    stop_monitoring = A.App.stop_monitoring
+    _agent_tasks_ready = A.App._agent_tasks_ready
+    _agent_run_tasks = A.App._agent_run_tasks
+    _start_tasks_from_chat = A.App._start_tasks_from_chat
+    _tasks_after_monitor_stopped = A.App._tasks_after_monitor_stopped
+    _finish_tasks_from_chat = A.App._finish_tasks_from_chat
+    _announce_tasks_result = A.App._announce_tasks_result
+    CHAT_TASKS_STOP_WAIT_MS = A.App.CHAT_TASKS_STOP_WAIT_MS
+    _chat_tasks = A.App._chat_tasks
 
     def __init__(self, db):
         super().__init__()
         self.geometry("900x700")
         self.db = db
         self.logs = []
+        self.notices = []
+        self.agent_runtime = None
         self.last_coords = None
         self.worker = FakeWorker()
         self.task_worker = FakeWorker()
@@ -86,8 +101,13 @@ class Harness(ctk.CTk):
     def append_log(self, m):
         self.logs.append(m)
 
+    def _post_to_ui(self, callback):
+        callback()
+
+    def _show_gravity_notice(self, title, message):
+        self.notices.append((title, message))
+
     # build_main_tab が組み立て時に参照するだけのもの。今回の検証には関係しない
-    def stop_monitoring(self): pass
     def copy_all_log(self): pass
     def copy_log_selection(self): pass
     def select_all_log(self): pass
@@ -165,6 +185,79 @@ check("範囲の座標なし（全部 None）で始める", h.worker.started == 
 check("範囲選択の画面に進まない", "WITHDRAW" not in h.logs, h.logs)
 check("開始のボタンは押せなくなる", state(h.start_auto_btn) == "disabled" and state(h.start_btn) == "disabled")
 h.worker = FakeWorker()
+
+print("■ オーナーにチャットで「タスクして」と頼まれたとき（2026-10-24）")
+
+
+class FakeRuntime:
+    running = True
+
+    def __init__(self):
+        self.results = []
+
+    def announce_tasks_result(self, kind):
+        self.results.append(kind)
+
+
+def pump_for(condition, seconds=3.0):
+    import time as _t
+    end = _t.time() + seconds
+    while _t.time() < end and not condition():
+        h.update()
+        _t.sleep(0.05)
+    return condition()
+
+
+h.agent_runtime = FakeRuntime()
+h.task_worker = FakeWorker()
+h.worker = FakeWorker()
+check("チャット欄を見ていなければ始めない（わけを返す）", h._agent_tasks_ready() == "チャット欄を見ていないから")
+h.worker = FakeWorker(running=True)
+db.save_setting("mumu_target_package", "anonymous.sns.community.gravity")
+check("監視していれば始められる", h._agent_tasks_ready() is None, h._agent_tasks_ready())
+h.task_worker = FakeWorker(running=True)
+check("タスクの途中なら始めない", h._agent_tasks_ready() == "もうタスクをこなしている途中だよ")
+h.task_worker = FakeWorker()
+h.logs.clear()
+h._agent_run_tasks()
+check("監視を止める", h.worker.stopped, h.logs[-2:])
+check("監視が止まりきるまでは、タスクを始めない（同じ画面を操作して混ざるため）", h.task_worker.started == [])
+check("頼まれている間は、もう一度頼まれても始めない", h._agent_tasks_ready() == "もうタスクをこなしている途中だよ")
+h.worker.alive = False
+check("監視が止まったら、終わったらルームに戻るタスクとして始める",
+      pump_for(lambda: h.task_worker.started == [A.GravityTaskWorker.JOB_TASKS]) and h.task_worker.return_to_room is True,
+      (h.task_worker.started, h.task_worker.return_to_room))
+h.task_worker.outcome, h.task_worker.returned_to_room = "done", True
+h.task_worker.is_running = h.task_worker.alive = False
+h._watch_gravity_job()
+check("ルームに戻れたら、チャット欄で自動開始で監視を再開する", h.worker.started[-1:] == [("monitor", None, None, None, None)],
+      h.worker.started)
+check("AI が結果を言う（終わった）", h.agent_runtime.results == ["done"], h.agent_runtime.results)
+check("ボタンは戻る", state(h.daily_task_btn) == "normal")
+
+h.worker = FakeWorker(running=True)
+h.task_worker = FakeWorker()
+h._agent_run_tasks()
+h.worker.alive = False
+pump_for(lambda: h.task_worker.started != [])
+h.task_worker.outcome, h.task_worker.returned_to_room = "stopped", False
+h.task_worker.is_running = h.task_worker.alive = False
+h._watch_gravity_job()
+check("ルームに戻れなかったら、監視は再開しない（PCで知らせる）", h.worker.started == [] and h.notices
+      and "ルームに戻れませんでした" in h.notices[-1][0], (h.worker.started, h.notices[-1:]))
+check("AI も言わない（チャットに送れない）", h.agent_runtime.results == ["done"], h.agent_runtime.results)
+check("次は頼まれたら始められる", h._agent_tasks_ready() == "チャット欄を見ていないから")
+
+h.worker = FakeWorker(running=True)
+h.task_worker = FakeWorker()
+h.task_worker.start_job = lambda job, return_to_room=False: False
+h._agent_run_tasks()
+h.worker.alive = False
+check("タスクを始められなかったら、監視に戻ってそう言う", pump_for(lambda: h.agent_runtime.results[-1:] == ["not_started"])
+      and h.worker.started[-1:] == [("monitor", None, None, None, None)], (h.agent_runtime.results, h.worker.started))
+h.task_worker = FakeWorker()
+h.worker = FakeWorker()
+h._watch_gravity_job()
 
 print("■ 設定タブの区画")
 check("送り先は保存した値が入っている", h.daily_task_friend_entry.get() == "テストの相手さんです")

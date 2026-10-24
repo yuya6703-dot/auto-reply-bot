@@ -7,6 +7,8 @@ AI を呼ばずに規則で見る（速い・費用がかからない）。
    - 静かにする・戻る … 止める・止めをやめるだけ（静かにする長さには上限がある）
    - 覚えて … 「（オーナーから）」と付けたふつうの記憶にする（確かなこととして扱うメモにはしない）。一覧で見て消せる。
      繊細な事柄は覚えない。「会話を覚える」がOFFなら覚えない
+   - タスクして … 「📋 タスクをこなす」と同じことをする（いいね・コメントなど、ほかの人に届く操作を含む）。
+     なりすましは本人の判断で気にしない（2026-10-24）。今日の分が済んだアカウントは飛ばすので、何度頼まれても1日の量より多くはしない
 ⚠️ AI に呼びかけていない発言は合図にしない（「静かにしてって言われた」のような話を取り違えない）
 """
 import re
@@ -20,6 +22,7 @@ CMD_UNMUTE = "unmute"
 CMD_REMEMBER = "remember"
 CMD_DELEGATE = "delegate"            # 代わりに伝えて（2026-10-23）
 CMD_DELEGATE_END = "delegate_end"    # 戻った・もう伝えなくていい
+CMD_TASKS = "tasks"                  # タスクして（2026-10-24）
 DEFAULT_MUTE_MINUTES = 30
 MAX_MUTE_MINUTES = 360
 DEFAULT_DELEGATE_MINUTES = 60
@@ -33,6 +36,10 @@ _DELEGATE = re.compile(r"(代わりに|かわりに|代理で|伝えといて|�
 _DELEGATE_END = re.compile(r"(ただいま|戻った|もどった|戻ってきた|もどってきた|伝えなくていい|言わなくていい|伝えなくて大丈夫|"
                            r"代わりはもういい|かわりはもういい)")
 
+# タスクをこなす（2026-10-24 本人「チャットからタスクしてって言ったらこなしてくれるのかな」→ 作る・終わったらルームに戻る・
+# なりすましは気にしない）。頼む形のときだけ（「タスクしてる？」「タスクやってない」「タスクやった」は様子の話なので読まない）
+_TASKS = re.compile(r"(?:デイリー)?タスク(?:を)?(?:して|やって|こなして|お願い|おねがい|頼む|たのむ|しといて|やっといて|こなしといて|"
+                    r"しておいて|やっておいて|行ってきて|いってきて)(?!る|た|な|ま|ん|っ|いる|いた|いま)")
 _UNMUTE = re.compile(r"(もういいよ|もう大丈夫|話していいよ|喋っていいよ|しゃべっていいよ|戻っていいよ|もどっていいよ|戻ってきて|"
                      r"もどってきて|ミュート解除)")
 # 頼む形のときだけ合図にする（2026-10-22 本人「静かにしてって言ってないのにそう言ったと認識してる」）。言葉を含むだけで合図にしていて、
@@ -99,6 +106,8 @@ def parse_command(text, call_names, muted=False, delegating=False):
         return None
     if _MUTE.search(text):
         return CMD_MUTE, mute_minutes(text)
+    if _TASKS.search(text):
+        return CMD_TASKS, None
     if _DELEGATE.search(text):
         return CMD_DELEGATE, mute_minutes(text, DEFAULT_DELEGATE_MINUTES)
     m = _REMEMBER.search(text)
