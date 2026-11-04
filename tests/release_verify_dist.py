@@ -37,11 +37,11 @@ ap.add_argument("--screenshot", help="起動した窓を撮って保存するPNG
 ap.add_argument("--strict-paths", action="store_true", help="手元のパス（ユーザー名など）が1つでもあれば失敗にする（CIのzip用）")
 ap.add_argument("--allow-error-log", help="error_log.txt に出てよい行（正規表現）。無ければ1行でも失敗")
 # ⚠️ リリースのたびに、その版で足した機能の名前（関数名・ボタンの文言など）に差し替える
+# ⚠️ 点つきの名前（mme.WaveOut など）は書かない。本体は marshal したコードで、属性の名前は1つずつ別に入る（点つきでは見つからない）
 ap.add_argument("--symbols", default=",".join([
-    "_send_with_mention_after", "_paste_after_mention", "win_clipboard_read", "win_clipboard_write", "_clipboard_borrow",
-    "ROOM_INPUT_HINT", "_return_to_voice_room", "_start_tasks_from_chat", "_finish_tasks_from_chat",
-    "on_agent_owner_tasks_toggled", "📋 オーナーにチャットで「タスクして」と頼まれたら",
-]), help="exe の本体に入っているはずの名前（カンマ区切り）。既定は v1.12.0 で足したもの")
+    "_make_audio_player", "WaveOut", "find_output", "PORTAUDIO", "refusal",
+    "🔄 Windowsの音の機材の並びが変わっていたので",
+]), help="exe の本体に入っているはずの名前（カンマ区切り）。既定は v1.12.1 で足したもの")
 # ⚠️ リリースのたびに、その版で変えた AI の設定の既定値（agent.config の AgentConfig）に差し替える
 ap.add_argument("--agent-default", action="append", default=None,
                 help="exe の中の AgentConfig の既定値（名前=値。何度でも）。既定は v1.12.0 で足したものと v1.11.1 で変えたもの")
