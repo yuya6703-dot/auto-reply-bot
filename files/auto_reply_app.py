@@ -80,6 +80,7 @@ from agent.cancel import CancelToken, NEVER
 from agent.speech.audio import apply_volume
 from agent.speech.voicevox_compat import VoicevoxCompatibleEngine
 from agent.speech.playback import AudioPlayer
+from agent.speech import mme
 from agent.speech.service import (SpeechService, SpeechJob,
                                   EVENT_DONE as SPEECH_EVENT_DONE,
                                   EVENT_CANCELLED as SPEECH_EVENT_CANCELLED,
@@ -8014,9 +8015,10 @@ class App(ctk.CTk):
             TTS_ENGINE_AIVISSPEECH: VoicevoxCompatibleEngine(
                 TTS_ENGINE_AIVISSPEECH, self.get_aivisspeech_url, cache_size=MAX_SPEECH_WAV_CACHE),
         }
-        self.audio_player = AudioPlayer(
-            sounddevice, winsound, self._resolve_output_device_index, self._default_output_device_index,
-            on_device_failed=self._warn_output_device_once)
+        self.audio_player = self._make_audio_player()
+        # sounddevice の機材の一覧を読み直したら知らせる（いつ Windows の並びが変わったか、後で分かるように）
+        mme.PORTAUDIO.on_refresh = lambda: self._post_to_ui(lambda: self.append_log(
+            "🔄 Windowsの音の機材の並びが変わっていたので、機材の一覧を読み直しました。"))
         self.speech_service = SpeechService(
             synthesize=self.synthesize_voice_wav,
             # 用件に出力先が無ければ読み上げの出力先へ。AI の声は、応答のしかたが「ルームへ」なら読み上げの出力先、
@@ -9882,6 +9884,20 @@ class App(ctk.CTk):
         """
         return self.audio_player.play(wav_data, volume_percent, self.get_audio_output_device(), cancel)
 
+    def _make_audio_player(self):
+        """
+        読み上げ・アラーム・試聴・AIの声を鳴らす部品。
+        ⚠️ 鳴らすのは winmm（MME）を直接。番号は鳴らす直前に名前から引く（2026-11-03 スマホの読み上げがルームで聞こえない:
+           sounddevice の番号は起動したときのままで、既定の再生デバイスが変わったあと「CABLE Input」の番号が
+           モニターのスピーカーを指し、例外も出ずにそちらへ鳴っていた。agent/speech/mme.py）。winmm が無い環境だけ sounddevice
+        """
+        if mme.available():
+            return AudioPlayer(mme.WaveOut, winsound, mme.find_output, mme.default_output,
+                               on_device_failed=self._warn_output_device_once)
+        return AudioPlayer(
+            sounddevice, winsound, self._resolve_output_device_index, self._default_output_device_index,
+            on_device_failed=self._warn_output_device_once)
+
     def _default_output_device_index(self):
         """
         MME の既定の出力デバイスの番号（無ければ None）。
@@ -9891,10 +9907,11 @@ class App(ctk.CTk):
         if sounddevice is None:
             return None
         try:
-            for api in sounddevice.query_hostapis():
-                if api.get("name") == self.AUDIO_HOST_API:
-                    index = api.get("default_output_device", -1)
-                    return index if isinstance(index, int) and index >= 0 else None
+            with mme.PORTAUDIO.lock:
+                for api in sounddevice.query_hostapis():
+                    if api.get("name") == self.AUDIO_HOST_API:
+                        index = api.get("default_output_device", -1)
+                        return index if isinstance(index, int) and index >= 0 else None
         except Exception:
             return None
         return None
@@ -9929,8 +9946,18 @@ class App(ctk.CTk):
     AUDIO_OUTPUT_DEFAULT_LABEL = "既定のデバイス（Windowsの設定に従う）"
 
     def list_output_devices(self):
-        """選べる出力デバイス名の一覧を返す（先頭は既定を表す項目）"""
+        """
+        選べる出力デバイス名の一覧を返す（先頭は既定を表す項目）。
+        鳴らすのと同じ winmm の今の一覧（起動した後につないだ機材も 🔄 で出る。sounddevice の一覧は起動したときのまま）
+        """
         names = [self.AUDIO_OUTPUT_DEFAULT_LABEL]
+        current = mme.output_names()
+        if current is not None:
+            for name in current:
+                name = (name or "").strip()
+                if name and name not in names:
+                    names.append(name)
+            return names
         if sounddevice is None:
             return names
         try:
@@ -9961,14 +9988,19 @@ class App(ctk.CTk):
         （例: 'CABLE Input (VB-Audio Virtual Cable)' -> 'CABLE Input (VB-Audio Virtual C'）。
         完全一致だけだと、更新した瞬間に保存済みの設定が全部「見つからない」になる。
         前方一致でも拾えるようにして、設定を引き継げるようにしておく。
+
+        ⚠️ 返すのは sounddevice の番号（起動したときの一覧の番号）。開く前に mme.PORTAUDIO.hold で、
+        一覧が今の並びのままか確かめること（並びが変わっていると、同じ番号で別の機材が開く）
         """
         if sounddevice is None or not device_name:
             return None
         key = "max_output_channels" if want_output else "max_input_channels"
         try:
-            host_apis = sounddevice.query_hostapis()
+            with mme.PORTAUDIO.lock:
+                host_apis = sounddevice.query_hostapis()
+                devices = sounddevice.query_devices()
             fallback = None
-            for index, device in enumerate(sounddevice.query_devices()):
+            for index, device in enumerate(devices):
                 if device.get(key, 0) <= 0:
                     continue
                 if host_apis[device["hostapi"]]["name"] != self.AUDIO_HOST_API:
@@ -10019,8 +10051,12 @@ class App(ctk.CTk):
         if sounddevice is None:
             return names
         try:
-            host_apis = sounddevice.query_hostapis()
-            for device in sounddevice.query_devices():
+            with mme.PORTAUDIO.lock:
+                # 並びが変わっていれば読み直す（つないだ機材も 🔄 で出る。ほかの流れが開いていれば古いまま）
+                mme.PORTAUDIO.refresh(sounddevice, need=(mme.INPUT,))
+                host_apis = sounddevice.query_hostapis()
+                devices = sounddevice.query_devices()
+            for device in devices:
                 if device.get("max_input_channels", 0) <= 0:
                     continue
                 if host_apis[device["hostapi"]]["name"] != self.AUDIO_HOST_API:
@@ -10048,21 +10084,27 @@ class App(ctk.CTk):
         """
         if sounddevice is None:
             return None, "この環境ではマイクを扱えません。"
-        name = self.get_audio_input_device()
-        index = self._resolve_input_device_index(name)
-        if name and index is None:
-            return None, f"マイク「{name}」が見つかりません。"
+        # 開いている間は、機材の一覧を作り直させない。入力の並びが変わったのに作り直せなければ開かない（agent/speech/mme.py）
+        if not mme.PORTAUDIO.hold(sounddevice, need=(mme.INPUT,)):
+            return None, mme.PORTAUDIO.refusal(sounddevice).replace("\n", "")
         try:
-            channels, rate = self._input_stream_format(index)
-            captured = bytearray()
-            with sounddevice.RawInputStream(
-                    samplerate=rate, channels=channels, dtype="int16", device=index) as stream:
-                deadline = time.time() + seconds
-                while time.time() < deadline:
-                    data, _overflowed = stream.read(1024)
-                    captured += bytes(data)
-        except Exception as e:
-            return None, f"マイクを開けませんでした（{str(e).splitlines()[-1][:80]}）。"
+            name = self.get_audio_input_device()
+            index = self._resolve_input_device_index(name)
+            if name and index is None:
+                return None, f"マイク「{name}」が見つかりません。"
+            try:
+                channels, rate = self._input_stream_format(index)
+                captured = bytearray()
+                with sounddevice.RawInputStream(
+                        samplerate=rate, channels=channels, dtype="int16", device=index) as stream:
+                    deadline = time.time() + seconds
+                    while time.time() < deadline:
+                        data, _overflowed = stream.read(1024)
+                        captured += bytes(data)
+            except Exception as e:
+                return None, f"マイクを開けませんでした（{str(e).splitlines()[-1][:80]}）。"
+        finally:
+            mme.PORTAUDIO.release()
 
         if not captured:
             return None, "マイクから何も録れませんでした。"
@@ -10075,7 +10117,8 @@ class App(ctk.CTk):
         """その入力デバイスで使うチャンネル数とサンプリングレートを決める"""
         channels, rate = 1, 44100
         try:
-            info = sounddevice.query_devices(index if index is not None else None, "input")
+            with mme.PORTAUDIO.lock:
+                info = sounddevice.query_devices(index if index is not None else None, "input")
             channels = min(2, max(1, int(info.get("max_input_channels", 1))))
             rate = int(info.get("default_samplerate") or 44100)
         except Exception:
@@ -10095,44 +10138,54 @@ class App(ctk.CTk):
             return True, ""
         if sounddevice is None:
             return False, "この環境ではマイクを扱えません。"
+        # 転送している間は、機材の一覧を作り直させない。並びが変わったのに作り直せなければ開かない（入力も出力も使う。agent/speech/mme.py）
+        if not mme.PORTAUDIO.hold(sounddevice, need=mme.BOTH):
+            return False, mme.PORTAUDIO.refusal(sounddevice)
+        started = False
+        try:
+            in_name = self.get_audio_input_device()
+            in_index = self._resolve_input_device_index(in_name)
+            if in_name and in_index is None:
+                return False, f"マイク「{in_name}」が見つかりません。"
 
-        in_name = self.get_audio_input_device()
-        in_index = self._resolve_input_device_index(in_name)
-        if in_name and in_index is None:
-            return False, f"マイク「{in_name}」が見つかりません。"
+            out_name = self.get_audio_output_device()
+            out_index = self._resolve_output_device_index(out_name)
+            if not out_name:
+                return False, ("出力先が「既定のデバイス」のままです。\n"
+                               "スピーカーへ流すとハウリングするため、"
+                               "VB-CABLE等の出力先を選んでから使ってください。")
+            if out_index is None:
+                return False, f"出力先「{out_name}」が見つかりません。"
 
-        out_name = self.get_audio_output_device()
-        out_index = self._resolve_output_device_index(out_name)
-        if not out_name:
-            return False, ("出力先が「既定のデバイス」のままです。\n"
-                           "スピーカーへ流すとハウリングするため、"
-                           "VB-CABLE等の出力先を選んでから使ってください。")
-        if out_index is None:
-            return False, f"出力先「{out_name}」が見つかりません。"
+            self._passthrough_stop = threading.Event()
+            stop_event = self._passthrough_stop
 
-        self._passthrough_stop = threading.Event()
-        stop_event = self._passthrough_stop
+            def run():
+                try:
+                    channels, rate = self._input_stream_format(in_index)
+                    with sounddevice.RawInputStream(
+                            samplerate=rate, channels=channels, dtype="int16",
+                            device=in_index, blocksize=1024) as source, \
+                         sounddevice.RawOutputStream(
+                            samplerate=rate, channels=channels, dtype="int16",
+                            device=out_index, blocksize=1024) as sink:
+                        while not stop_event.is_set():
+                            data, _overflowed = source.read(1024)
+                            sink.write(data)
+                except Exception as e:
+                    message = f"⚠️ マイクの転送が止まりました（{str(e).splitlines()[-1][:80]}）。"
+                    self._post_to_ui(lambda: self.append_log(message))
+                    self._post_to_ui(self._sync_passthrough_ui)
+                finally:
+                    mme.PORTAUDIO.release()
 
-        def run():
-            try:
-                channels, rate = self._input_stream_format(in_index)
-                with sounddevice.RawInputStream(
-                        samplerate=rate, channels=channels, dtype="int16",
-                        device=in_index, blocksize=1024) as source, \
-                     sounddevice.RawOutputStream(
-                        samplerate=rate, channels=channels, dtype="int16",
-                        device=out_index, blocksize=1024) as sink:
-                    while not stop_event.is_set():
-                        data, _overflowed = source.read(1024)
-                        sink.write(data)
-            except Exception as e:
-                message = f"⚠️ マイクの転送が止まりました（{str(e).splitlines()[-1][:80]}）。"
-                self._post_to_ui(lambda: self.append_log(message))
-                self._post_to_ui(self._sync_passthrough_ui)
-
-        self._passthrough_thread = threading.Thread(target=run, daemon=True)
-        self._passthrough_thread.start()
-        return True, ""
+            self._passthrough_thread = threading.Thread(target=run, daemon=True)
+            self._passthrough_thread.start()
+            started = True
+            return True, ""
+        finally:
+            if not started:
+                mme.PORTAUDIO.release()
 
     def stop_input_passthrough(self):
         event = getattr(self, "_passthrough_stop", None)
@@ -10723,9 +10776,16 @@ class App(ctk.CTk):
         self.refresh_agent_hearing_devices()
 
     def refresh_agent_hearing_devices(self):
-        devices = list_voice_input_devices()
+        # 一覧を読み直せないとき（ほかの流れが開いている・PortAudio を立ち上げ直せない）は古い一覧のまま。選んでいた入力は替えない。
+        # ⚠️ 読み直せたかは、一覧を作った後の状態で見る（一覧を作るときにも読み直すので、先に見ると食い違う）
+        with mme.PORTAUDIO.lock:
+            devices = list_voice_input_devices()
+            fresh = sounddevice is None or mme.INPUT not in mme.PORTAUDIO.stale(sounddevice)
         self.agent_hearing_device_menu.configure(values=devices or [self.NO_INPUT_DEVICE])
         self.agent_owner_mic_menu.configure(values=[self.NO_OWNER_MIC] + devices)
+        if not fresh:
+            self._append_agent_log("ℹ️ " + mme.PORTAUDIO.refusal(sounddevice, listing=True).replace("\n", ""))
+            return
         if self.agent_owner_mic_var.get() not in devices:
             self.agent_owner_mic_var.set(self.NO_OWNER_MIC)
         current = self.agent_hearing_device_var.get()
@@ -12823,9 +12883,15 @@ class App(ctk.CTk):
             self._set_input_status("※ マイクの転送は止まっています")
 
     def refresh_input_devices(self):
-        devices = self.list_input_devices()
+        # 一覧を読み直せないとき（ほかの流れが開いている・PortAudio を立ち上げ直せない）は古い一覧のまま。選んでいたマイクは消さない。
+        # ⚠️ 読み直せたかは、一覧を作った後の状態で見る（一覧を作るときにも読み直すので、先に見ると食い違う）
+        with mme.PORTAUDIO.lock:
+            devices = self.list_input_devices()
+            fresh = sounddevice is None or mme.INPUT not in mme.PORTAUDIO.stale(sounddevice)
         self.audio_input_menu.configure(values=devices)
-        if self.audio_input_var.get() not in devices:
+        if not fresh:
+            self.append_log("ℹ️ " + mme.PORTAUDIO.refusal(sounddevice, listing=True).replace("\n", ""))
+        elif self.audio_input_var.get() not in devices:
             self.audio_input_var.set(self.AUDIO_INPUT_DEFAULT_LABEL)
             self.db.save_setting("audio_input_device", "")
             self.append_log("ℹ️ 選んでいたマイクが見つからないため、既定に戻しました。")

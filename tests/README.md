@@ -19,6 +19,7 @@
 | `test_agent_api_keys.py` | 不要 | AI API のキーの保存（DPAPI の暗号文だけが残る、DB・WAL・ログ・error_log.txt にキーが出ない、壊れた暗号文で止まらない、環境変数の優先、伏せ字、提供元の一覧、模擬の接続確認） |
 | `test_gui_ai_api.py` | 不要 | 設定タブの「🤖 AI API」区画（隠す・👁・保存・削除・接続確認・提供元の切り替え）と「🔎 ウェブ検索・ニュース（Tavily）」のキーの区画（保存・削除・接続確認は にせものの調べ道具で）。ボットがキーをログへ渡していないことも確かめる。画面が一瞬出る |
 | `test_agent_speech.py` | 不要 | 音声（出す方。`files/agent/speech/`）: AivisSpeech・VOICEVOX のアダプター（にせの HTTP）、途中で止められる再生（にせの sounddevice。10秒の音を0.2秒以内に止める）、読み上げの待ち行列（順番・失敗しても次へ・同時に鳴らない・優先度・上限・終了）、App の読み上げ・「⏹ 止める」・スマホの解析・アラーム。**音は鳴らない** |
+| `test_audio_devices.py` | 不要 | 音の機材の番号（2026-11-03 スマホの読み上げがルームで聞こえない）: 起動した後に既定の再生・録音デバイスが変わっても、読み上げ（winmm で鳴らす直前に名前から番号を引く）・マイクの転送・マイクの確認・声を聞く が選んだ機材を開く。名前を引いてから開くまでの間に並びが変わったら開き直す、前の版のサウンド マッパーの設定は既定へ、渡せなかった音は待たない、鳴り終わらないまま止まったら黙って成功にしない（止めるも効く）。ほかの流れが開いている間に使う向きの並びが変わったら、一覧を作り直さず・別の機材を開かずに断る（再生の並びだけなら、声を聞く・マイクの確認は開ける）。PortAudio を立ち上げ直せなかったら次の機会にやり直す（🔄 で選んでいたマイクを消さない）。絵文字の途中で切れた名前も PortAudio と同じ形で比べる。起動した後につないだ機材も 🔄 で出る（声を聞いている間は、そう知らせる）。winmm・sounddevice・winsound は にせもの（実物と同じく、sounddevice の一覧は起動したときの並びのまま）。**音は鳴らない** |
 | `test_agent_decision.py` | 不要 | AIの判断（段階3）: 規則の関所 R2〜R10、判断の型、出す前の確認 C2〜C4、発言すべき/沈黙すべき場面（T1〜T9）、外の文字を命令として扱わない（T34）。本物の `AgentRuntime` を模擬のAIで動かす |
 | `test_agent_guards.py` | 不要 | 同じ出来事を2度処理しない（T29）、1日の回数の上限（T31）、発言の頻度の上限（T32）、判断の間に上限に達したら喋らない（C5）、保留、AIの失敗が続いたら呼ばない状態へ・回復・認証の失敗（T10〜T13 の基本） |
 | `test_agent_lifecycle.py` | 不要 | 止める・緊急停止・再開（T36・T37）、再起動で直近の出来事と人格が戻る（T38）、`agent_data.db` が壊れていたらバックアップから戻す/作り直す（T39）、保存期間 |
@@ -56,6 +57,7 @@ python tests/test_gui_keyword_target.py
 python tests/test_agent_api_keys.py
 python tests/test_gui_ai_api.py
 python tests/test_agent_speech.py
+python tests/test_audio_devices.py
 python tests/test_agent_decision.py
 python tests/test_agent_guards.py
 python tests/test_agent_lifecycle.py
@@ -146,7 +148,7 @@ python tests/release_update_e2e.py 前の版のzip 新しい版のzip 作業フ�
 ⚠️ 起動は `LOCALAPPDATA`・`APPDATA`・`TEMP`・`USERPROFILE`・`PATH` を差し替えた環境で行う（スクリプトがやる）。アプリは起動時に、
 適用待ちでない `%LOCALAPPDATA%\AutoReplyTool\pending_update` を消すので、差し替えずに起動すると本人のアプリの準備物を消しうる。
 
-⚠️ `release_verify_dist.py` の `--symbols` は、リリースのたびにその版で足した機能の名前に差し替える（既定は v1.12.0 のもの）。`--agent-default` は、その版で変えた AI の設定の既定値（既定は v1.12.0 の `owner_tasks_enabled=True` と v1.11.1 の `chat_engage_max_chars=120`）。
+⚠️ `release_verify_dist.py` の `--symbols` は、リリースのたびにその版で足した機能の名前に差し替える（既定は v1.12.1 のもの）。`--agent-default` は、その版で変えた AI の設定の既定値（既定は v1.12.0 の `owner_tasks_enabled=True` と v1.11.1 の `chat_engage_max_chars=120`）。
 v1.9.0 からは前の版にも `agent` パッケージがあるので、前の版は `auto_reply_app.py` だけでなく `files/` 一式を取り出して渡す。
 
 ⚠️ リリースしたコミットを取り出したフォルダ（`git worktree add`）から動かす。作業中のフォルダから動かすと、まだコミットしていない

@@ -7,6 +7,8 @@
 
 ⚠️ 既存と同じにしていること
    - 出力先は MME の中から名前で探す（呼び出し側の resolve_device）。DirectSound は音が届かない（開発ログ 2026-08-13）
+     ⚠️ 番号は鳴らすたびに引き直す。App は winmm を直接使う出力（mme.WaveOut と mme.find_output）を渡す
+     （2026-11-03: sounddevice の番号は起動したときのままで、既定の再生デバイスが変わったあと別の機材へ鳴っていた。mme.py）
    - 書き込みは再生の終わりを待たずに返るので、音の長さ＋0.2 秒待ってから閉じる（早く閉じると途中で切れる）
    - 選んだ出力先で鳴らせなければ、既定のデバイスで鳴らす（呼び出し側に1度だけ知らせる）
    - 16bit 以外の WAV は winsound に任せる
@@ -27,10 +29,11 @@ class AudioPlayer:
     CHUNK_SECONDS = 0.1     # 1回に書き込む長さ（止める合図に気付くまでの最大の遅れの目安）
     WAIT_STEP = 0.05        # 書き終わった後、鳴り終わるまで合図を見る間隔
     TAIL_SECONDS = 0.2      # 音の長さに足して待つ時間（既存と同じ）
+    DRAIN_SECONDS = 2.0     # その後も鳴り終わっていなければ待つ上限（winmm の出力だけ。鳴り終わりを数えられる）
 
-    def __init__(self, sounddevice_module, winsound_module, resolve_device, default_device,
+    def __init__(self, output_module, winsound_module, resolve_device, default_device,
                  on_device_failed=None, clock=time.monotonic):
-        self._sd = sounddevice_module             # None なら使わない
+        self._sd = output_module                  # RawOutputStream を持つもの（mme.WaveOut か sounddevice）。None なら使わない
         self._ws = winsound_module                # None なら使わない
         self._resolve_device = resolve_device     # 出力先の名前 -> 番号（無ければ None）
         self._default_device = default_device     # () -> 既定の出力の番号（無ければ None）
@@ -83,11 +86,26 @@ class AudioPlayer:
             while True:
                 remaining = end - self._clock()
                 if remaining <= 0:
-                    return PLAYED
+                    break
                 if cancel.wait(min(self.WAIT_STEP, remaining)):
                     stream.abort()
                     aborted = True
                     return CANCELLED
+            # 鳴り終わったかを数えられる出力（winmm）なら、鳴り終わるまで待つ（その間も止められる）。
+            # ⚠️ 鳴り終わらないまま（機材が止まった・抜けた）なら、黙って「鳴らした」にしない（2026-11-03 と同じ形になる）
+            pending = getattr(stream, "pending", None)
+            if pending is not None:
+                drain_end = self._clock() + self.DRAIN_SECONDS
+                while pending():
+                    if self._clock() >= drain_end:
+                        stream.abort()
+                        aborted = True
+                        return UNAVAILABLE
+                    if cancel.wait(self.WAIT_STEP):
+                        stream.abort()
+                        aborted = True
+                        return CANCELLED
+            return PLAYED
         except Exception:
             return UNAVAILABLE
         finally:

@@ -24,6 +24,8 @@ import wave
 from array import array
 from collections import deque
 
+from .speech import mme
+
 FRAME_SECONDS = 0.03
 START_FRAMES = 3                 # しきい値を超えるフレームがこれだけ続いたら話し始め（ぷつっという物音で始めない）
 END_SECONDS = 0.8
@@ -174,7 +176,9 @@ def list_input_devices():
 def _mme_input_devices():
     try:
         import sounddevice as sd
-        devices, apis = sd.query_devices(), sd.query_hostapis()
+        with mme.PORTAUDIO.lock:
+            mme.PORTAUDIO.refresh(sd, need=(mme.INPUT,))    # 並びが変わっていれば読み直す（つないだ機材も 🔄 で出る。speech/mme.py）
+            devices, apis = sd.query_devices(), sd.query_hostapis()
     except Exception:
         return []
     names = []
@@ -374,6 +378,7 @@ class VoiceListener:
         self._stop = threading.Event()
         self._thread = None
         self._stream = None
+        self._holds_portaudio = False              # sounddevice の流れを開いている（閉じたら数えた分を戻す。speech/mme.py）
         self.segmenter = None
         self.rate = 0
 
@@ -411,6 +416,9 @@ class VoiceListener:
                 stream.close()
             except Exception:
                 pass
+        if self._holds_portaudio:
+            self._holds_portaudio = False
+            mme.PORTAUDIO.release()
         if self._thread is not None:
             self._thread.join(2.0)
         self._thread = None
@@ -421,19 +429,27 @@ class VoiceListener:
         if self.device_name == LOOPBACK_DEFAULT:
             return _open_loopback(self._push)
         import sounddevice as sd
-        index = None
-        for i, d in enumerate(sd.query_devices()):
-            if d["name"] == self.device_name and d.get("max_input_channels", 0) > 0 \
-                    and sd.query_hostapis(d["hostapi"])["name"] == "MME":
-                index = i
-                break
-        if index is None:
-            raise ValueError(f"「{self.device_name}」が見つかりません")
-        rate = int(sd.query_devices(index)["default_samplerate"]) or 44100
-        stream = sd.RawInputStream(device=index, samplerate=rate, channels=1, dtype="int16",
-                                   blocksize=int(rate * FRAME_SECONDS),
-                                   callback=lambda data, frames, t, status: self._push(bytes(data)))
-        stream.start()
+        # 開いている間は、機材の一覧を作り直させない。入力の並びが変わったのに作り直せなければ開かない（別の入力が開く。speech/mme.py）
+        if not mme.PORTAUDIO.hold(sd, need=(mme.INPUT,)):
+            raise ValueError(mme.PORTAUDIO.refusal(sd).replace("\n", ""))
+        try:
+            index = None
+            for i, d in enumerate(sd.query_devices()):
+                if d["name"] == self.device_name and d.get("max_input_channels", 0) > 0 \
+                        and sd.query_hostapis(d["hostapi"])["name"] == "MME":
+                    index = i
+                    break
+            if index is None:
+                raise ValueError(f"「{self.device_name}」が見つかりません")
+            rate = int(sd.query_devices(index)["default_samplerate"]) or 44100
+            stream = sd.RawInputStream(device=index, samplerate=rate, channels=1, dtype="int16",
+                                       blocksize=int(rate * FRAME_SECONDS),
+                                       callback=lambda data, frames, t, status: self._push(bytes(data)))
+            stream.start()
+        except Exception:
+            mme.PORTAUDIO.release()
+            raise
+        self._holds_portaudio = True
         return stream, rate
 
     def _push(self, pcm):
