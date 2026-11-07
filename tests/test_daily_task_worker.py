@@ -437,6 +437,56 @@ except A.TaskStop as e:
     check("止まる", "知らない画面" in str(e), str(e))
 check("広告の画面では何も押していない", [t for t in mu.taps if t[0] == "ad"] == [], mu.taps)
 
+
+def drop_by_id(xml_text, resource_name):
+    """その id の部品を抜いたダンプ（画面が開いた直後で、まだ読めない部品）"""
+    root = ET.fromstring(xml_text)
+    parent = {c: p for p in root.iter() for c in p}
+    for node in [n for n in root.iter("node") if n.get("resource-id", "").endswith(f":id/{resource_name}")]:
+        parent[node].remove(node)
+    return ET.tostring(root, encoding="unicode")
+
+
+class LoadingMuMu(FakeMuMu):
+    """開いた直後の何回か（reads）は、入力欄がまだ読めない画面（2026-11-07 実機: 投稿の作成画面が出て0.2秒以内に読むと本文欄が無かった）"""
+
+    def __init__(self, screens, start, loading, reads):
+        super().__init__(screens, start)
+        self.loading, self.reads_left = loading, reads
+
+    def dump_hierarchy(self):
+        xml_text = super().dump_hierarchy()
+        field = self.loading.get(self.screen)
+        if field and self.reads_left > 0:
+            self.reads_left -= 1
+            return drop_by_id(xml_text, field)
+        return xml_text
+
+
+print("■ タスク: 投稿の作成画面が開いた直後は本文欄が読めなくても、出るまで待って投稿する（2026-11-07 実機）")
+w, db, logs = new_worker()
+screens = base_screens()
+done_top = screens["task_top"][1]
+screens["task_top"][1] = edit_task_row(done_top, "投稿する", "0/1回", finish_mark=False)
+mu = LoadingMuMu(screens, "mypage", {"compose": "etContent"}, reads=2)   # 画面が開いたかを読む1回と、入れる前の1回
+wire_navigation(mu)
+mu.posted = None
+compose_tap = mu.on_tap["compose"]
+
+
+def compose_after_loading(x, y):
+    nxt = compose_tap(x, y)
+    if nxt == "feed":
+        screens["task_top"][1] = done_top
+    return nxt
+
+
+mu.on_tap["compose"] = compose_after_loading
+result = w._run_daily_tasks(mu)
+check("本文欄が出てから「タスク」と投稿した", mu.posted == "タスク", (mu.posted, logs[-3:]))
+check("済みになった", any("投稿する: 済みになりました" in m for m in logs), logs[-4:])
+check("どこで時間がかかったかを出す", any("⏱️ タスク画面まで" in m and "画面を読んだ" in m for m in logs), logs[:6])
+
 # ----------------------------------------------------------------------
 print("■ 音声ルームから始めたら、退出せずに「小さくする」を押してから始める（本人の指示）")
 w, db, logs = new_worker()
@@ -976,6 +1026,43 @@ try:
 except A.TaskStop as e:
     check("止まる", "見つかりませんでした" in str(e), str(e))
 check("何も送っていない", mu.sent == [], mu.sent)
+
+print("■ タスク: 1つのタスクで部品が見つからなくても、残りのタスクはこなし、飛ばしたことを知らせる（2026-11-07 本人「タスクろくにしてくれない」）")
+w, db, logs = new_worker()
+db.save_setting("daily_task_friend_name", WANTED)
+screens = social_screens()
+top_done, scrolled_done = screens["task_top"][1], screens["task_scrolled"][1]
+screens["task_top"][1] = edit_task_row(top_done, "投稿する", "0/1回", finish_mark=False)
+screens["task_scrolled"][1] = edit_task_row(scrolled_done, "ユーザーにメッセージを送る", "0/1回", False)
+mu = LoadingMuMu(screens, "mypage", {"compose": "etContent"}, reads=10 ** 6)     # 本文欄がいつまでも読めない
+wire_social(mu)
+chat_tap = mu.on_tap["chat"]
+
+
+def chat_then_done(x, y):
+    before = len(mu.sent)
+    nxt = chat_tap(x, y)
+    if len(mu.sent) > before:
+        screens["task_scrolled"][1] = scrolled_done
+    return nxt
+
+
+mu.on_tap["chat"] = chat_then_done
+result = w._run_daily_tasks(mu)
+stop_dir = os.path.join(os.path.dirname(db.db_name), "task_stop_screens")
+check("投稿は飛ばした（何も投稿していない）", getattr(mu, "posted", None) is None, getattr(mu, "posted", None))
+check("残りのメッセージは送った", mu.sent == [("chat", "タスク")], mu.sent)
+check("メッセージは済みになった", any("ユーザーにメッセージを送る: 済みになりました" in m for m in logs), logs[-6:])
+check("飛ばしたことを、わけつきで知らせる", result is not None and "こなせなかったもの" in result[0]
+      and "投稿する: 途中で飛ばしました" in result[1] and "投稿の本文欄" in result[1], result)
+check("飛ばしたので、今日の分は済みと覚えない", w._bot_part_complete is False)
+check("飛ばしたときの画面を残した（設定と同じフォルダ）", os.path.isdir(stop_dir)
+      and any("飛ばした" in n for n in os.listdir(stop_dir)), os.listdir(os.path.dirname(db.db_name)))
+
+print("■ 止めた・飛ばしたときの画面は、新しい10個だけ残す")
+for i in range(12):
+    w._save_stop_screen(mu, f"止めた_{i}")
+check("10個だけ", len(os.listdir(stop_dir)) == 10, len(os.listdir(stop_dir)))
 
 # ⚠️ 2026-10-12 本人: 新規ユーザーのフォローは、行の「チャレンジ」から入った先でしないと数えられない
 #    （実機の通しで、ホームのタイムラインからのフォローは 0/1回 のままだった）。

@@ -7082,6 +7082,15 @@ class TaskStop(Exception):
     """想定外のことが起きた。何も押さずに止めて、本人に知らせる（2026-10-11 本人の決定）"""
 
 
+class TaskStepFailed(TaskStop):
+    """
+    1つのタスクの途中で、目当ての部品が見つからない・画面が変わらない・文字が入らない・送り先が違う（どれも何も送っていない）。
+    タスクをこなしている間なら、そのタスクだけ飛ばして次のタスクへ進む（2026-11-07 本人「タスクろくにしてくれない」:
+    投稿の本文欄が読めなかっただけで、残りのいいね・コメント・メッセージ・フォローも全部やめていた）。
+    ⚠️ 知らない画面・報酬の受け取りの画面・音声ルーム・押してはいけないボタンの近くは、今までどおり TaskStop で全部止める
+    """
+
+
 class TaskCancelled(Exception):
     """中止ボタンが押された"""
 
@@ -7159,6 +7168,7 @@ class GravityTaskWorker(AutoReplyWorker):
         self._account_seen = {}
         # 最後にこなしたタスクで、ボットの番のものが全部済んだか（済んだ日を覚えるかの判断に使う）
         self._bot_part_complete = False
+        self._reset_read_stats()
 
     # --- 起動 / 停止 ---
     def start_job(self, job, return_to_room=False):
@@ -7201,6 +7211,7 @@ class GravityTaskWorker(AutoReplyWorker):
             self.log(f"⏹️ {name}を中止しました。")
         except TaskStop as e:
             self.log(f"⏸️ {name}を止めました: {e}")
+            self._save_stop_screen(d, f"止めた_{name}")
             self.notify_callback(f"{name}を止めました", str(e))
         except Exception as e:
             first_line = (str(e).splitlines() or [type(e).__name__])[0][:150]
@@ -7352,14 +7363,54 @@ class GravityTaskWorker(AutoReplyWorker):
     def _read_screen(self, d):
         """今の画面のダンプと、GRAVITYのディスプレイの前面の画面「パッケージ/クラス」を読む"""
         self._check_cancel()
+        started = time.monotonic()
         xml = d.dump_hierarchy()
         display = self._update_target_display(xml)
         result = d.shell("dumpsys activity activities")
         component = parse_display_activity(getattr(result, "output", result) or "", display)
+        elapsed = time.monotonic() - started
+        self._read_count += 1
+        self._read_seconds += elapsed
+        self._read_slowest = max(self._read_slowest, elapsed)
         # タスクの報酬の受け取りの画面は、どの処理の途中で出ても、ここで止める（読むたびに確かめる）
         if has_reward_choice(xml, display):
             raise TaskStop(self.REWARD_STOP_MESSAGE)
         return xml, component
+
+    def _reset_read_stats(self):
+        """画面を読んだ回数・かかった秒数（タスクが遅いときに、どこで時間がかかったかを出すため）"""
+        self._read_count, self._read_seconds, self._read_slowest = 0, 0.0, 0.0
+
+    def _read_stats_text(self):
+        average = self._read_seconds / self._read_count if self._read_count else 0.0
+        return f"画面を読んだ{self._read_count}回・1回あたり平均{average:.1f}秒・いちばん長くて{self._read_slowest:.1f}秒"
+
+    # 止めた・飛ばしたときの画面を残す数（新しいものから）
+    STOP_SCREENS_KEEP = 10
+
+    def _save_stop_screen(self, d, label):
+        """
+        止めた・飛ばしたときの画面（部品の一覧）を残す。あとで「なぜ見つからなかったか」を調べるため
+        （2026-11-07 は残っておらず、Android の記録の時刻から推した）。
+        ⚠️ ほかの人の名前・投稿が入るので、設定（app_data.db）と同じフォルダの task_stop_screens にだけ置き
+           （リポジトリ・配布物には入れない）、新しい STOP_SCREENS_KEEP 個だけ残す
+        """
+        db_name = getattr(self.db, "db_name", None)
+        if d is None or not db_name:
+            return
+        folder = os.path.join(os.path.dirname(os.path.abspath(db_name)), "task_stop_screens")
+        try:
+            xml = d.dump_hierarchy()
+            os.makedirs(folder, exist_ok=True)
+            name = re.sub(r'[\\/:*?"<>|\s]+', "_", label)[:40]
+            with open(os.path.join(folder, f"{datetime.datetime.now():%Y%m%d_%H%M%S}_{name}.xml"), "w",
+                      encoding="utf-8") as f:
+                f.write(xml)
+            saved = sorted(n for n in os.listdir(folder) if n.endswith(".xml"))
+            for old in saved[:-self.STOP_SCREENS_KEEP]:
+                os.remove(os.path.join(folder, old))
+        except Exception:
+            pass                # 残せなくても、止める・飛ばすこと自体は続ける
 
     def _require_known_screen(self, component):
         """押してよい画面でなければ止める"""
@@ -7477,7 +7528,7 @@ class GravityTaskWorker(AutoReplyWorker):
             if condition(xml, component):
                 return xml, component
             if time.time() >= deadline:
-                raise TaskStop(f"{what}を待ちましたが、画面が変わりませんでした。")
+                raise TaskStepFailed(f"{what}を待ちましたが、画面が変わりませんでした。")
             time.sleep(0.7)
 
     def _scroll_until(self, d, finder, what):
@@ -7490,7 +7541,7 @@ class GravityTaskWorker(AutoReplyWorker):
                 return found
             if i < self.MAX_SCROLLS:
                 self._scroll_down(d)
-        raise TaskStop(f"{what}が見つかりませんでした。")
+        raise TaskStepFailed(f"{what}が見つかりませんでした。")
 
     def _scroll_down(self, d):
         self._swipe(d, self.SCROLL_X, self.SCROLL_FROM_Y, self.SCROLL_X, self.SCROLL_TO_Y, self.SCROLL_MS)
@@ -7524,7 +7575,7 @@ class GravityTaskWorker(AutoReplyWorker):
 
     def _tap_box(self, d, box, what):
         if not box:
-            raise TaskStop(f"{what}が見つかりませんでした。")
+            raise TaskStepFailed(f"{what}が見つかりませんでした。")
         x, y = box_center(box)
         self._tap(d, x, y)
         time.sleep(0.8)
@@ -7534,17 +7585,20 @@ class GravityTaskWorker(AutoReplyWorker):
         time.sleep(1.0)
 
     def _enter_text(self, d, resource_name, text, what):
-        """入力欄を押して文字を入れ、欄の中身が狙いどおりか確かめる（違えば送らずに止める）"""
-        xml, _ = self._read_screen(d)
-        boxes = find_by_id(xml, resource_name, self._target_display)
-        self._tap_box(d, boxes[0] if boxes else None, what)
+        """
+        入力欄が読めるまで待って押し、文字を入れ、欄の中身が狙いどおりか確かめる（違えば送らずに止める）。
+        ⚠️ 画面が開いた直後は、まだ入力欄が読めないことがある（2026-11-07 実機: 投稿の作成画面が出てから0.2秒以内に読み、
+           本文欄が無いとして止まった。少し後に読むと本文欄はあった）
+        """
+        xml, _ = self._wait_for(d, lambda x, c: find_by_id(x, resource_name, self._target_display), what)
+        self._tap_box(d, find_by_id(xml, resource_name, self._target_display)[0], what)
         if not self._type_text(d, text):
-            raise TaskStop(f"{what}に文字を入れられませんでした。")
+            raise TaskStepFailed(f"{what}に文字を入れられませんでした。")
         time.sleep(0.5)
         xml, _ = self._read_screen(d)
         shown = (text_by_id(xml, resource_name, self._target_display) or "").strip()
         if shown != text.strip():
-            raise TaskStop(f"{what}に入った文字が狙いと違いました（「{shown[:20]}」）。送らずに止めました。")
+            raise TaskStepFailed(f"{what}に入った文字が狙いと違いました（「{shown[:20]}」）。送らずに止めました。")
 
     # --- 画面の移動 ---
     def _go_main(self, d, tab_id):
@@ -7598,7 +7652,7 @@ class GravityTaskWorker(AutoReplyWorker):
         def find_friend(x):
             boxes = find_friend_in_list(x, friend, self._target_display)
             if len(boxes) > 1:
-                raise TaskStop(f"友達の一覧に「{friend}」と見分けのつかない名前が{len(boxes)}人います。"
+                raise TaskStepFailed(f"友達の一覧に「{friend}」と見分けのつかない名前が{len(boxes)}人います。"
                                f"送り先を取り違えないよう止めました。設定の名前を確かめてください。")
             return boxes[0] if boxes else None
 
@@ -7606,7 +7660,7 @@ class GravityTaskWorker(AutoReplyWorker):
         xml, _ = self._wait_for(d, lambda x, c: c.endswith(self.PROFILE_ACTIVITY), "送り先のプロフィール")
         name = text_by_id(xml, "shimmerTextView", self._target_display)
         if not friend_name_matches(name, friend):
-            raise TaskStop(f"開いたプロフィールの名前（「{name}」）が送り先と違いました。何も送らずに止めました。")
+            raise TaskStepFailed(f"開いたプロフィールの名前（「{name}」）が送り先と違いました。何も送らずに止めました。")
         return xml
 
     # --- デイリータスク ---
@@ -7647,9 +7701,15 @@ class GravityTaskWorker(AutoReplyWorker):
         friend = (self.db.get_setting("daily_task_friend_name", "") or "").strip()
         text = (self.db.get_setting("daily_task_text", DEFAULT_DAILY_TASK_TEXT) or "").strip()
 
+        # どこで時間がかかったかを出す（2026-11-07 実機: タスク画面まで89秒・一覧を読むのに60秒かかっていた。原因は未確定）
+        self._reset_read_stats()
+        started = time.monotonic()
         self._minimize_voice_room_if_needed(d)
         self._open_task_center(d)
+        opened = time.monotonic()
         rows = self._read_daily_tasks(d)
+        self.log(f"   ⏱️ タスク画面まで{opened - started:.0f}秒・一覧を読むのに{time.monotonic() - opened:.0f}秒"
+                 f"（{self._read_stats_text()}）")
         if not rows:
             raise TaskStop("タスク画面からタスクを読み取れませんでした。")
 
@@ -7685,7 +7745,7 @@ class GravityTaskWorker(AutoReplyWorker):
                 self.log(f"   ▶ こなす: {row['title']}（{progress}）")
                 todo.append((row, kind))
 
-        done_titles = []
+        done_titles, skipped = [], []
         start_progress = {}      # こなす前の回数（確かめるときに「前 → 後」で知らせるため）
         self._follow_left_on = False
         for row, kind in todo:
@@ -7698,18 +7758,27 @@ class GravityTaskWorker(AutoReplyWorker):
                 unfinished.append(row["title"])
                 continue
             self.log(f"▶ {row['title']}")
-            if kind == TASK_KIND_POST:
-                self._do_post(d, text)
-            elif kind == TASK_KIND_COMMENT:
-                self._do_comment(d, friend, text)
-            elif kind == TASK_KIND_MESSAGE:
-                self._do_message(d, friend, text)
-            elif kind == TASK_KIND_FOLLOW:
-                self._do_follow(d, row)
-                if self._follow_left_on:
-                    notes.append(f"・{row['title']}: フォローを外すボタンが出ない画面だったので、フォローしたままです")
-            elif kind == TASK_KIND_LIKE:
-                self._do_like(d, row)
+            try:
+                if kind == TASK_KIND_POST:
+                    self._do_post(d, text)
+                elif kind == TASK_KIND_COMMENT:
+                    self._do_comment(d, friend, text)
+                elif kind == TASK_KIND_MESSAGE:
+                    self._do_message(d, friend, text)
+                elif kind == TASK_KIND_FOLLOW:
+                    self._do_follow(d, row)
+                    if self._follow_left_on:
+                        notes.append(f"・{row['title']}: フォローを外すボタンが出ない画面だったので、フォローしたままです")
+                elif kind == TASK_KIND_LIKE:
+                    self._do_like(d, row)
+            except TaskStepFailed as e:
+                # このタスクだけ飛ばして次へ（次のタスクは、戻るでホームへ戻ってから始まる）。知らない画面などは TaskStop で全部止まる
+                self.log(f"   ⏭️ {row['title']}: {e} このタスクは飛ばして、次へ進みます。")
+                notes.append(f"・{row['title']}: 途中で飛ばしました（{e}）")
+                unfinished.append(row["title"])
+                skipped.append(row["title"])
+                self._save_stop_screen(d, f"飛ばした_{row['title']}")
+                continue
             done_titles.append(row["title"])
             start_progress[row["title"]] = row["progress"]
 
@@ -7745,6 +7814,8 @@ class GravityTaskWorker(AutoReplyWorker):
         self._bot_part_complete = not unfinished
         if notes:
             self.log("✋ ご自身で見ていただきたいこと:\n" + "\n".join(notes))
+            if skipped:
+                return f"タスク: こなせなかったものがあります（{len(skipped)}件）", "\n".join(notes)
             return "タスク: ご自身の番です", "\n".join(notes)
         self.log("🎉 今日のタスクは、ボットでこなせるものは全部済みです。")
         return None
@@ -7769,7 +7840,7 @@ class GravityTaskWorker(AutoReplyWorker):
         xml, _ = self._wait_for(d, lambda x, c: c.endswith(self.FEED_DETAIL_ACTIVITY), "投稿の詳細画面")
         author = text_by_id(xml, "shimmerTextView", self._target_display)
         if not friend_name_matches(author, friend):
-            raise TaskStop(f"開いた投稿の投稿者（「{author}」）が送り先と違いました。何も送らずに止めました。")
+            raise TaskStepFailed(f"開いた投稿の投稿者（「{author}」）が送り先と違いました。何も送らずに止めました。")
         self._enter_text(d, "etContent", text, "コメント欄")
         xml, _ = self._read_screen(d)
         boxes = find_by_id(xml, "btnSend", self._target_display, text="送る")
