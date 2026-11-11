@@ -62,6 +62,7 @@ class Harness(ctk.CTk):
     """UIの組み立てだけを見るための器。検証したいメソッドは本物を借りる"""
 
     build_main_tab = A.App.build_main_tab
+    save_emulator_scroll_settings = A.App.save_emulator_scroll_settings
     build_daily_task_section = A.App.build_daily_task_section
     save_daily_task_friend = A.App.save_daily_task_friend
     save_daily_task_text = A.App.save_daily_task_text
@@ -281,6 +282,32 @@ check("文面を保存", db.get_setting("daily_task_text") == "おはよう")
 h.daily_task_notify_var.set(False)
 h.on_daily_task_notify_toggle()
 check("お知らせの音をOFFにできる", db.get_setting("daily_task_notify_sound") == "0")
+
+print("■ エミュレータの自動スクロールの速さ（2026-11-12 本人「速度を指定設定保存できるように」→ 間隔となぞる速さの両方）")
+check("最初は今まで通り（3秒ごと・0.2秒かけてなぞる）",
+      (h.scroll_interval_entry.get(), h.scroll_swipe_entry.get()) == ("3", "0.2"),
+      (h.scroll_interval_entry.get(), h.scroll_swipe_entry.get()))
+check("保存が無ければ、監視も今まで通りの速さ", A.load_scroll_settings(db) == (3.0, 0.2))
+for entry, value in ((h.scroll_interval_entry, "１０"), (h.scroll_swipe_entry, "0.50")):
+    entry.delete(0, "end")
+    entry.insert(0, value)
+h.save_emulator_scroll_settings()
+check("保存する（全角の数字も読む）", (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING))
+      == ("10", "0.5"), (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING)))
+check("入力欄も保存した形に揃える", (h.scroll_interval_entry.get(), h.scroll_swipe_entry.get()) == ("10", "0.5"))
+check("監視が読む値も変わる", A.load_scroll_settings(db) == (10.0, 0.5))
+check("保存したとログに出す", "10秒ごとに・0.5秒かけてなぞるように設定しました" in h.logs[-1], h.logs[-1:])
+warnings.clear()
+for bad_interval, bad_swipe in (("0", "0.2"), ("3", "5"), ("はやく", "0.2"), ("", "0.2")):
+    h.scroll_interval_entry.delete(0, "end")
+    h.scroll_interval_entry.insert(0, bad_interval)
+    h.scroll_swipe_entry.delete(0, "end")
+    h.scroll_swipe_entry.insert(0, bad_swipe)
+    h.save_emulator_scroll_settings()
+check("範囲の外・数字でないものは保存せず知らせる", len(warnings) == 4 and A.load_scroll_settings(db) == (10.0, 0.5),
+      (len(warnings), A.load_scroll_settings(db)))
+db.save_setting(A.SCROLL_INTERVAL_SETTING, "壊れた値")
+check("保存した値が壊れていたら、今まで通りの速さ", A.load_scroll_settings(db) == (3.0, 0.5))
 
 print("■ 今日の「済み」の記録を消すボタン")
 check("ボタンがある", h.daily_task_forget_btn.cget("text") == "🔄 今日の「済み」の記録を消す")

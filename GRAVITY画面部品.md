@@ -211,7 +211,7 @@ cvRoot → include → llFeedItem
 | 上の帯 `toolbar` | `llTitle`（`ivLevel`, `tvTitle`=ルーム名, `tvPermission`「友達のみ」など）, `clMore`（…）, `ivZoomout`（小さくする）, `ivExit`（⚠️ 退出） |
 | 左上 `llHead` | `vRank`（ランキング）, `vNotice`（アナウンス）, `vTaskView`→`tvTitle`「ミッションへ」`tvDesc2`「未受取の報酬あり」 |
 | チャット欄 `rvMessages`（⚠️ 上端は画面で変わる。実測 159 / 248） | 発言 `userMessageView`（`clRoot`, `ivPortrait`（**すばやくダブルタップ**すると、入力のシートが開いて、その人への本物のメンション（青い「@名前」）が入力欄の文の**後ろ**に付く。
-1回だけのタップはミニプロフィール（`VoiceRoomPassportActivity`。⚠️ 中にギフト・通報などのボタンがある。戻るで閉じる）。
+1回だけのタップはミニプロフィール（`VoiceRoomPassportActivity`。⚠️ 中にギフト・通報などのボタンがある。戻るで閉じる。開いているあいだ、画面の読み取りに後ろのチャット欄は出ない。`tests/fixtures/voiceroom_passport.xml`）。
 入力のシートが開いているとダブルタップにならない（1回目でシートが閉じ、2回目がふつうのタップになる）。
 ⚠️ 2026-10-24 実機: 下の入力欄 `etText` に文を入れると（uiautomator2 の set_text）、入力欄にフォーカスが入って、キーボードと入力のシートが
 0.4秒ほどで開く（10/22 は開かなかった）。戻る1回でシートもキーボードも閉じ、入れた文は下の入力欄に残る → 閉じてからダブルタップする。
@@ -274,3 +274,4 @@ MuMu は **PC のクリップボードを Android 側へ写す**（約2.4秒）�
 - **戻るの効き方が画面で違う**: 検索の画面は1回目でキーボードを閉じるだけ。メニューから開いた画面を戻るとメニューは開いたまま
 - **人の名前は `shimmerTextView`**。名前で探す処理はこれを見る
 - **足あと**がある。他の人のプロフィールを開く処理は、本人に見える跡を残す
+- **画面の積み重なり**（どの画面の下にルームがあるか）は `dumpsys activity activities` の「`* Hist  #N:`」の行で読める。「Display #番号」の区切りの中に上から並ぶ（2026-11-12 実測: ルームの下に MainActivity。小さくしたあとの積み重なりは、まだ実物で見ていない）。ルームの上の画面なら、戻るを押していけばルームに着く（`parse_display_history` / `plan_room_return`）

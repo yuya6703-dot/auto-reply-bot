@@ -1,0 +1,8 @@
+Display #2 (activities from top to bottom):
+    topResumedActivity=ActivityRecord{180528910 u0 anonymous.sns.community.gravity/com.hiclub.android.gravity.metaverse.voiceroom.VoiceRoomActivity t46}
+    * Hist  #1: ActivityRecord{180528910 u0 anonymous.sns.community.gravity/com.hiclub.android.gravity.metaverse.voiceroom.VoiceRoomActivity t46}
+    * Hist  #0: ActivityRecord{136169216 u0 anonymous.sns.community.gravity/com.hiclub.android.gravity.MainActivity t46}
+Display #0 (activities from top to bottom):
+      topResumedActivity=ActivityRecord{115676957 u0 app.lawnchair/.LawnchairLauncher t2}
+      * Hist  #0: ActivityRecord{115676957 u0 app.lawnchair/.LawnchairLauncher t2}
+Display #5 (activities from top to bottom):

@@ -732,6 +732,41 @@ def normalize_number_text(text):
     return unicodedata.normalize("NFKC", str(text)).strip()
 
 
+# エミュレータの自動スクロールの速さ（2026-11-12 本人「自動スクロールの速度を指定設定保存できるようにしてほしい」→ 間隔となぞる速さの両方）
+SCROLL_INTERVAL_SETTING = "emulator_scroll_interval"        # 何秒ごとに下へなぞるか
+SCROLL_SWIPE_SETTING = "emulator_scroll_swipe_seconds"      # 1回を何秒かけてなぞるか（短いほど勢いよく流れる）
+SCROLL_INTERVAL_DEFAULT = 3.0
+SCROLL_SWIPE_DEFAULT = 0.2
+SCROLL_INTERVAL_RANGE = (0.5, 600.0)
+# ⚠️ なぞっているあいだ（input swipe）は監視が待つ。長くしすぎると、そのあいだチャットを読めない
+SCROLL_SWIPE_RANGE = (0.05, 2.0)
+
+
+def parse_scroll_setting(text, value_range):
+    """入力欄の秒数（全角も可）を数にする。数字でない・範囲の外なら None"""
+    try:
+        value = float(normalize_number_text(text))
+    except (TypeError, ValueError):
+        return None
+    low, high = value_range
+    return value if low <= value <= high else None
+
+
+def load_scroll_settings(db):
+    """保存した自動スクロールの (間隔の秒, なぞる秒)。保存が無い・壊れていれば今まで通り（3秒ごと・0.2秒）"""
+    if db is None:
+        return SCROLL_INTERVAL_DEFAULT, SCROLL_SWIPE_DEFAULT
+    interval = parse_scroll_setting(db.get_setting(SCROLL_INTERVAL_SETTING, ""), SCROLL_INTERVAL_RANGE)
+    swipe = parse_scroll_setting(db.get_setting(SCROLL_SWIPE_SETTING, ""), SCROLL_SWIPE_RANGE)
+    return (SCROLL_INTERVAL_DEFAULT if interval is None else interval,
+            SCROLL_SWIPE_DEFAULT if swipe is None else swipe)
+
+
+def format_seconds_setting(value):
+    """3.0 → 「3」、0.2 → 「0.2」（入力欄とログに出す形）"""
+    return f"{value:g}"
+
+
 def format_hms(total_seconds):
     """秒数を 00:00:00 形式にする。タイマーの残り時間表示と保存済みタイマー一覧の両方で使う。"""
     total_seconds = max(0, int(total_seconds))
@@ -1802,6 +1837,76 @@ def find_chat_list_bounds(xml_dump, display=None):
     """
     boxes = find_by_id(xml_dump, CHAT_LIST_ID, display)
     return boxes[0] if boxes else None
+
+
+# --- 監視中にルームの画面へ戻す（2026-11-12 本人「この画面（ミニプロフィール）の時にエミュの自動スクロールが発動している場合、
+#     自動的に元の音声ルームの画面に戻るようにしてほしい。他の画面になったときも同様に」）。自動スクロールが ON のときだけ ---
+GRAVITY_PACKAGE = "anonymous.sns.community.gravity"     # MuMu の「アプリ複製」も同じパッケージ名
+RE_DUMPSYS_HIST = re.compile(r"^\s*\* Hist\s+#\d+:")
+# 画面の積み重なりを読む命令。全部読むと700行あるので、区切り・積まれた画面・前面の行だけにする（MuMu で1回0.07秒。2026-11-12 実測）
+DUMPSYS_HISTORY_COMMAND = "dumpsys activity activities | grep -e 'Display #' -e 'Hist ' -e topResumedActivity"
+
+ROOM_OK = "ok"              # ルームの画面で、チャット欄が見えている
+ROOM_BACK = "back"          # ルームの上に GRAVITY の別の画面（ミニプロフィールなど）が重なっている → 戻るで1枚閉じる
+ROOM_SHEET = "sheet"        # ルームの上に、入力欄ではないシート（ギフト・機能一覧など）→ 戻るで閉じる
+ROOM_BUBBLE = "bubble"      # ルームを小さくしている → 画面の右の丸を押す
+ROOM_TYPING = "typing"      # チャットの入力のシートが開いている → 触らない（打っている途中かもしれない）
+ROOM_LOST = "lost"          # ルームではない画面で、戻り方が分からない（ルームに入っていない・別のアプリ）→ 止めて待つ
+ROOM_UNKNOWN = "unknown"    # 読めない・ルームの画面だがチャット欄もシートも無い（開いた直後など）→ 今まで通り
+# ルームの画面ではないとして、自動スクロールと入力を止める状態
+ROOM_AWAY_ACTIONS = frozenset({ROOM_BACK, ROOM_SHEET, ROOM_BUBBLE, ROOM_LOST})
+
+
+def parse_display_history(dumpsys_text, display):
+    """
+    `dumpsys activity activities` から、そのディスプレイに積まれている画面「パッケージ/クラス」を、上から順に返す。読めなければ []。
+    ⚠️ 「* Hist  #N:」の行は「Display #番号 (activities from top to bottom)」の区切りの中に、上から並ぶ（2026-11-12 実測。
+       ルームの下に MainActivity が積まれていた）。出力の後半の、同じ画面を別の番号で並べ直した区切りには Hist の行が無い
+    """
+    if display is None:
+        return []
+    history, current = [], None
+    for line in (dumpsys_text or "").splitlines():
+        m = RE_DUMPSYS_DISPLAY.match(line)
+        if m:
+            if history:
+                break
+            current = m.group(1)
+            continue
+        if current == str(display) and RE_DUMPSYS_HIST.match(line):
+            component = parse_top_activity(line)
+            if component:
+                history.append(component)
+    return history
+
+
+def plan_room_return(history, xml_dump, display, package):
+    """
+    監視中に、音声ルームの画面（チャット欄が見えている）へどう戻すか。戻り値: (ROOM_*, 押す位置 または None)
+    ⚠️ ルームの画面そのものでは戻るを押さない（ルームから出る・小さくなる）。シートが見えているときだけ戻るでシートを閉じる
+    ⚠️ 戻るを押すのは、ルームより上に積まれた画面が全部 GRAVITY のときだけ（戻るを押していけば必ずルームに着く）
+    """
+    if not history or not package:
+        return ROOM_UNKNOWN, None
+    if history[0].partition("/")[0] != package:
+        return ROOM_LOST, None          # 別のアプリが前に出ている
+    if is_voice_room_screen(history[0]):
+        if find_by_id(xml_dump, CHAT_LIST_ID, display):
+            return ROOM_OK, None
+        if find_by_id(xml_dump, ROOM_SHEET_ID, display):
+            if find_by_id(xml_dump, ROOM_INPUT_ID, display) and find_by_id(xml_dump, ROOM_SEND_ID, display):
+                return ROOM_TYPING, None
+            return ROOM_SHEET, None
+        return ROOM_UNKNOWN, None        # ルームの画面だがチャット欄もシートも無い（開いた直後・お知らせの窓など）→ 触らない
+    for component in history[1:]:
+        if component.partition("/")[0] != package:
+            break
+        if is_voice_room_screen(component):
+            return ROOM_BACK, None
+    bubbles = find_by_id(xml_dump, "bpvVoiceRoom", display)
+    if bubbles:
+        return ROOM_BUBBLE, box_center(bubbles[0])
+    return ROOM_LOST, None
 
 
 # ====================================================
@@ -4802,6 +4907,8 @@ class AutoReplyWorker:
         # 対象アプリが前面から外れているか（外れたときだけ知らせるための状態）
         self._foreground_away = False
         self._last_foreground_check = 0
+        # ルームの画面へ戻す処理の状態（_return_to_room_if_away）
+        self._reset_room_return()
         # クリップボード貼り付けが使える端末か。一度失敗したらFalseにして以降は試さない
         self._clipboard_paste_available = True
         # 対象アプリが表示されているディスプレイ番号（MuMuは画面を複数持つ）。
@@ -4843,6 +4950,8 @@ class AutoReplyWorker:
         self._manual_lock = threading.Lock()
         # 有効なペアの {検知ワード: 対象}（KEYWORD_TARGET_*）。_get_runtime_config が更新する
         self._keyword_targets = {}
+        # 自動スクロールの (間隔の秒, なぞる秒)。_get_runtime_config で設定を読み直す（監視中に変えても数秒で効く）
+        self._scroll_interval, self._scroll_swipe_seconds = SCROLL_INTERVAL_DEFAULT, SCROLL_SWIPE_DEFAULT
         # 自動返信で送った文（{名前} を差し込んだもの）。自分の発言の見分けに使う（_remember_own_text）
         self._recent_reply_texts = []
         # 範囲を選ばずに開始したか（チャット欄の枠を監視範囲にする）。_run_monitor が決める
@@ -5956,6 +6065,145 @@ class AutoReplyWorker:
             self.log(f"🔀 【{description}】の直後に対象アプリが表示から消えました"
                      f"（今見えているのは {other or '不明'} / 対象は {target}）")
 
+    # --- ルームの画面でないあいだは止めて、ルームに戻してから再開する（2026-11-12 本人「他の画面を検知したときに自動スクロールと
+    #     キーボード入力を停止して元の音声ルームに戻ってから停止を解除してまた動くようにしたい」。plan_room_return の注意書き） ---
+    ROOM_CHECK_SECONDS = 3.0            # 画面の積み重なりを読む間隔（送る直前には必ず読む）
+    ROOM_CHECK_HIDDEN_SECONDS = 1.0     # チャット欄が見えないあいだに読む間隔
+    ROOM_RETURN_AFTER_SECONDS = 3.0     # ルームでない画面がこれだけ続いたら戻す（開いた直後・人が押した直後に、すぐ閉じない）
+    ROOM_RETURN_MAX_TRIES = 5           # 同じ画面で続けて戻せなかったら、画面が変わるまでやめる（戻るが効かない画面で押し続けない）
+
+    def _reset_room_return(self):
+        self._room_checked_at = None
+        self._room_state = (ROOM_UNKNOWN, None, "")
+        self._room_away = False         # ルームの画面でない（自動スクロールも入力もしない）
+        self._room_away_since = None
+        self._room_paused = False       # 止めたとログに出したか（再開したときに出すため）
+        self._room_return_key = None
+        self._room_return_tries = 0
+
+    def _room_logic_applies(self):
+        """GRAVITY を監視しているときだけ（ほかのアプリには音声ルームが無いので、止めると何もできなくなる）"""
+        return self._target_display is not None and self._monitor_target_package() == GRAVITY_PACKAGE
+
+    def _room_history(self, d):
+        """対象のディスプレイに積まれた画面（上から）。読めなければ []（そのときは止めない）"""
+        try:
+            result = d.shell(DUMPSYS_HISTORY_COMMAND)
+            return parse_display_history(getattr(result, "output", result) or "", self._target_display)
+        except Exception:
+            return []
+
+    def _update_room_state(self, d, xml_dump, interval):
+        """interval 秒ごと（前の結果が無ければ今すぐ）、ルームの画面かを読み直して self._room_away を決める"""
+        now = time.monotonic()
+        if self._room_checked_at is not None and now - self._room_checked_at < interval:
+            return
+        self._room_checked_at = now
+        history = self._room_history(d)
+        action, where = plan_room_return(history, xml_dump, self._target_display, self._monitor_target_package())
+        self._room_state = (action, where, history[0] if history else "")
+        self._room_away = action in ROOM_AWAY_ACTIONS
+        if not self._room_away:
+            self._room_away_since = None
+            self._room_return_key, self._room_return_tries = None, 0
+        elif self._room_away_since is None:
+            self._room_away_since = now
+
+    def _room_gate(self, d, xml_dump):
+        """
+        監視の1周ごとに呼ぶ。ルームの画面でないあいだ True（呼び出し側は、自動スクロールも入力もせずに次の周回へ進む）。
+        止めた・再開したことはログに1回ずつ出し、ルームへ戻す操作（_return_to_room_if_away）もここでする
+        """
+        if not self._room_logic_applies():
+            return False
+        # チャット欄が見えないときは早めに読む（「チャット欄が見つかりません」より先に、止めた理由を出す）
+        hidden = find_chat_list_bounds(xml_dump, self._target_display) is None
+        self._update_room_state(d, xml_dump, self.ROOM_CHECK_HIDDEN_SECONDS if hidden else self.ROOM_CHECK_SECONDS)
+        action, _, top = self._room_state
+        if not self._room_away:
+            if self._room_paused:
+                self._room_paused = False
+                self.log("▶️ 音声ルームの画面に戻ったので、自動スクロールと入力を再開します。")
+                self._agent_note("▶️ 音声ルームの画面に戻ったので、また読み始めます。")
+            return False
+        if not self._room_paused:
+            self._room_paused = True
+            where = {ROOM_SHEET: "ルームの上にシートが開いている", ROOM_BUBBLE: "ルームを小さくしている"}.get(
+                action, f"{top.rsplit('.', 1)[-1] or '別の画面'}が開いている")
+            if self._room_auto_return_enabled() and action != ROOM_LOST:
+                then = "音声ルームの画面に戻してから再開します。"
+            elif action == ROOM_LOST:
+                then = "音声ルームの画面になったら再開します。"
+            else:
+                then = "エミュレータの自動スクロールが OFF なので、ルームには戻しません。MuMuでルームに戻すと再開します。"
+            self.log(f"⏸️ 音声ルームの画面ではない（{where}）ので、自動スクロールと入力を止めます。{then}")
+            self._agent_note(f"⏸️ 音声ルームの画面ではない（{where}）ので、チャットを読むのも送るのも止めています。")
+        # ルームに戻ったときの画面は「前からあった」にする（出ている間の発言に今さら反応しない）
+        self._reset_agent_bridge()
+        if self._return_to_room_if_away(d):
+            self._room_checked_at = None        # 押した結果は、次の周回ですぐ読み直す
+            time.sleep(0.8)
+        return True
+
+    def _room_input_allowed(self, d):
+        """
+        入力（返信・手入力・AIの文）の直前に、今もルームの画面かを確かめる（3秒ごとの見張りの間に画面が変わっていることがある）。
+        ルームの画面でなければ False（送らない。手入力・AIの文は送信待ちに残す）。積み重なりが読めなければ止めない
+        """
+        if not self._room_logic_applies():
+            return True
+        history = self._room_history(d)
+        if not history or is_voice_room_screen(history[0]):
+            return True
+        self.log(f"⏸️ 音声ルームの画面ではない（{history[0].rsplit('.', 1)[-1]}）ので、今は入力しません。")
+        self._room_away, self._room_checked_at = True, None     # 次の周回で止めて、ルームに戻す
+        return False
+
+    def _room_auto_return_enabled(self):
+        return self.db is None or self.db.get_setting("emulator_auto_scroll", "1") == "1"
+
+    def _return_to_room_if_away(self, d):
+        """
+        ルームの画面でないあいだ、音声ルームの画面（チャット欄が見えている）へ戻す。何か押したら True。
+        エミュレータの自動スクロールが ON のときだけ（本人「自動スクロールが発動している場合」。OFF にすれば、人が他の画面を見ていても戻さない）。
+        ミニプロフィールなど、ルームの上に重なった GRAVITY の画面・シートは戻るで閉じ、小さくしたルームは画面の右の丸を押す。
+        ⚠️ チャットの入力のシートは閉じない（打っている途中かもしれない）。戻り方が分からない画面（ルームに入っていない）では何もしない
+        ⚠️ 押す直前に読み直す。読んでから押すまでの間にシートが閉じていると、ルームの画面で戻るを押してしまう（ルームから出る）
+        """
+        action, _, top = self._room_state
+        if not self._room_auto_return_enabled() or action not in (ROOM_BACK, ROOM_SHEET, ROOM_BUBBLE):
+            return False
+        key = (action, top)
+        if key != self._room_return_key:
+            # 画面が変わった（1枚閉じて次の画面になった・別の画面を開いた）。戻せなかった回数は数え直す
+            self._room_return_key, self._room_return_tries = key, 0
+        if self._room_away_since is None or time.monotonic() - self._room_away_since < self.ROOM_RETURN_AFTER_SECONDS:
+            return False
+        if self._room_return_tries >= self.ROOM_RETURN_MAX_TRIES:
+            if self._room_return_tries == self.ROOM_RETURN_MAX_TRIES:
+                self._room_return_tries += 1
+                self.log(f"⚠️ 音声ルームの画面に戻せませんでした（{self.ROOM_RETURN_MAX_TRIES}回試しました）。"
+                         "MuMuの画面でルームに戻してください。戻すと再開します。")
+            return False
+
+        try:
+            fresh = d.dump_hierarchy(compressed=True)
+        except Exception:
+            return False
+        history = self._room_history(d)
+        again, where = plan_room_return(history, fresh, self._target_display, self._monitor_target_package())
+        if (again, history[0] if history else "") != key:
+            return False
+        self._room_return_tries += 1
+        if action == ROOM_BUBBLE:
+            self.log("🔼 音声ルームが小さくなっていたので、画面の右の丸を押してルームに戻ります。")
+            return self._tap(d, *where)
+        if action == ROOM_SHEET:
+            self.log("↩️ 音声ルームの上に開いたシートを、戻るで閉じます。")
+        else:
+            self.log(f"↩️ 音声ルームの上に開いた画面（{top.rsplit('.', 1)[-1]}）を、戻るで閉じます。")
+        return self._keyevent(d, ANDROID_KEYCODE_BACK)
+
     def _restore_target_app_if_left(self, d):
         """
         返信のあとで対象アプリが前面から外れていたら、開き直して戻す。
@@ -6571,7 +6819,8 @@ class AutoReplyWorker:
             if not silent:
                 self.log("⏬ 画面をスクロールして最新を表示します...")
             try:
-                self._swipe(d, center_x, start_y, center_x, end_y, duration_ms=200)
+                self._swipe(d, center_x, start_y, center_x, end_y,
+                            duration_ms=int(round(self._scroll_swipe_seconds * 1000)))
             except Exception as e:
                 # スクロールは補助的な操作なので、失敗しても監視自体は続行する。
                 # 特にエミュレータで別アプリのウインドウが前面に出ていると
@@ -6612,6 +6861,7 @@ class AutoReplyWorker:
         keywords_map = self.db.get_active_keywords()
         # ペアごとの対象。戻り値の形は変えずに横に持つ（テストや他の呼び出しが3つ組を前提にしている）
         self._keyword_targets = self.db.get_active_keyword_targets()
+        self._scroll_interval, self._scroll_swipe_seconds = load_scroll_settings(self.db)
         cooldown_enabled, cooldown_seconds = self._get_cooldown_settings()
 
         # ログのマスク対象外にする語を更新する。
@@ -6634,6 +6884,9 @@ class AutoReplyWorker:
         成功した行はもう返信済みとして扱い、失敗した行だけ再挑戦させる。
         """
         sent_ok = False
+        # ⚠️ 押す直前に、今もルームの画面かを確かめる（ミニプロフィールなどの上で入力欄の位置を押さない。2026-11-12 本人）
+        if not self._room_input_allowed(d):
+            return failure_count, False
         if self._find_and_tap_input(d, nodes, half_y, all_nodes=all_nodes):
             time.sleep(1.0)
             sent_ok = self._send_reply(d, reply_message)
@@ -6670,6 +6923,9 @@ class AutoReplyWorker:
         """
         sent_any = False
         while self.is_running:
+            # ルームの画面でなければ送らず、送信待ちに残す（ルームに戻ってから送る。2026-11-12 本人）
+            if self.has_manual_pending() and not self._room_input_allowed(d):
+                break
             with self._manual_lock:
                 if not self._manual_queue:
                     break
@@ -6745,6 +7001,7 @@ class AutoReplyWorker:
         # 対象アプリを変えた場合や、まだ起動しきっていない場合に、
         # 古い画面を相手にしてしまうため。
         self._target_display = None
+        self._reset_room_return()
         # AI へ渡す行も、始めた時点の画面は「前からあった」にする（前回の監視の続きにしない）
         self._reset_agent_bridge()
         try:
@@ -6798,7 +7055,6 @@ class AutoReplyWorker:
 
         self._last_seen_any_chat = ""
 
-        SCROLL_INTERVAL = 3.0
         last_scroll_time = time.time()
 
         # 接続断らしきエラーかどうかを文字列で簡易判定するためのキーワード
@@ -6843,6 +7099,12 @@ class AutoReplyWorker:
                 # 押したら画面が変わるため、次の周回で取り直す。
                 if self._auto_dismiss_dialog(d, all_nodes, xml_dump):
                     time.sleep(0.6)
+                    continue
+
+                # ルームの画面でない（ミニプロフィール・別の画面・小さくした）あいだは、自動スクロールも入力もせず、
+                # 音声ルームの画面に戻してから再開する（2026-11-12 本人。_room_gate）
+                if self._room_gate(d, xml_dump):
+                    time.sleep(0.5)
                     continue
 
                 # チャット欄が無い（ルームの画面でない・小さくしている）間は、何も検知せずに待つ。
@@ -7037,7 +7299,7 @@ class AutoReplyWorker:
                 # 外れたままだと画面が読めず、検知も送信も静かに空振りし続けるため。
                 self._watch_foreground_change(d)
 
-                if time.time() - last_scroll_time > SCROLL_INTERVAL:
+                if time.time() - last_scroll_time > self._scroll_interval:
                     self._scroll_down(d, y_min_internal, y_max_internal, silent=True)
                     last_scroll_time = time.time()
 
@@ -8303,6 +8565,26 @@ class App(ctk.CTk):
         )
         self.emulator_auto_scroll_chk.pack(side="left")
 
+        # 自動スクロールの速さ（間隔・なぞる速さ）。保存すると、監視中でも数秒で効く（2026-11-12 本人）
+        scroll_speed_frame = ctk.CTkFrame(self.tab_main, fg_color="transparent")
+        scroll_speed_frame.pack(anchor="e", padx=15, pady=(0, 5))
+        interval, swipe = load_scroll_settings(self.db)
+        ctk.CTkLabel(scroll_speed_frame, text="エミュレータの自動スクロール:").pack(side="left", padx=(0, 6))
+        self.scroll_interval_entry = ctk.CTkEntry(scroll_speed_frame, width=55)
+        self.scroll_interval_entry.insert(0, format_seconds_setting(interval))
+        self.scroll_interval_entry.pack(side="left")
+        ctk.CTkLabel(scroll_speed_frame, text="秒ごとに、").pack(side="left", padx=(4, 6))
+        self.scroll_swipe_entry = ctk.CTkEntry(scroll_speed_frame, width=55)
+        self.scroll_swipe_entry.insert(0, format_seconds_setting(swipe))
+        self.scroll_swipe_entry.pack(side="left")
+        ctk.CTkLabel(scroll_speed_frame, text="秒かけてなぞる").pack(side="left", padx=(4, 10))
+        ctk.CTkButton(
+            scroll_speed_frame, text="💾 保存", width=70, command=self.save_emulator_scroll_settings
+        ).pack(side="left")
+        for entry in (self.scroll_interval_entry, self.scroll_swipe_entry):
+            entry.bind("<Return>", lambda event: self.save_emulator_scroll_settings())
+            entry.bind("<Button-3>", self._show_entry_context_menu)
+
         # アップデート関連（バージョン表示 + 手動確認ボタン）
         update_frame = ctk.CTkFrame(self.tab_main, fg_color="transparent")
         update_frame.pack(fill="x", padx=15, pady=(0, 5))
@@ -8892,7 +9174,33 @@ class App(ctk.CTk):
         value = "1" if self.emulator_auto_scroll_var.get() else "0"
         self.db.save_setting("emulator_auto_scroll", value)
         state_text = "ON" if value == "1" else "OFF"
-        self.append_log(f"⚙️ エミュレータ自動スクロールを {state_text} に切り替えました。")
+        # ルームの画面へ戻す動きも、このスイッチで決まる（2026-11-12 本人「自動スクロールが発動している場合」）
+        what = ("監視中にミニプロフィールなどルーム以外の画面になったら、音声ルームの画面に戻します" if value == "1"
+                else "ルーム以外の画面になっても、音声ルームの画面に戻しません")
+        self.append_log(f"⚙️ エミュレータ自動スクロールを {state_text} に切り替えました（{what}）。")
+
+    def save_emulator_scroll_settings(self):
+        """自動スクロールの間隔・なぞる速さを保存する（監視中なら、設定を読み直す数秒のうちに効く）"""
+        interval = parse_scroll_setting(self.scroll_interval_entry.get(), SCROLL_INTERVAL_RANGE)
+        swipe = parse_scroll_setting(self.scroll_swipe_entry.get(), SCROLL_SWIPE_RANGE)
+        if interval is None or swipe is None:
+            messagebox.showwarning(
+                "入力エラー",
+                f"自動スクロールの間隔は {format_seconds_setting(SCROLL_INTERVAL_RANGE[0])}〜"
+                f"{format_seconds_setting(SCROLL_INTERVAL_RANGE[1])} 秒、"
+                f"なぞる時間は {format_seconds_setting(SCROLL_SWIPE_RANGE[0])}〜"
+                f"{format_seconds_setting(SCROLL_SWIPE_RANGE[1])} 秒の数で入れてください。")
+            return
+        # 入力欄も、保存した形（半角・余分な0なし）に揃える
+        for entry, value in ((self.scroll_interval_entry, interval), (self.scroll_swipe_entry, swipe)):
+            entry.delete(0, tk.END)
+            entry.insert(0, format_seconds_setting(value))
+        self.db.save_setting(SCROLL_INTERVAL_SETTING, format_seconds_setting(interval))
+        self.db.save_setting(SCROLL_SWIPE_SETTING, format_seconds_setting(swipe))
+        off = ("" if self.db.get_setting("emulator_auto_scroll", "1") == "1"
+               else "（今は自動スクロールが OFF です。ON にすると、この速さでなぞります）")
+        self.append_log(f"✅ エミュレータの自動スクロールを、{format_seconds_setting(interval)}秒ごとに・"
+                        f"{format_seconds_setting(swipe)}秒かけてなぞるように設定しました{off}。")
 
     # ====================================================
     # ⏱️ タイマー／アラーム機能
