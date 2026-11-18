@@ -63,6 +63,7 @@ class Harness(ctk.CTk):
 
     build_main_tab = A.App.build_main_tab
     save_emulator_scroll_settings = A.App.save_emulator_scroll_settings
+    on_scroll_swipe_selected = A.App.on_scroll_swipe_selected
     build_daily_task_section = A.App.build_daily_task_section
     save_daily_task_friend = A.App.save_daily_task_friend
     save_daily_task_text = A.App.save_daily_task_text
@@ -283,31 +284,64 @@ h.daily_task_notify_var.set(False)
 h.on_daily_task_notify_toggle()
 check("お知らせの音をOFFにできる", db.get_setting("daily_task_notify_sound") == "0")
 
-print("■ エミュレータの自動スクロールの速さ（2026-11-12 本人「速度を指定設定保存できるように」→ 間隔となぞる速さの両方）")
-check("最初は今まで通り（3秒ごと・0.2秒かけてなぞる）",
-      (h.scroll_interval_entry.get(), h.scroll_swipe_entry.get()) == ("3", "0.2"),
-      (h.scroll_interval_entry.get(), h.scroll_swipe_entry.get()))
+print("■ エミュレータの自動スクロールの速さ（2026-11-12 本人「速度を指定設定保存できるように」→ 間隔となぞる速さの両方。"
+      "2026-11-14 なぞる速さは選ぶ形・今より速く）")
+check("最初は今まで通り（3秒ごと・なぞる速さ「ふつう（今まで）」）",
+      (h.scroll_interval_entry.get(), h.scroll_swipe_menu.get()) == ("3", "ふつう（今まで）"),
+      (h.scroll_interval_entry.get(), h.scroll_swipe_menu.get()))
+check("なぞる速さは5つから選ぶ（速い順）", h.scroll_swipe_menu.cget("values")
+      == ["とても速い", "速い", "ふつう（今まで）", "ゆっくり", "とてもゆっくり"], h.scroll_swipe_menu.cget("values"))
 check("保存が無ければ、監視も今まで通りの速さ", A.load_scroll_settings(db) == (3.0, 0.2))
-for entry, value in ((h.scroll_interval_entry, "１０"), (h.scroll_swipe_entry, "0.50")):
-    entry.delete(0, "end")
-    entry.insert(0, value)
+h.scroll_interval_entry.delete(0, "end")
+h.scroll_interval_entry.insert(0, "１０")
+h.scroll_swipe_menu.set("ゆっくり")
 h.save_emulator_scroll_settings()
-check("保存する（全角の数字も読む）", (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING))
-      == ("10", "0.5"), (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING)))
-check("入力欄も保存した形に揃える", (h.scroll_interval_entry.get(), h.scroll_swipe_entry.get()) == ("10", "0.5"))
+check("保存する（全角の数字も読む。ゆっくり＝0.5秒）",
+      (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING)) == ("10", "0.5"),
+      (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING)))
+check("入力欄も保存した形に揃える", h.scroll_interval_entry.get() == "10", h.scroll_interval_entry.get())
 check("監視が読む値も変わる", A.load_scroll_settings(db) == (10.0, 0.5))
-check("保存したとログに出す", "10秒ごとに・0.5秒かけてなぞるように設定しました" in h.logs[-1], h.logs[-1:])
+check("保存したとログに出す", "10秒ごとに・なぞる速さ「ゆっくり」に設定しました" in h.logs[-1], h.logs[-1:])
+# 今より速く（2026-11-14 本人「今以上に早くできるようにしてほしい」）: 0.2秒ごと・とても速い（0.05秒）まで
+h.scroll_interval_entry.delete(0, "end")
+h.scroll_interval_entry.insert(0, "0.2")
+h.scroll_swipe_menu.set("とても速い")
+h.scroll_swipe_menu._command("とても速い")          # 選んだときと同じく、選んだだけで保存する
+check("選んだだけで保存する（0.2秒ごと・とても速い＝0.05秒）",
+      (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING)) == ("0.2", "0.05"),
+      (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING)))
+check("0.5秒より短くすると MuMu の負担が増えると知らせる", "MuMu の負担が増えます" in h.logs[-1], h.logs[-1:])
 warnings.clear()
-for bad_interval, bad_swipe in (("0", "0.2"), ("3", "5"), ("はやく", "0.2"), ("", "0.2")):
+for bad_interval in ("0.1", "0", "601", "はやく", ""):
     h.scroll_interval_entry.delete(0, "end")
     h.scroll_interval_entry.insert(0, bad_interval)
-    h.scroll_swipe_entry.delete(0, "end")
-    h.scroll_swipe_entry.insert(0, bad_swipe)
     h.save_emulator_scroll_settings()
-check("範囲の外・数字でないものは保存せず知らせる", len(warnings) == 4 and A.load_scroll_settings(db) == (10.0, 0.5),
-      (len(warnings), A.load_scroll_settings(db)))
+check("間隔が範囲の外・数字でないものは保存せず知らせる",
+      len(warnings) == 5 and A.load_scroll_settings(db) == (0.2, 0.05), (len(warnings), A.load_scroll_settings(db)))
+# 間隔の欄が範囲の外・書きかけのまま、なぞる速さを選んだとき（2026-11-14 見直し: 何も保存せず、メニューは選んだ名前のままだった）
+for typed, choice, seconds in (("0.1", "速い", "0.1"), ("", "ゆっくり", "0.5")):
+    warnings.clear()
+    h.scroll_interval_entry.delete(0, "end")
+    h.scroll_interval_entry.insert(0, typed)
+    h.scroll_swipe_menu._dropdown_callback(choice)     # 画面でメニューの項目を押したときと同じ
+    check(f"間隔「{typed}」のまま「{choice}」を選ぶ: なぞる速さは保存し、間隔は保存済みのまま",
+          (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING)) == ("0.2", seconds),
+          (db.get_setting(A.SCROLL_INTERVAL_SETTING), db.get_setting(A.SCROLL_SWIPE_SETTING)))
+    check(f"間隔「{typed}」のまま「{choice}」を選ぶ: 欄は保存済みの間隔に戻し、窓の警告は出さずにログで知らせる",
+          h.scroll_interval_entry.get() == "0.2" and warnings == []
+          and any(f"間隔「{typed}」は" in m for m in h.logs[-2:]) and f"なぞる速さ「{choice}」" in h.logs[-1],
+          (h.scroll_interval_entry.get(), warnings, h.logs[-2:]))
+h.scroll_swipe_menu.set("とても速い")
+h.on_scroll_swipe_selected("とても速い")
 db.save_setting(A.SCROLL_INTERVAL_SETTING, "壊れた値")
-check("保存した値が壊れていたら、今まで通りの速さ", A.load_scroll_settings(db) == (3.0, 0.5))
+check("保存した間隔が壊れていたら、今まで通りの間隔", A.load_scroll_settings(db) == (3.0, 0.05))
+# 前に「2秒かけてなぞる」（いちばん遅い。なぞる2秒のあいだ監視も止まる）を保存していた場合（2026-11-14 本人の設定）
+db.save_setting(A.SCROLL_INTERVAL_SETTING, "0.5")
+db.save_setting(A.SCROLL_SWIPE_SETTING, "2")
+check("前に保存した「2秒かけて」は使わず、今まで通りの速さ（0.2秒）でなぞる", A.load_scroll_settings(db) == (0.5, 0.2))
+# 画面は、読んだ秒をこれで名前にして出す（上の「最初は今まで通り」で、窓に出ることも確かめている）。
+# ⚠️ 窓をもう1つ作って確かめない（CustomTkinter は、閉じた窓の後で動く処理が「invalid command name」と出る）
+check("画面には「ふつう（今まで）」と出る", A.scroll_swipe_label(A.load_scroll_settings(db)[1]) == "ふつう（今まで）")
 
 print("■ 今日の「済み」の記録を消すボタン")
 check("ボタンがある", h.daily_task_forget_btn.cget("text") == "🔄 今日の「済み」の記録を消す")

@@ -389,6 +389,44 @@ check("⚠️ 別の人へのメンションが付いたら、貼らずに送ら
 d = PasteRoom()
 check("その人の発言が見えなければ、何もさわらない", w._send_with_mention(d, "こんばんは", "いない人") is None and d.calls == [])
 
+print("■ なぞった直後は、チャット欄が止まるまで待ってからアイコンを押す（2026-11-14 なぞる間隔を短くできるようにした）")
+# なぞった直後のチャット欄は、はずみでまだ動いている。動いているうちに測った位置を押すと、別の人のアイコンや発言を押してしまう
+clock = [100.0]
+real_monotonic, real_sleep = A.time.monotonic, A.time.sleep
+A.time.monotonic = lambda: clock[0]
+A.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+try:
+    # (なぞり終えてから何秒たったか, なぞる秒, 待つはずの秒, 名前)。速くなぞるほど、はずみが長く続く（2026-11-14 見直し）
+    for ago, swipe, settle, label in ((0.2, 0.2, 1.0, "0.2秒前になぞり終えた"), (5.0, 0.2, 1.0, "5秒前になぞり終えた"),
+                                      (0.2, 0.05, 2.2, "とても速い（0.05秒）で0.2秒前になぞり終えた"),
+                                      (0.2, 0.1, 1.3, "速い（0.1秒）で0.2秒前になぞり終えた")):
+        PC.update(kind=A.CLIPBOARD_TEXT, text="前の文", writes=[])
+        w = worker()
+        w.agent_note = notes.append
+        w.MENTION_PASTE_SYNC_WAIT = 0.6
+        w._scroll_swipe_seconds = swipe
+        d = PasteRoom()
+        tapped_at, read_at = [], []
+        plain_shell, plain_dump = d.shell, d.dump_hierarchy
+        d.shell = lambda command, plain=plain_shell, at=tapped_at: (
+            at.append(clock[0]) if "tap 49 646" in str(command) else None, plain(command))[1]
+        d.dump_hierarchy = lambda compressed=True, plain=plain_dump, at=read_at: (at.append(clock[0]), plain(compressed))[1]
+        start = clock[0]
+        w._last_swipe_at = start - ago
+        sent = w._send_with_mention(d, "こんばんは", "伏せ字3")
+        check(f"{label}: 送れる", sent is True and d.sent == ["@伏せ字3 こんばんは"], (sent, d.sent))
+        if ago < settle:
+            # ⚠️ 押す時刻だけでなく、アイコンの位置を測る（画面を読む）のも止まってから（2026-11-14 見直し）
+            check(f"{label}: なぞり終えてから{settle}秒たつまで、アイコンの位置を測らない（画面を読まない）",
+                  bool(read_at) and read_at[0] - (start - ago) >= settle - 1e-9, (start - ago, read_at[:2]))
+            check(f"{label}: なぞり終えてから{settle}秒たつまでアイコンを押さない",
+                  bool(tapped_at) and tapped_at[0] - (start - ago) >= settle - 1e-9, (start - ago, tapped_at))
+        else:
+            check(f"{label}: 止まっていれば待たずに測って押す",
+                  bool(tapped_at) and tapped_at[0] == start and read_at and read_at[0] == start, (start, read_at[:1], tapped_at))
+finally:
+    A.time.monotonic, A.time.sleep = real_monotonic, real_sleep
+
 print("■ クリップボードの読み上げは、監視がクリップボードを借りている間の文（AIの文）を読まない（2026-10-24）")
 
 
